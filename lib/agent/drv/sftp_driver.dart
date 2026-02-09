@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:ffi/ffi.dart';
 
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 import 'package:virtbackup/common/settings.dart';
@@ -25,6 +27,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
   final AppSettings _settings;
   final Directory _cacheRoot;
   final void Function(String message) _logInfo;
+  final _NativeSftpBindings? _nativeSftp = _NativeSftpBindings.tryLoad();
 
   static const int _writeConcurrency = 8;
   static const String _remoteAppFolderName = 'VirtBackup';
@@ -35,6 +38,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
   SftpPrefillStats get prefillStats => _prefillStats;
 
   final _SftpPool _pool = _SftpPool(maxSessions: _writeConcurrency);
+  final _NativeSftpPool _nativePool = _NativeSftpPool(maxSessions: _writeConcurrency);
   final Set<String> _knownRemoteShardKeys = <String>{};
   final Set<String> _remoteBlobNames = <String>{};
   final Map<String, int> _remoteBlobSizes = <String, int>{};
@@ -283,11 +287,15 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
           _knownRemoteShardKeys.add(shardKey);
         }
       }
-      final remoteFile = await sftp.open(remoteTemp, mode: SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate);
-      try {
-        await remoteFile.writeBytes(data);
-      } finally {
-        await remoteFile.close();
+      if (_nativeSftp != null) {
+        await _nativeWriteAll(remoteTemp, data, truncate: true);
+      } else {
+        final remoteFile = await sftp.open(remoteTemp, mode: SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate);
+        try {
+          await remoteFile.writeBytes(data);
+        } finally {
+          await remoteFile.close();
+        }
       }
       try {
         await sftp.rename(remoteTemp, remotePath);
@@ -368,10 +376,60 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
     if (hash.length < 4) {
       return;
     }
+    final remotePath = _remoteBlobPath(hash);
+    final bindings = _nativeSftp;
+    if (bindings != null) {
+      final stopwatch = Stopwatch()..start();
+      _logInfo('sftp: read blob stream start');
+      final lease = await _nativePool.lease(_connectNative);
+      Pointer<Void>? file;
+      Pointer<Uint8>? buffer;
+      try {
+        file = bindings.openRead(lease.session, remotePath);
+        if (file == nullptr) {
+          throw 'Native SFTP openRead failed: $remotePath';
+        }
+        const chunkSize = 256 * 1024;
+        buffer = calloc<Uint8>(chunkSize);
+        var offset = 0;
+        var remaining = length;
+        while (remaining == null || remaining > 0) {
+          final toRead = remaining == null ? chunkSize : remaining.clamp(0, chunkSize);
+          if (toRead == 0) {
+            break;
+          }
+          final read = bindings.read(file, offset, buffer, toRead);
+          if (read < 0) {
+            throw 'Native SFTP read failed: $remotePath';
+          }
+          if (read == 0) {
+            break;
+          }
+          yield Uint8List.fromList(buffer.asTypedList(read));
+          offset += read;
+          if (remaining != null) {
+            remaining -= read;
+          }
+        }
+      } finally {
+        if (file != null && file != nullptr) {
+          bindings.closeFile(file);
+        }
+        if (buffer != null) {
+          calloc.free(buffer);
+        }
+        lease.release();
+        _logInfo('sftp: read blob stream done durationMs=${stopwatch.elapsedMilliseconds}');
+      }
+      return;
+    }
+
+    final stopwatch = Stopwatch()..start();
+    _logInfo('sftp: read blob stream start');
     final lease = await _pool.lease(_connect);
     try {
       final sftp = lease.sftp;
-      final file = await sftp.open(_remoteBlobPath(hash), mode: SftpFileOpenMode.read);
+      final file = await sftp.open(remotePath, mode: SftpFileOpenMode.read);
       try {
         await for (final chunk in file.read(length: length)) {
           yield chunk;
@@ -381,6 +439,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
       }
     } finally {
       lease.release();
+      _logInfo('sftp: read blob stream done durationMs=${stopwatch.elapsedMilliseconds}');
     }
   }
 
@@ -389,8 +448,12 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
     if (hash.length < 4) {
       return null;
     }
+    final remotePath = _remoteBlobPath(hash);
+    if (_nativeSftp != null) {
+      return _withSftpLogOnly('read blob', () => _nativeReadAll(remotePath));
+    }
     return _withSftp('read blob', (sftp) async {
-      final file = await sftp.open(_remoteBlobPath(hash), mode: SftpFileOpenMode.read);
+      final file = await sftp.open(remotePath, mode: SftpFileOpenMode.read);
       try {
         return await file.readBytes();
       } finally {
@@ -668,6 +731,88 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
     return _SshSftpSession(socket: socket, client: client, sftp: sftp);
   }
 
+  Future<_NativeSftpSession> _connectNative() async {
+    final bindings = _nativeSftp;
+    if (bindings == null) {
+      throw 'Native SFTP is not available.';
+    }
+    final session = bindings.connect(_host, _port, _username, _password);
+    if (session == nullptr) {
+      throw 'Native SFTP connect failed.';
+    }
+    return _NativeSftpSession(bindings: bindings, session: session);
+  }
+
+  Future<void> _nativeWriteAll(String remotePath, Uint8List data, {required bool truncate}) async {
+    final bindings = _nativeSftp;
+    if (bindings == null) {
+      throw 'Native SFTP is not available.';
+    }
+    final lease = await _nativePool.lease(_connectNative);
+    Pointer<Void>? file;
+    Pointer<Uint8>? buffer;
+    try {
+      file = bindings.openWrite(lease.session, remotePath, truncate: truncate);
+      if (file == nullptr) {
+        throw 'Native SFTP openWrite failed: $remotePath';
+      }
+      buffer = calloc<Uint8>(data.length);
+      buffer.asTypedList(data.length).setAll(0, data);
+      final wrote = bindings.write(file, buffer, data.length);
+      if (wrote != data.length) {
+        throw 'Native SFTP write failed: wrote=$wrote expected=${data.length}';
+      }
+    } finally {
+      if (file != null && file != nullptr) {
+        bindings.closeFile(file);
+      }
+      if (buffer != null) {
+        calloc.free(buffer);
+      }
+      lease.release();
+    }
+  }
+
+  Future<List<int>> _nativeReadAll(String remotePath) async {
+    final bindings = _nativeSftp;
+    if (bindings == null) {
+      throw 'Native SFTP is not available.';
+    }
+    final lease = await _nativePool.lease(_connectNative);
+    Pointer<Void>? file;
+    Pointer<Uint8>? buffer;
+    try {
+      file = bindings.openRead(lease.session, remotePath);
+      if (file == nullptr) {
+        throw 'Native SFTP openRead failed: $remotePath';
+      }
+      const chunkSize = 256 * 1024;
+      buffer = calloc<Uint8>(chunkSize);
+      final out = BytesBuilder(copy: false);
+      var offset = 0;
+      while (true) {
+        final read = bindings.read(file, offset, buffer, chunkSize);
+        if (read < 0) {
+          throw 'Native SFTP read failed: $remotePath';
+        }
+        if (read == 0) {
+          break;
+        }
+        out.add(buffer.asTypedList(read));
+        offset += read;
+      }
+      return out.takeBytes();
+    } finally {
+      if (file != null && file != nullptr) {
+        bindings.closeFile(file);
+      }
+      if (buffer != null) {
+        calloc.free(buffer);
+      }
+      lease.release();
+    }
+  }
+
   Future<T> _withSftp<T>(String label, Future<T> Function(SftpClient sftp) action) async {
     final shouldLog = label != 'write blob';
     final stopwatch = Stopwatch()..start();
@@ -688,6 +833,19 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
       rethrow;
     } finally {
       lease.release();
+    }
+  }
+
+  Future<T> _withSftpLogOnly<T>(String label, Future<T> Function() action) async {
+    final stopwatch = Stopwatch()..start();
+    _logInfo('sftp: $label start');
+    try {
+      final result = await action();
+      _logInfo('sftp: $label done durationMs=${stopwatch.elapsedMilliseconds}');
+      return result;
+    } catch (error) {
+      _logInfo('sftp: $label failed durationMs=${stopwatch.elapsedMilliseconds} error=$error');
+      rethrow;
     }
   }
 
@@ -1116,6 +1274,163 @@ class _SftpPool {
     _idle.add(session);
   }
 }
+
+class _NativeSftpBindings {
+  _NativeSftpBindings(DynamicLibrary lib)
+    : _connect = lib.lookupFunction<_SftpConnectC, _SftpConnectDart>('vb_sftp_connect'),
+      _disconnect = lib.lookupFunction<_SftpDisconnectC, _SftpDisconnectDart>('vb_sftp_disconnect'),
+      _openRead = lib.lookupFunction<_SftpOpenReadC, _SftpOpenReadDart>('vb_sftp_open_read'),
+      _openWrite = lib.lookupFunction<_SftpOpenWriteC, _SftpOpenWriteDart>('vb_sftp_open_write'),
+      _read = lib.lookupFunction<_SftpReadC, _SftpReadDart>('vb_sftp_read'),
+      _write = lib.lookupFunction<_SftpWriteC, _SftpWriteDart>('vb_sftp_write'),
+      _closeFile = lib.lookupFunction<_SftpCloseFileC, _SftpCloseFileDart>('vb_sftp_close_file');
+
+  final _SftpConnectDart _connect;
+  final _SftpDisconnectDart _disconnect;
+  final _SftpOpenReadDart _openRead;
+  final _SftpOpenWriteDart _openWrite;
+  final _SftpReadDart _read;
+  final _SftpWriteDart _write;
+  final _SftpCloseFileDart _closeFile;
+
+  static _NativeSftpBindings? tryLoad() {
+    final candidates = <String>[];
+    try {
+      final exeDir = File(Platform.resolvedExecutable).parent.path;
+      candidates.add('$exeDir/native/linux/libvirtbackup_native.so');
+      candidates.add('$exeDir/native/macos/libvirtbackup_native.dylib');
+    } catch (_) {}
+
+    final cwd = Directory.current.path;
+    candidates.add('$cwd/native/linux/libvirtbackup_native.so');
+    candidates.add('$cwd/native/macos/libvirtbackup_native.dylib');
+
+    for (final path in candidates) {
+      if (!File(path).existsSync()) {
+        continue;
+      }
+      try {
+        return _NativeSftpBindings(DynamicLibrary.open(path));
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  Pointer<Void> connect(String host, int port, String user, String password) {
+    final hostPtr = host.toNativeUtf8();
+    final userPtr = user.toNativeUtf8();
+    final passPtr = password.toNativeUtf8();
+    final result = _connect(hostPtr, port, userPtr, passPtr);
+    calloc.free(hostPtr);
+    calloc.free(userPtr);
+    calloc.free(passPtr);
+    return result;
+  }
+
+  void disconnect(Pointer<Void> session) {
+    _disconnect(session);
+  }
+
+  Pointer<Void> openRead(Pointer<Void> session, String path) {
+    final pathPtr = path.toNativeUtf8();
+    final result = _openRead(session, pathPtr);
+    calloc.free(pathPtr);
+    return result;
+  }
+
+  Pointer<Void> openWrite(Pointer<Void> session, String path, {required bool truncate}) {
+    final pathPtr = path.toNativeUtf8();
+    final result = _openWrite(session, pathPtr, truncate ? 1 : 0);
+    calloc.free(pathPtr);
+    return result;
+  }
+
+  int read(Pointer<Void> file, int offset, Pointer<Uint8> buffer, int length) {
+    return _read(file, offset, buffer, length);
+  }
+
+  int write(Pointer<Void> file, Pointer<Uint8> buffer, int length) {
+    return _write(file, buffer, length);
+  }
+
+  void closeFile(Pointer<Void> file) {
+    _closeFile(file);
+  }
+}
+
+class _NativeSftpSession {
+  _NativeSftpSession({required this.bindings, required this.session});
+
+  final _NativeSftpBindings bindings;
+  final Pointer<Void> session;
+
+  void close() {
+    bindings.disconnect(session);
+  }
+}
+
+class _NativeSftpLease {
+  _NativeSftpLease(this._pool, this._session);
+
+  final _NativeSftpPool _pool;
+  final _NativeSftpSession _session;
+
+  Pointer<Void> get session => _session.session;
+
+  void release() {
+    _pool.release(_session);
+  }
+}
+
+class _NativeSftpPool {
+  _NativeSftpPool({required this.maxSessions});
+
+  final int maxSessions;
+  final List<_NativeSftpSession> _idle = <_NativeSftpSession>[];
+  final List<_NativeSftpSession> _all = <_NativeSftpSession>[];
+  final List<Completer<_NativeSftpLease>> _waiters = <Completer<_NativeSftpLease>>[];
+
+  Future<_NativeSftpLease> lease(Future<_NativeSftpSession> Function() connect) async {
+    if (_idle.isNotEmpty) {
+      final session = _idle.removeLast();
+      return _NativeSftpLease(this, session);
+    }
+    if (_all.length < maxSessions) {
+      final session = await connect();
+      _all.add(session);
+      return _NativeSftpLease(this, session);
+    }
+    final waiter = Completer<_NativeSftpLease>();
+    _waiters.add(waiter);
+    return waiter.future;
+  }
+
+  void release(_NativeSftpSession session) {
+    if (_waiters.isNotEmpty) {
+      final waiter = _waiters.removeAt(0);
+      if (!waiter.isCompleted) {
+        waiter.complete(_NativeSftpLease(this, session));
+        return;
+      }
+    }
+    _idle.add(session);
+  }
+}
+
+typedef _SftpConnectC = Pointer<Void> Function(Pointer<Utf8> host, Int32 port, Pointer<Utf8> user, Pointer<Utf8> password);
+typedef _SftpConnectDart = Pointer<Void> Function(Pointer<Utf8> host, int port, Pointer<Utf8> user, Pointer<Utf8> password);
+typedef _SftpDisconnectC = Void Function(Pointer<Void> session);
+typedef _SftpDisconnectDart = void Function(Pointer<Void> session);
+typedef _SftpOpenReadC = Pointer<Void> Function(Pointer<Void> session, Pointer<Utf8> path);
+typedef _SftpOpenReadDart = Pointer<Void> Function(Pointer<Void> session, Pointer<Utf8> path);
+typedef _SftpOpenWriteC = Pointer<Void> Function(Pointer<Void> session, Pointer<Utf8> path, Int32 truncate);
+typedef _SftpOpenWriteDart = Pointer<Void> Function(Pointer<Void> session, Pointer<Utf8> path, int truncate);
+typedef _SftpReadC = Int32 Function(Pointer<Void> file, Int64 offset, Pointer<Uint8> buffer, Int32 length);
+typedef _SftpReadDart = int Function(Pointer<Void> file, int offset, Pointer<Uint8> buffer, int length);
+typedef _SftpWriteC = Int32 Function(Pointer<Void> file, Pointer<Uint8> buffer, Int32 length);
+typedef _SftpWriteDart = int Function(Pointer<Void> file, Pointer<Uint8> buffer, int length);
+typedef _SftpCloseFileC = Void Function(Pointer<Void> file);
+typedef _SftpCloseFileDart = void Function(Pointer<Void> file);
 
 class _ServerVmLocation {
   const _ServerVmLocation({required this.serverId, required this.vmName});
