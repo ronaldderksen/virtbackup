@@ -378,7 +378,8 @@ class AgentHttpServer {
           _json(request, 400, {'success': false, 'error': 'Ntfy me token is not configured.'});
           return;
         }
-        final payload = <String, dynamic>{'topic': 'virtbackup-test', 'msg': 'Test notification from VirtBackup.'};
+        const message = 'Test notification from VirtBackup.';
+        final payload = <String, dynamic>{'topic': 'virtbackup-test', 'msg': message, 'push_msg': message};
         final result = await _postNtfymeNotification(token, payload);
         if (result.ok) {
           _json(request, 200, {'success': true, 'message': 'Test notification delivered.', 'statusCode': result.statusCode});
@@ -1589,7 +1590,8 @@ class AgentHttpServer {
     final control = _jobControls[jobId];
     final duration = control?.startedAt == null ? null : DateTime.now().difference(control!.startedAt).inSeconds;
     final status = state == AgentJobState.success ? 'success' : 'failed';
-    final payload = <String, dynamic>{'topic': _ntfymeTopic, 'msg': _buildNtfymeMessage(type, status, control?.source, control?.target), 'type': type.name, 'status': status};
+    final message = _buildNtfymeMessage(type, status, control?.source, control?.target);
+    final payload = <String, dynamic>{'topic': _ntfymeTopic, 'msg': message, 'push_msg': message, 'type': type.name, 'status': status};
     if (duration != null) {
       payload['duration_sec'] = duration;
     }

@@ -54,18 +54,36 @@ class GoogleOAuthClientLocator {
 
   final File? overrideFile;
 
+  Directory _executableDir() {
+    try {
+      final exe = Platform.resolvedExecutable;
+      if (exe.isEmpty) {
+        return Directory.current;
+      }
+      return File(exe).parent;
+    } catch (_) {
+      return Directory.current;
+    }
+  }
+
+  File _etcClientFile() {
+    final sep = Platform.pathSeparator;
+    final base = _executableDir().path;
+    return File('$base${sep}etc${sep}google_oauth_client.json');
+  }
+
+  File _cwdEtcClientFile() {
+    final sep = Platform.pathSeparator;
+    return File('${Directory.current.path}${sep}etc${sep}google_oauth_client.json');
+  }
+
   List<File> candidateFiles({Directory? settingsDir}) {
     final candidates = <File>[];
     if (overrideFile != null) {
       candidates.add(overrideFile!);
     }
-    if (settingsDir != null) {
-      candidates.add(File('${settingsDir.path}${Platform.pathSeparator}google_oauth_client.json'));
-      candidates.add(File('${settingsDir.path}${Platform.pathSeparator}google_oauth_client.json'.replaceAll('/', Platform.pathSeparator)));
-    }
-    candidates.add(File('assets${Platform.pathSeparator}google_oauth_client.json')); // local dev override (gitignored)
-    candidates.add(File('assets/google_oauth_client.json')); // local dev override (gitignored)
-    candidates.add(File('google_oauth_client.json'));
+    candidates.add(_etcClientFile());
+    candidates.add(_cwdEtcClientFile());
     return candidates;
   }
 
@@ -80,9 +98,8 @@ class GoogleOAuthClientLocator {
       }
       return config;
     }
-    final hint = settingsDir == null
-        ? 'Expected google_oauth_client.json or assets/google_oauth_client.json (local dev override).'
-        : 'Expected ${settingsDir.path}${Platform.pathSeparator}google_oauth_client.json or assets/google_oauth_client.json (local dev override).';
-    throw 'Google OAuth client config not found. $hint';
+    final expectedExePath = _etcClientFile().path;
+    final expectedCwdPath = _cwdEtcClientFile().path;
+    throw 'Google OAuth client config not found. Expected $expectedExePath or $expectedCwdPath.';
   }
 }

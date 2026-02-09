@@ -46,7 +46,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
   final Map<String, _DriveFileRef> _blobFiles = {};
   final Set<String> _blobNames = {};
   bool _blobCachePrefilled = false;
-  final http.Client _client = IOClient(_createHttpClient());
+  http.Client _client = IOClient(_createHttpClient());
   final List<http.Client> _uploadClients = List<http.Client>.generate(_uploadConcurrency, (_) => IOClient(_createHttpClient()));
   int _uploadClientIndex = 0;
   int _inFlightUploads = 0;
@@ -286,13 +286,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
   Future<bool> blobExists(String hash) async {
     if (hash.length < 4) {
       return false;
-    }
-    final cacheFile = File(_blobCachePath(hash));
-    if (await cacheFile.exists()) {
-      if (_cacheBlobsEnabled) {
-        _blobNames.add(hash);
-      }
-      return true;
     }
     if (_cacheBlobsEnabled) {
       if (_blobNames.contains(hash)) {
@@ -1030,7 +1023,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
             throw _DriveHttpException('Drive upload session failed', response.statusCode, response.body);
           }
           return response;
-        });
+        }, onRetry: () => _resetUploadClient(lease.index));
       }
 
       Future<http.Response> uploadData(Uri sessionUri, String token) {
@@ -1043,7 +1036,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
             throw _DriveHttpException('Drive upload failed', response.statusCode, response.body);
           }
           return response;
-        });
+        }, onRetry: () => _resetUploadClient(lease.index));
       }
 
       var token = await _ensureAccessToken();
@@ -1300,20 +1293,30 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
     }
   }
 
-  Future<T> _withRetry<T>(String label, Future<T> Function() action) async {
-    try {
-      return await action();
-    } catch (error, stackTrace) {
-      _logInfo('gdrive: $label failed: $error');
-      _logInfo(stackTrace.toString());
-      _logInfo('gdrive: $label retrying after error: $error');
-      await Future.delayed(const Duration(seconds: 1));
+  Future<T> _withRetry<T>(String label, Future<T> Function() action, {void Function()? onRetry}) async {
+    var delaySeconds = 2;
+    var attempt = 0;
+    const maxRetries = 5;
+    while (true) {
       try {
         return await action();
-      } catch (secondError, secondStack) {
-        _logInfo('gdrive: $label failed after retry: $secondError');
-        _logInfo(secondStack.toString());
-        throw 'gdrive $label failed after retry: $secondError';
+      } catch (error, stackTrace) {
+        if (attempt >= maxRetries) {
+          _logInfo('gdrive: $label failed after retry: $error');
+          _logInfo(stackTrace.toString());
+          throw 'gdrive $label failed after retry: $error';
+        }
+        attempt += 1;
+        _logInfo('gdrive: $label failed: $error');
+        _logInfo(stackTrace.toString());
+        _logInfo('gdrive: $label retrying after error: $error');
+        if (onRetry != null) {
+          onRetry();
+        } else {
+          _resetHttpClient();
+        }
+        await Future.delayed(Duration(seconds: delaySeconds));
+        delaySeconds *= 2;
       }
     }
   }
@@ -1322,6 +1325,11 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
     final client = HttpClient();
     client.connectionTimeout = const Duration(seconds: 10);
     return client;
+  }
+
+  void _resetHttpClient() {
+    _client.close();
+    _client = IOClient(_createHttpClient());
   }
 
   static String _tempBase() {

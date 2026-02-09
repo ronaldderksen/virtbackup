@@ -262,8 +262,8 @@ The agent supports optional native SFTP via FFI:
 - Set `ntfymeToken` in agent settings to enable notifications; when empty, notifications are skipped.
 - The GUI can store multiple agent addresses and switch between them.
 - For `127.0.0.1`, the GUI always uses the local `agent.token` file; other agents require a token entered in the GUI (token is mandatory).
-- Google Drive OAuth client ID is embedded in the app; the flow is designed for a public "installed app" client (no secret required).
+- Google Drive OAuth client config is loaded from `etc/google_oauth_client.json` next to the executable or from `etc/google_oauth_client.json` under the current working directory (installed app client; the agent requires `client_secret` for the Drive driver).
 - Google Drive OAuth refresh/access tokens are stored in `agent.yaml` as encrypted values (`gdriveAccessTokenEnc`, `gdriveRefreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.
 - The Google Drive storage driver (`driverId: gdrive`) stores data as individual blob files using the same directory layout as the filesystem driver.
-- All Google Drive API calls retry once after a 1 second delay; a second failure aborts the backup with a clean error.
+- All Google Drive API calls retry up to 5 times with exponential backoff starting at 2 seconds; each retry recreates the HTTP client connection, and a persistent failure aborts the backup with a clean error.
 - The Google Drive root folder is configured via `gdriveRootPath` (default `/`), and the app creates a `VirtBackup` folder inside that path.

@@ -42,6 +42,10 @@ cp "$AGENT_OUT" "$STAGE_DIR/virtbackup-agent"
 if [ -d "$ROOT_DIR/package/macos" ]; then
   cp -r "$ROOT_DIR/package/macos/." "$STAGE_DIR/"
 fi
+if [ -d "$ROOT_DIR/etc" ]; then
+  mkdir -p "$STAGE_DIR/etc"
+  cp -r "$ROOT_DIR/etc/." "$STAGE_DIR/etc/"
+fi
 
 if [ -x "$ROOT_DIR/hashblocks/hashblocks" ]; then
   cp "$ROOT_DIR/hashblocks/hashblocks" "$STAGE_DIR/hashblocks"
@@ -58,6 +62,10 @@ if [ -f "$ROOT_DIR/native/macos/libvirtbackup_native.dylib" ]; then
   cp "$ROOT_DIR/native/macos/libvirtbackup_native.dylib" "$NATIVE_DIR/libvirtbackup_native.dylib"
 else
   echo "native lib not found at $ROOT_DIR/native/macos/libvirtbackup_native.dylib (skipping)" >&2
+fi
+
+if [ -d "$STAGE_DIR/assets" ]; then
+  rm -rf "$STAGE_DIR/assets"
 fi
 
 mkdir -p "$OUT_DIR"

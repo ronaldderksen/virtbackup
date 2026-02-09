@@ -40,6 +40,10 @@ cp -r "$BUNDLE_DIR/"* "$STAGE_DIR/"
 build_agent "$AGENT_OUT"
 cp "$AGENT_OUT" "$STAGE_DIR/virtbackup-agent"
 cp -r "$ROOT_DIR/package/linux/." "$STAGE_DIR/"
+if [ -d "$ROOT_DIR/etc" ]; then
+  mkdir -p "$STAGE_DIR/etc"
+  cp -r "$ROOT_DIR/etc/." "$STAGE_DIR/etc/"
+fi
 
 make -C "$ROOT_DIR/hashblocks" clean
 make -C "$ROOT_DIR/hashblocks"
@@ -58,6 +62,10 @@ if [ -f "$ROOT_DIR/native/linux/libvirtbackup_native.so" ]; then
   cp "$ROOT_DIR/native/linux/libvirtbackup_native.so" "$NATIVE_DIR/libvirtbackup_native.so"
 else
   echo "native lib not found at $ROOT_DIR/native/linux/libvirtbackup_native.so (skipping)" >&2
+fi
+
+if [ -d "$STAGE_DIR/assets" ]; then
+  rm -rf "$STAGE_DIR/assets"
 fi
 
 mkdir -p "$OUT_DIR"

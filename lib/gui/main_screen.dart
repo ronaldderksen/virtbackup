@@ -14,6 +14,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:virtbackup/agent/settings_store.dart';
 import 'package:virtbackup/common/models.dart';
+import 'package:virtbackup/common/google_oauth_client.dart';
 import 'package:virtbackup/common/settings.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:virtbackup/gui/agent_api_client.dart';
@@ -70,7 +71,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   static const EdgeInsets _contentPadding = EdgeInsets.only(left: 24, right: 24, bottom: 32);
   static const double _contentTitleSpacing = 8;
   static const double _contentSectionSpacing = 32;
-  static const String _gdriveClientAssetPath = 'assets/google_oauth_client.json';
   static const String _gdriveScopeFile = 'https://www.googleapis.com/auth/drive.file';
   static const String _gdriveScopeFull = 'https://www.googleapis.com/auth/drive';
   final GlobalKey<FormState> _connectionFormKey = GlobalKey<FormState>();
@@ -212,22 +212,13 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
 
   Future<void> _loadGdriveClientConfig() async {
     try {
-      final raw = await rootBundle.loadString(_gdriveClientAssetPath);
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) {
-        return;
+      final locator = GoogleOAuthClientLocator();
+      final config = await locator.load(requireSecret: false);
+      if (config.clientId.trim().isNotEmpty) {
+        _gdriveClientId = config.clientId.trim();
       }
-      final installed = decoded['installed'];
-      if (installed is! Map) {
-        return;
-      }
-      final clientId = installed['client_id']?.toString() ?? '';
-      final clientSecret = installed['client_secret']?.toString() ?? '';
-      if (clientId.isNotEmpty) {
-        _gdriveClientId = clientId;
-      }
-      if (clientSecret.isNotEmpty) {
-        _gdriveClientSecret = clientSecret;
+      if (config.clientSecret.trim().isNotEmpty) {
+        _gdriveClientSecret = config.clientSecret.trim();
       }
     } catch (_) {}
   }

@@ -1,32 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VM=win10
-VM=rocky10
-
-EXTRA_PARAMS=(
-  --fresh
-  #--no-restore
-  #--driver filesystem
-  #--driver dummy
-  #--driver gdrive
-  #--fresh
-)
-
 LOG_FILE="/var/tmp/loop.log"
 exec > >(tee "$LOG_FILE") 2>&1
 
-count=0
+VMS=(
+  #rocky10
+  win10
+)
 
-for count in {1..2}; do
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] loop=$count starting..."
+DRIVERS=(
+  gdrive
+  #filesystem
+  #dummy
+)
 
-  for driver in filesystem gdrive; do
-    echo "+ dart run tools/backup_verify.dart --vm ${VM} --driver ${driver} ${EXTRA_PARAMS[@]}"
-    dart run tools/backup_verify.dart --vm ${VM} --driver ${driver} ${EXTRA_PARAMS[@]}
+for vm in ${VMS[@]}; do
+  for driver in ${DRIVERS[@]}; do
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] vm=${vm} driver=${driver}"
+    [ "${driver}" = dummy ] && EXTRA_PARAMS=( --no-restore ) || EXTRA_PARAMS=()
+    dart run tools/backup_verify.dart --vm ${vm} --driver ${driver} ${EXTRA_PARAMS[@]}
   done
-
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] loop=$count ok, restarting..."
-  sleep 2
-  [ "$count" = 2 ] && break
 done

@@ -33,8 +33,7 @@
 /coverage/
 
 # Local OAuth config (do not commit secrets)
-assets/google_oauth_client.json
-google_oauth_client.json
+etc/google_oauth_client.json
 
 # Symbolication related
 app.*.symbols
