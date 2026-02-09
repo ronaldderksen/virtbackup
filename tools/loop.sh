@@ -5,13 +5,14 @@ LOG_FILE="/var/tmp/loop.log"
 exec > >(tee "$LOG_FILE") 2>&1
 
 VMS=(
-  rocky10
-  #win10
+  #rocky10
+  win10
 )
 
 DRIVERS=(
-  gdrive
+  sftp
   filesystem
+  gdrive
   dummy
 )
 
