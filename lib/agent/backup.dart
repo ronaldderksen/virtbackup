@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 import 'package:virtbackup/agent/drv/gdrive_driver.dart';
+import 'package:virtbackup/agent/drv/sftp_driver.dart';
 import 'package:virtbackup/agent/logging_config.dart';
 import 'package:virtbackup/common/models.dart';
 
@@ -171,6 +172,7 @@ class BackupAgent {
       final serverFolderName = _dependencies.sanitizeFileName(server.id);
       await driver.ensureReady();
       GdriveBackupDriver? gdrive;
+      SftpBackupDriver? sftp;
       if (driver is GdriveBackupDriver) {
         gdrive = driver;
         gdrive.onPrefillProgress = (stats, done) {
@@ -181,10 +183,18 @@ class BackupAgent {
           _setProgress(_progress.copyWith(statusMessage: statusMessage));
         };
       }
+      if (driver is SftpBackupDriver) {
+        sftp = driver;
+        sftp.onPrefillProgress = (stats, done) {
+          final statusMessage = stats.blobCount > 0 ? 'Preparing backup... found ${stats.blobCount} blobs' : 'Preparing backup... found ${stats.shard2Count} blob dirs';
+          _setProgress(_progress.copyWith(statusMessage: statusMessage));
+        };
+      }
       try {
         await driver.prepareBackup(serverFolderName, vmFolderName);
       } finally {
         gdrive?.onPrefillProgress = null;
+        sftp?.onPrefillProgress = null;
       }
       _startDirCreateWorker(driver);
       final manifestsBase = driver.manifestsDir(serverFolderName, vmFolderName);

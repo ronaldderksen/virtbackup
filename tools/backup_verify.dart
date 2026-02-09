@@ -583,11 +583,23 @@ Future<Map<String, dynamic>> _fetchConfig(http.Client client, _Args args) async 
 }
 
 String _extractBackupPath(Map<String, dynamic> payload) {
-  final backupPath = payload['backupPath']?.toString();
-  if (backupPath == null || backupPath.isEmpty) {
-    throw StateError('Config missing backupPath');
+  final legacy = payload['backupPath']?.toString().trim();
+  if (legacy != null && legacy.isNotEmpty) {
+    return legacy;
   }
-  return backupPath;
+
+  final backup = payload['backup'];
+  if (backup is Map) {
+    final filesystem = backup['filesystem'];
+    if (filesystem is Map) {
+      final path = filesystem['path']?.toString().trim();
+      if (path != null && path.isNotEmpty) {
+        return path;
+      }
+    }
+  }
+
+  throw StateError('Config missing backup path (expected backup.filesystem.path or legacy backupPath).');
 }
 
 String _resolveServerId(Map<String, dynamic> payload, String value) {

@@ -122,6 +122,28 @@ class AgentApiClient {
     return NtfymeTestResult(success: false, message: 'Agent responded ${response.statusCode}');
   }
 
+  Future<SftpTestResult> testSftpConnection({required String host, required int port, required String username, required String password, required String basePath}) async {
+    final response = await _post('/sftp/test', {'host': host, 'port': port, 'username': username, 'password': password, 'basePath': basePath});
+    if (response.statusCode == 200) {
+      try {
+        final decoded = jsonDecode(response.body);
+        if (decoded is Map) {
+          final message = decoded['message']?.toString() ?? 'SFTP test completed.';
+          return SftpTestResult(success: decoded['success'] == true, message: message);
+        }
+      } catch (_) {}
+      return const SftpTestResult(success: true, message: 'SFTP test completed.');
+    }
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map) {
+        final message = decoded['error']?.toString() ?? 'Agent responded ${response.statusCode}';
+        return SftpTestResult(success: false, message: message);
+      }
+    } catch (_) {}
+    return SftpTestResult(success: false, message: 'Agent responded ${response.statusCode}');
+  }
+
   Future<List<VmStatus>> fetchVmStatus(String serverId) async {
     final response = await _get('/servers/$serverId/vms');
     if (response.statusCode != 200) {
@@ -383,6 +405,13 @@ class AgentEvent {
 
 class NtfymeTestResult {
   const NtfymeTestResult({required this.success, required this.message});
+
+  final bool success;
+  final String message;
+}
+
+class SftpTestResult {
+  const SftpTestResult({required this.success, required this.message});
 
   final bool success;
   final String message;

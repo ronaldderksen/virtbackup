@@ -8,6 +8,7 @@ import 'package:virtbackup/agent/drv/backup_storage.dart';
 import 'package:virtbackup/agent/drv/dummy_driver.dart';
 import 'package:virtbackup/agent/drv/filesystem_driver.dart';
 import 'package:virtbackup/agent/drv/gdrive_driver.dart';
+import 'package:virtbackup/agent/drv/sftp_driver.dart';
 import 'package:virtbackup/common/models.dart';
 import 'package:virtbackup/common/settings.dart';
 
@@ -117,6 +118,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           logInfo: (message) => mainPort.send({'type': _typeLog, 'level': 'info', 'message': message}),
         ),
         'filesystem': () => FilesystemBackupDriver(backupPath.trim()),
+        'sftp': () => SftpBackupDriver(settings: settings, logInfo: (message) => mainPort.send({'type': _typeLog, 'level': 'info', 'message': message})),
       };
       final factory = factories[driverId] ?? factories['filesystem']!;
       return factory();

@@ -85,8 +85,10 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
     if (existing != null) {
       return existing;
     }
-    final locator = GoogleOAuthClientLocator();
-    final loaded = await locator.load(settingsDir: _settingsDir, requireSecret: true);
+    final sep = Platform.pathSeparator;
+    final overrideFile = _settingsDir == null ? null : File('${_settingsDir.path}${sep}etc${sep}google_oauth_client.json');
+    final locator = GoogleOAuthClientLocator(overrideFile: overrideFile);
+    final loaded = await locator.load(requireSecret: true);
     _oauthClient = loaded;
     return loaded;
   }

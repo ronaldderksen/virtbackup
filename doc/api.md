@@ -62,17 +62,28 @@ Response: array of available storage drivers and their capabilities/params.
 Response:
 ```json
 {
-  "backupPath":"/path/to/backups",
-  "backupDriverId":"filesystem",
+  "backup":{
+    "driverId":"filesystem",
+    "filesystem":{"path":"/path/to/backups"},
+    "gdrive":{
+      "scope":"https://www.googleapis.com/auth/drive.file",
+      "rootPath":"/",
+      "accessToken":"",
+      "refreshToken":"",
+      "accountEmail":"",
+      "expiresAt":"2026-02-06T12:00:00Z"
+    },
+    "sftp":{
+      "host":"my-sftp.example.com",
+      "port":22,
+      "username":"backup",
+      "password":"",
+      "basePath":"/Backup"
+    }
+  },
   "hashblocksLimitBufferMb":1024,
   "dummyDriverTmpWrites":false,
   "ntfymeToken":"",
-  "gdriveScope":"https://www.googleapis.com/auth/drive.file",
-  "gdriveRootPath":"/",
-  "gdriveAccessToken":"",
-  "gdriveRefreshToken":"",
-  "gdriveAccountEmail":"",
-  "gdriveExpiresAt":"2026-02-06T12:00:00Z",
   "connectionVerified":false,
   "selectedServerId":"server-id",
   "listenAll":false,
@@ -89,6 +100,25 @@ Body: same shape as `GET /config`.
 Response:
 ```json
 {"success":true}
+```
+
+## SFTP
+
+### Test connection
+
+- `POST /sftp/test`
+
+Notes:
+- The agent will create and use a `VirtBackup` folder inside `basePath`.
+
+Body:
+```json
+{"host":"my-sftp.example.com","port":22,"username":"backup","password":"...","basePath":"/Backup"}
+```
+
+Response:
+```json
+{"success":true,"message":"SFTP connection successful (read/write OK)."}
 ```
 
 ## Events (SSE)
@@ -358,4 +388,3 @@ Response:
 ```json
 {"jobId":"<job-id>"}
 ```
-

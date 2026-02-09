@@ -238,8 +238,78 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                   onChanged: _backupDrivers.isEmpty ? null : _setBackupDriverId,
                   decoration: const InputDecoration(labelText: 'Backup driver', prefixIcon: Icon(Icons.storage_outlined), border: OutlineInputBorder()),
                 ),
-                if (_selectedDriverUsesPath()) ...[
+                if (_backupDriverId == 'sftp') ...[
                   const SizedBox(height: 16),
+                  Divider(color: colorScheme.outline.withValues(alpha: 0.2), height: 24),
+                  const SizedBox(height: 8),
+                  Text('SFTP', style: Theme.of(context).textTheme.titleSmall),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: _sftpHostController,
+                    decoration: const InputDecoration(labelText: 'SFTP host', prefixIcon: Icon(Icons.storage_outlined), border: OutlineInputBorder()),
+                    textInputAction: TextInputAction.next,
+                    validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a host' : null,
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: _sftpPortController,
+                    decoration: const InputDecoration(labelText: 'SFTP port', prefixIcon: Icon(Icons.numbers_outlined), border: OutlineInputBorder()),
+                    keyboardType: const TextInputType.numberWithOptions(decimal: false, signed: false),
+                    textInputAction: TextInputAction.next,
+                    validator: (value) {
+                      final trimmed = value?.trim() ?? '';
+                      if (trimmed.isEmpty) {
+                        return 'Enter a port';
+                      }
+                      final parsed = int.tryParse(trimmed);
+                      if (parsed == null || parsed <= 0 || parsed > 65535) {
+                        return 'Enter a valid port';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: _sftpUserController,
+                    decoration: const InputDecoration(labelText: 'SFTP username', prefixIcon: Icon(Icons.person_outline), border: OutlineInputBorder()),
+                    textInputAction: TextInputAction.next,
+                    validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a username' : null,
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: _sftpPasswordController,
+                    decoration: const InputDecoration(labelText: 'SFTP password', prefixIcon: Icon(Icons.lock_outline_rounded), border: OutlineInputBorder()),
+                    obscureText: true,
+                    textInputAction: TextInputAction.next,
+                    validator: (value) => (value == null || value.isEmpty) ? 'Enter a password' : null,
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: _sftpBasePathController,
+                    decoration: const InputDecoration(
+                      labelText: 'SFTP base path',
+                      helperText: 'VirtBackup will create a "VirtBackup" folder inside this path. Example: /Backup',
+                      prefixIcon: Icon(Icons.folder_outlined),
+                      border: OutlineInputBorder(),
+                    ),
+                    textInputAction: TextInputAction.done,
+                    validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a base path' : null,
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      FilledButton.icon(
+                        onPressed: _isTestingSftp ? null : _testSftpConnection,
+                        icon: const Icon(Icons.wifi_tethering_outlined),
+                        label: Text(_isTestingSftp ? 'Testing...' : 'Test SFTP'),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(child: Text('Tests login and write access to the base path.', style: Theme.of(context).textTheme.bodySmall)),
+                    ],
+                  ),
+                ],
+                const SizedBox(height: 16),
+                if (_selectedDriverUsesPath()) ...[
                   TextFormField(
                     controller: _backupPathController,
                     decoration: InputDecoration(
@@ -268,9 +338,6 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                       return null;
                     },
                   ),
-                ] else ...[
-                  const SizedBox(height: 16),
-                  Text('This driver does not require a backup path.', style: Theme.of(context).textTheme.bodyMedium),
                 ],
                 if (_backupDriverId == 'gdrive') ...[
                   const SizedBox(height: 16),

@@ -2,9 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:basic_utils/basic_utils.dart';
 import 'package:crypto/crypto.dart';
+import 'package:dartssh2/dartssh2.dart';
 import 'package:virtbackup/agent/backup.dart';
 import 'package:virtbackup/agent/backup_host.dart';
 import 'package:virtbackup/agent/backup_worker.dart';
@@ -13,6 +15,7 @@ import 'package:virtbackup/agent/drv/backup_storage.dart' as drv;
 import 'package:virtbackup/agent/drv/dummy_driver.dart';
 import 'package:virtbackup/agent/drv/filesystem_driver.dart';
 import 'package:virtbackup/agent/drv/gdrive_driver.dart';
+import 'package:virtbackup/agent/drv/sftp_driver.dart';
 import 'package:virtbackup/common/models.dart';
 import 'package:virtbackup/common/settings.dart';
 import 'package:virtbackup/agent/settings_store.dart';
@@ -385,6 +388,28 @@ class AgentHttpServer {
           _json(request, 200, {'success': true, 'message': 'Test notification delivered.', 'statusCode': result.statusCode});
         } else {
           _json(request, 502, {'success': false, 'error': result.error ?? 'Ntfy me request failed.', 'statusCode': result.statusCode, 'body': result.body});
+        }
+        return;
+      }
+      if (request.method == 'POST' && path == '/sftp/test') {
+        final body = await _readJson(request);
+        final host = (body['host'] ?? _agentSettings.sftpHost).toString().trim();
+        final portValue = body['port'];
+        final port = (portValue is num ? portValue.toInt() : int.tryParse((portValue ?? '').toString())) ?? _agentSettings.sftpPort;
+        final username = (body['username'] ?? _agentSettings.sftpUsername).toString().trim();
+        final password = (body['password'] ?? _agentSettings.sftpPassword).toString();
+        final basePath = (body['basePath'] ?? _agentSettings.sftpBasePath).toString().trim();
+
+        if (host.isEmpty || username.isEmpty || password.isEmpty || basePath.isEmpty) {
+          _json(request, 400, {'success': false, 'error': 'Missing SFTP settings (host/username/password/basePath).'});
+          return;
+        }
+        final effectivePort = port <= 0 ? 22 : port;
+        try {
+          final message = await _testSftpConnection(host: host, port: effectivePort, username: username, password: password, basePath: basePath);
+          _json(request, 200, {'success': true, 'message': message});
+        } catch (error) {
+          _json(request, 200, {'success': false, 'message': error.toString()});
         }
         return;
       }
@@ -911,6 +936,111 @@ class AgentHttpServer {
     return false;
   }
 
+  static const String _sftpRemoteAppFolderName = 'VirtBackup';
+
+  Future<String> _testSftpConnection({required String host, required int port, required String username, required String password, required String basePath}) async {
+    final socket = await SSHSocket.connect(host, port, timeout: const Duration(seconds: 10));
+    final client = SSHClient(socket, username: username, onPasswordRequest: () => password);
+    final sftp = await client.sftp();
+    try {
+      final normalizedBase = _normalizeRemotePath(basePath);
+      if (normalizedBase.isEmpty) {
+        throw 'SFTP base path is empty.';
+      }
+      await _ensureRemoteDir(sftp, normalizedBase);
+      final baseAttrs = await sftp.stat(normalizedBase);
+      if (!baseAttrs.isDirectory) {
+        throw 'SFTP base path is not a directory: $normalizedBase';
+      }
+
+      final normalized = _remoteJoin(normalizedBase, _sftpRemoteAppFolderName);
+      await _ensureRemoteDir(sftp, normalized);
+      final attrs = await sftp.stat(normalized);
+      if (!attrs.isDirectory) {
+        throw 'SFTP VirtBackup folder is not a directory: $normalized';
+      }
+
+      final testFile = _remoteJoin(normalized, '.virtbackup_test_${DateTime.now().microsecondsSinceEpoch}');
+      final file = await sftp.open(testFile, mode: SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate);
+      try {
+        await file.writeBytes(Uint8List.fromList(utf8.encode('virtbackup sftp test\n')));
+      } finally {
+        await file.close();
+      }
+      try {
+        await sftp.remove(testFile);
+      } catch (_) {}
+      return 'SFTP connection successful (read/write OK).';
+    } finally {
+      try {
+        sftp.close();
+      } catch (_) {}
+      try {
+        client.close();
+      } catch (_) {}
+      try {
+        socket.close();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _ensureRemoteDir(SftpClient sftp, String remotePath) async {
+    final normalized = _normalizeRemotePath(remotePath);
+    if (normalized == '/' || normalized.isEmpty) {
+      return;
+    }
+    final parts = normalized.split('/').where((part) => part.trim().isNotEmpty).toList();
+    var current = normalized.startsWith('/') ? '/' : '';
+    for (final part in parts) {
+      current = current.isEmpty || current == '/' ? '$current$part' : '$current/$part';
+      try {
+        await sftp.mkdir(current);
+      } catch (_) {
+        try {
+          final attrs = await sftp.stat(current);
+          if (attrs.isDirectory) {
+            continue;
+          }
+        } catch (_) {}
+        rethrow;
+      }
+    }
+  }
+
+  String _normalizeRemotePath(String path) {
+    final trimmed = path.trim();
+    if (trimmed.isEmpty) {
+      return '';
+    }
+    var value = trimmed.replaceAll('\\', '/');
+    while (value.contains('//')) {
+      value = value.replaceAll('//', '/');
+    }
+    if (value.length > 1 && value.endsWith('/')) {
+      value = value.substring(0, value.length - 1);
+    }
+    return value;
+  }
+
+  String _remoteJoin(String a, [String? b, String? c, String? d, String? e]) {
+    final parts = <String>[];
+    void add(String? value) {
+      if (value == null) return;
+      final trimmed = value.trim();
+      if (trimmed.isEmpty) return;
+      parts.add(trimmed);
+    }
+
+    add(a);
+    add(b);
+    add(c);
+    add(d);
+    add(e);
+
+    final raw = parts.join('/');
+    return _normalizeRemotePath(raw.startsWith('/') ? '/$raw' : raw);
+  }
+
   void _json(HttpRequest request, int status, Object body) {
     request.response.statusCode = status;
     request.response.headers.contentType = ContentType.json;
@@ -945,6 +1075,7 @@ class AgentHttpServer {
       settingsDir: _agentSettingsStore.file.parent,
       logInfo: _hostLog,
     );
+    final sftp = SftpBackupDriver(settings: _agentSettings, logInfo: _hostLog);
 
     return {
       'filesystem': _DriverDescriptor(
@@ -975,6 +1106,23 @@ class AgentHttpServer {
           settingsDir: _agentSettingsStore.file.parent,
           logInfo: _hostLog,
         ),
+      ),
+      'sftp': _DriverDescriptor(
+        id: 'sftp',
+        label: 'SFTP',
+        usesPath: false,
+        capabilities: sftp.capabilities,
+        validateStart: () {
+          final host = _agentSettings.sftpHost.trim();
+          final user = _agentSettings.sftpUsername.trim();
+          final password = _agentSettings.sftpPassword;
+          final basePath = _agentSettings.sftpBasePath.trim();
+          if (host.isEmpty || user.isEmpty || password.isEmpty || basePath.isEmpty) {
+            return 'sftp is not configured';
+          }
+          return null;
+        },
+        create: (_) => SftpBackupDriver(settings: _agentSettings, logInfo: _hostLog),
       ),
     };
   }

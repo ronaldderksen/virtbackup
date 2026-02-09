@@ -211,6 +211,7 @@ Three drivers are present:
 
 - `FilesystemBackupDriver`: stores manifests and blobs on disk.
 - `GdriveBackupDriver`: stores manifests and blobs in Google Drive (with a local cache).
+- `SftpBackupDriver`: stores manifests and blobs on an SFTP server (configured via `backup.sftp` in `agent.yaml`).
 - `DummyBackupDriver`: discards writes and simulates ~20 MB/s write throughput (useful for testing backpressure).
 
 Both implement the same `BackupDriver` interface.
@@ -263,7 +264,9 @@ The agent supports optional native SFTP via FFI:
 - The GUI can store multiple agent addresses and switch between them.
 - For `127.0.0.1`, the GUI always uses the local `agent.token` file; other agents require a token entered in the GUI (token is mandatory).
 - Google Drive OAuth client config is loaded from `etc/google_oauth_client.json` next to the executable or from `etc/google_oauth_client.json` under the current working directory (installed app client; the agent requires `client_secret` for the Drive driver).
-- Google Drive OAuth refresh/access tokens are stored in `agent.yaml` as encrypted values (`gdriveAccessTokenEnc`, `gdriveRefreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.
+- Google Drive OAuth refresh/access tokens are stored in `agent.yaml` as encrypted values under `backup.gdrive` (`accessTokenEnc`, `refreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.
+- SFTP password is stored in `agent.yaml` as an encrypted value under `backup.sftp` (`passwordEnc`) using the same AES-GCM key derivation as SSH passwords.
 - The Google Drive storage driver (`driverId: gdrive`) stores data as individual blob files using the same directory layout as the filesystem driver.
 - All Google Drive API calls retry up to 5 times with exponential backoff starting at 2 seconds; each retry recreates the HTTP client connection, and a persistent failure aborts the backup with a clean error.
-- The Google Drive root folder is configured via `gdriveRootPath` (default `/`), and the app creates a `VirtBackup` folder inside that path.
+- The Google Drive root folder is configured via `backup.gdrive.rootPath` (default `/`), and the app creates a `VirtBackup` folder inside that path.
+- The SFTP base path is configured via `backup.sftp.basePath` (example `/Backup`), and the app creates and uses a `VirtBackup` folder inside that path.

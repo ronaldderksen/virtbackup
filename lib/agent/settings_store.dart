@@ -42,6 +42,7 @@ class AppSettingsStore {
     final data = agentSettings.toMap();
     _encryptPasswordsInMap(data, token);
     _encryptGdriveTokensInMap(data, token);
+    _encryptSftpPasswordInMap(data, token);
     final encoded = _ensureTrailingNewline(_toYaml(data));
     await _file.writeAsString(encoded);
     await AppSettingsStore.setFilePermissions(_file, ownerOnly: true);
@@ -110,6 +111,7 @@ class AppSettingsStore {
     final normalized = _normalizeYaml(decoded);
     _decryptPasswordsInMap(normalized, token);
     _decryptGdriveTokensInMap(normalized, token);
+    _decryptSftpPasswordInMap(normalized, token);
     return AppSettings.fromMap(normalized);
   }
 
@@ -277,36 +279,89 @@ class AppSettingsStore {
   }
 
   void _encryptGdriveTokensInMap(Map<String, dynamic> data, String token) {
-    final accessToken = data['gdriveAccessToken']?.toString() ?? '';
+    final backup = data['backup'];
+    if (backup is! Map) {
+      return;
+    }
+    final gdrive = backup['gdrive'];
+    if (gdrive is! Map) {
+      return;
+    }
+    final accessToken = gdrive['accessToken']?.toString() ?? '';
     if (accessToken.isNotEmpty) {
-      data['gdriveAccessTokenEnc'] = _encryptPassword(accessToken, token);
-      data['gdriveAccessToken'] = '';
+      gdrive['accessTokenEnc'] = _encryptPassword(accessToken, token);
+      gdrive['accessToken'] = '';
     } else {
-      data.remove('gdriveAccessTokenEnc');
+      gdrive.remove('accessTokenEnc');
     }
 
-    final refreshToken = data['gdriveRefreshToken']?.toString() ?? '';
+    final refreshToken = gdrive['refreshToken']?.toString() ?? '';
     if (refreshToken.isNotEmpty) {
-      data['gdriveRefreshTokenEnc'] = _encryptPassword(refreshToken, token);
-      data['gdriveRefreshToken'] = '';
+      gdrive['refreshTokenEnc'] = _encryptPassword(refreshToken, token);
+      gdrive['refreshToken'] = '';
     } else {
-      data.remove('gdriveRefreshTokenEnc');
+      gdrive.remove('refreshTokenEnc');
     }
   }
 
   void _decryptGdriveTokensInMap(Map<String, dynamic> data, String? token) {
-    final accessEnc = data['gdriveAccessTokenEnc']?.toString();
+    final backup = data['backup'];
+    if (backup is! Map) {
+      return;
+    }
+    final gdrive = backup['gdrive'];
+    if (gdrive is! Map) {
+      return;
+    }
+    final accessEnc = gdrive['accessTokenEnc']?.toString();
     if (accessEnc != null && accessEnc.isNotEmpty) {
-      data['gdriveAccessToken'] = (token == null || token.isEmpty) ? '' : _decryptPassword(accessEnc, token);
-    } else if (data['gdriveAccessToken'] == null) {
-      data['gdriveAccessToken'] = '';
+      gdrive['accessToken'] = (token == null || token.isEmpty) ? '' : _decryptPassword(accessEnc, token);
+    } else if (gdrive['accessToken'] == null) {
+      gdrive['accessToken'] = '';
     }
 
-    final refreshEnc = data['gdriveRefreshTokenEnc']?.toString();
+    final refreshEnc = gdrive['refreshTokenEnc']?.toString();
     if (refreshEnc != null && refreshEnc.isNotEmpty) {
-      data['gdriveRefreshToken'] = (token == null || token.isEmpty) ? '' : _decryptPassword(refreshEnc, token);
-    } else if (data['gdriveRefreshToken'] == null) {
-      data['gdriveRefreshToken'] = '';
+      gdrive['refreshToken'] = (token == null || token.isEmpty) ? '' : _decryptPassword(refreshEnc, token);
+    } else if (gdrive['refreshToken'] == null) {
+      gdrive['refreshToken'] = '';
+    }
+  }
+
+  void _encryptSftpPasswordInMap(Map<String, dynamic> data, String token) {
+    final backup = data['backup'];
+    if (backup is! Map) {
+      return;
+    }
+    final sftp = backup['sftp'];
+    if (sftp is! Map) {
+      return;
+    }
+    final password = sftp['password']?.toString() ?? '';
+    if (password.isEmpty) {
+      sftp.remove('passwordEnc');
+      return;
+    }
+    sftp['passwordEnc'] = _encryptPassword(password, token);
+    sftp['password'] = '';
+  }
+
+  void _decryptSftpPasswordInMap(Map<String, dynamic> data, String? token) {
+    final backup = data['backup'];
+    if (backup is! Map) {
+      return;
+    }
+    final sftp = backup['sftp'];
+    if (sftp is! Map) {
+      return;
+    }
+    final enc = sftp['passwordEnc']?.toString();
+    if (enc != null && enc.isNotEmpty) {
+      sftp['password'] = (token == null || token.isEmpty) ? '' : _decryptPassword(enc, token);
+      return;
+    }
+    if (sftp['password'] == null) {
+      sftp['password'] = '';
     }
   }
 

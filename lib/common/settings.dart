@@ -4,6 +4,11 @@ class AppSettings {
   AppSettings({
     required this.backupPath,
     required this.backupDriverId,
+    required this.sftpHost,
+    required this.sftpPort,
+    required this.sftpUsername,
+    required this.sftpPassword,
+    required this.sftpBasePath,
     required this.servers,
     required this.connectionVerified,
     required this.hashblocksLimitBufferMb,
@@ -21,6 +26,11 @@ class AppSettings {
 
   final String backupPath;
   final String backupDriverId;
+  final String sftpHost;
+  final int sftpPort;
+  final String sftpUsername;
+  final String sftpPassword;
+  final String sftpBasePath;
   final List<ServerConfig> servers;
   final bool connectionVerified;
   final int hashblocksLimitBufferMb;
@@ -38,6 +48,11 @@ class AppSettings {
   AppSettings copyWith({
     String? backupPath,
     String? backupDriverId,
+    String? sftpHost,
+    int? sftpPort,
+    String? sftpUsername,
+    String? sftpPassword,
+    String? sftpBasePath,
     List<ServerConfig>? servers,
     bool? connectionVerified,
     int? hashblocksLimitBufferMb,
@@ -55,6 +70,11 @@ class AppSettings {
     return AppSettings(
       backupPath: backupPath ?? this.backupPath,
       backupDriverId: backupDriverId ?? this.backupDriverId,
+      sftpHost: sftpHost ?? this.sftpHost,
+      sftpPort: sftpPort ?? this.sftpPort,
+      sftpUsername: sftpUsername ?? this.sftpUsername,
+      sftpPassword: sftpPassword ?? this.sftpPassword,
+      sftpBasePath: sftpBasePath ?? this.sftpBasePath,
       servers: servers ?? this.servers,
       connectionVerified: connectionVerified ?? this.connectionVerified,
       hashblocksLimitBufferMb: hashblocksLimitBufferMb ?? this.hashblocksLimitBufferMb,
@@ -73,18 +93,23 @@ class AppSettings {
 
   Map<String, dynamic> toMap() {
     return {
-      'backupPath': backupPath,
-      'backupDriverId': backupDriverId,
+      'backup': {
+        'driverId': backupDriverId,
+        'filesystem': {'path': backupPath},
+        'gdrive': {
+          'scope': gdriveScope,
+          'rootPath': gdriveRootPath,
+          'accessToken': gdriveAccessToken,
+          'refreshToken': gdriveRefreshToken,
+          'accountEmail': gdriveAccountEmail,
+          'expiresAt': _encodeDateTime(gdriveExpiresAt),
+        },
+        'sftp': {'host': sftpHost, 'port': sftpPort, 'username': sftpUsername, 'password': sftpPassword, 'basePath': sftpBasePath},
+      },
       'connectionVerified': connectionVerified,
       'hashblocksLimitBufferMb': hashblocksLimitBufferMb,
       'dummyDriverTmpWrites': dummyDriverTmpWrites,
       'ntfymeToken': ntfymeToken,
-      'gdriveScope': gdriveScope,
-      'gdriveRootPath': gdriveRootPath,
-      'gdriveAccessToken': gdriveAccessToken,
-      'gdriveRefreshToken': gdriveRefreshToken,
-      'gdriveAccountEmail': gdriveAccountEmail,
-      'gdriveExpiresAt': _encodeDateTime(gdriveExpiresAt),
       'selectedServerId': selectedServerId,
       'listenAll': listenAll,
       'servers': servers.map((server) => server.toMap()).toList(),
@@ -92,6 +117,11 @@ class AppSettings {
   }
 
   factory AppSettings.fromMap(Map<String, dynamic> json) {
+    final backup = json['backup'] is Map ? Map<String, dynamic>.from(json['backup'] as Map) : const <String, dynamic>{};
+    final filesystem = backup['filesystem'] is Map ? Map<String, dynamic>.from(backup['filesystem'] as Map) : const <String, dynamic>{};
+    final gdrive = backup['gdrive'] is Map ? Map<String, dynamic>.from(backup['gdrive'] as Map) : const <String, dynamic>{};
+    final sftp = backup['sftp'] is Map ? Map<String, dynamic>.from(backup['sftp'] as Map) : const <String, dynamic>{};
+
     final serversJson = json['servers'];
     final servers = <ServerConfig>[];
     if (serversJson is List) {
@@ -102,18 +132,23 @@ class AppSettings {
       }
     }
     return AppSettings(
-      backupPath: (json['backupPath'] ?? '').toString(),
-      backupDriverId: (json['backupDriverId'] ?? 'filesystem').toString(),
+      backupPath: (filesystem['path'] ?? '').toString(),
+      backupDriverId: (backup['driverId'] ?? 'filesystem').toString(),
       connectionVerified: json['connectionVerified'] == true,
       hashblocksLimitBufferMb: _parseHashblocksLimitBufferMb(json['hashblocksLimitBufferMb']),
       dummyDriverTmpWrites: json['dummyDriverTmpWrites'] == true,
       ntfymeToken: (json['ntfymeToken'] ?? '').toString(),
-      gdriveScope: (json['gdriveScope'] ?? 'https://www.googleapis.com/auth/drive.file').toString(),
-      gdriveRootPath: (json['gdriveRootPath'] ?? '/').toString(),
-      gdriveAccessToken: (json['gdriveAccessToken'] ?? '').toString(),
-      gdriveRefreshToken: (json['gdriveRefreshToken'] ?? '').toString(),
-      gdriveAccountEmail: (json['gdriveAccountEmail'] ?? '').toString(),
-      gdriveExpiresAt: _parseDateTime(json['gdriveExpiresAt']),
+      gdriveScope: (gdrive['scope'] ?? 'https://www.googleapis.com/auth/drive.file').toString(),
+      gdriveRootPath: (gdrive['rootPath'] ?? '/').toString(),
+      gdriveAccessToken: (gdrive['accessToken'] ?? '').toString(),
+      gdriveRefreshToken: (gdrive['refreshToken'] ?? '').toString(),
+      gdriveAccountEmail: (gdrive['accountEmail'] ?? '').toString(),
+      gdriveExpiresAt: _parseDateTime(gdrive['expiresAt']),
+      sftpHost: (sftp['host'] ?? '').toString(),
+      sftpPort: _parsePort(sftp['port']),
+      sftpUsername: (sftp['username'] ?? '').toString(),
+      sftpPassword: (sftp['password'] ?? '').toString(),
+      sftpBasePath: (sftp['basePath'] ?? '').toString(),
       selectedServerId: json['selectedServerId']?.toString(),
       listenAll: json['listenAll'] == true,
       servers: servers,
@@ -123,6 +158,11 @@ class AppSettings {
   factory AppSettings.empty() => AppSettings(
     backupPath: '',
     backupDriverId: 'filesystem',
+    sftpHost: '',
+    sftpPort: 22,
+    sftpUsername: '',
+    sftpPassword: '',
+    sftpBasePath: '',
     servers: [],
     connectionVerified: false,
     hashblocksLimitBufferMb: 1024,
@@ -142,6 +182,14 @@ class AppSettings {
     final parsed = value is num ? value.toInt() : int.tryParse(value?.toString() ?? '');
     if (parsed == null || parsed <= 0) {
       return 1024;
+    }
+    return parsed;
+  }
+
+  static int _parsePort(Object? value) {
+    final parsed = value is num ? value.toInt() : int.tryParse(value?.toString().trim() ?? '');
+    if (parsed == null || parsed <= 0 || parsed > 65535) {
+      return 22;
     }
     return parsed;
   }

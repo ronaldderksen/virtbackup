@@ -81,6 +81,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   final Map<String, bool> _driverParamBoolValues = {};
   final TextEditingController _ntfymeTokenController = TextEditingController();
   final TextEditingController _gdriveRootPathController = TextEditingController();
+  final TextEditingController _sftpHostController = TextEditingController();
+  final TextEditingController _sftpPortController = TextEditingController(text: '22');
+  final TextEditingController _sftpUserController = TextEditingController();
+  final TextEditingController _sftpPasswordController = TextEditingController();
+  final TextEditingController _sftpBasePathController = TextEditingController();
   final TextEditingController _sshHostController = TextEditingController();
   final TextEditingController _sshPortController = TextEditingController(text: '22');
   final TextEditingController _sshUserController = TextEditingController();
@@ -99,6 +104,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String _savedNtfymeToken = '';
   String _savedGdriveScope = _gdriveScopeFile;
   String _savedGdriveRootPath = '/';
+  String _savedSftpHost = '';
+  String _savedSftpPort = '22';
+  String _savedSftpUser = '';
+  String _savedSftpPassword = '';
+  String _savedSftpBasePath = '';
   String _backupDriverId = 'filesystem';
   final Map<String, List<VmEntry>> _vmCacheByServerId = {};
   bool _connectionVerified = false;
@@ -113,6 +123,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _isRestoring = false;
   bool _isSanityChecking = false;
   bool _isSendingNtfymeTest = false;
+  bool _isTestingSftp = false;
   bool _isGdriveConnecting = false;
   String _gdriveScope = _gdriveScopeFile;
   String _gdriveClientId = '';
@@ -194,6 +205,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
     _ntfymeTokenController.dispose();
     _gdriveRootPathController.dispose();
+    _sftpHostController.dispose();
+    _sftpPortController.dispose();
+    _sftpUserController.dispose();
+    _sftpPasswordController.dispose();
+    _sftpBasePathController.dispose();
     _sshHostController.dispose();
     _sshPortController.dispose();
     _sshUserController.dispose();
@@ -211,8 +227,16 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   }
 
   Future<void> _loadGdriveClientConfig() async {
+    // On macOS (and other desktop platforms), the current working directory is not stable
+    // when launching the built .app. Prefer a file next to `agent.yaml` so both the GUI and
+    // the embedded agent can load the same OAuth client config reliably.
+    final store = await AppSettingsStore.fromAgentDefaultPath();
+    final settingsDir = store.file.parent;
+    final sep = Platform.pathSeparator;
+    final overrideFile = File('${settingsDir.path}${sep}etc${sep}google_oauth_client.json');
+
+    final locator = GoogleOAuthClientLocator(overrideFile: overrideFile);
     try {
-      final locator = GoogleOAuthClientLocator();
       final config = await locator.load(requireSecret: false);
       if (config.clientId.trim().isNotEmpty) {
         _gdriveClientId = config.clientId.trim();
@@ -220,7 +244,13 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       if (config.clientSecret.trim().isNotEmpty) {
         _gdriveClientSecret = config.clientSecret.trim();
       }
-    } catch (_) {}
+    } catch (error) {
+      // This info is crucial when running the desktop app from an IDE or by launching the built .app, because the working directory and executable dir can differ.
+      final candidates = locator.candidateFiles().map((file) => file.path).toList();
+      _logInfo('Google Drive OAuth client config load failed: $error');
+      _logInfo('Google Drive OAuth candidates: ${candidates.join(' | ')}');
+      _logInfo('Google Drive OAuth preferred path: ${overrideFile.path}');
+    }
   }
 
   Future<void> _loadAgentEndpoints() async {
@@ -347,6 +377,16 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _savedGdriveScope = _gdriveScope;
     _gdriveRootPathController.text = _agentSettings.gdriveRootPath.isNotEmpty ? _agentSettings.gdriveRootPath : '/';
     _savedGdriveRootPath = _gdriveRootPathController.text.trim();
+    _sftpHostController.text = _agentSettings.sftpHost;
+    _savedSftpHost = _sftpHostController.text.trim();
+    _sftpPortController.text = _agentSettings.sftpPort.toString();
+    _savedSftpPort = _sftpPortController.text.trim();
+    _sftpUserController.text = _agentSettings.sftpUsername;
+    _savedSftpUser = _sftpUserController.text.trim();
+    _sftpPasswordController.text = _agentSettings.sftpPassword;
+    _savedSftpPassword = _sftpPasswordController.text;
+    _sftpBasePathController.text = _agentSettings.sftpBasePath;
+    _savedSftpBasePath = _sftpBasePathController.text.trim();
     _servers
       ..clear()
       ..addAll(_agentSettings.servers);
@@ -1424,6 +1464,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _backupPathController.addListener(_handleFieldChanged);
     _ntfymeTokenController.addListener(_handleFieldChanged);
     _gdriveRootPathController.addListener(_handleFieldChanged);
+    _sftpHostController.addListener(_handleFieldChanged);
+    _sftpPortController.addListener(_handleFieldChanged);
+    _sftpUserController.addListener(_handleFieldChanged);
+    _sftpPasswordController.addListener(_handleFieldChanged);
+    _sftpBasePathController.addListener(_handleFieldChanged);
   }
 
   void _handleFieldChanged() {
@@ -1628,7 +1673,12 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         _backupDriverId != _savedBackupDriverId ||
         _ntfymeTokenController.text.trim() != _savedNtfymeToken ||
         _gdriveScope != _savedGdriveScope ||
-        _gdriveRootPathController.text.trim() != _savedGdriveRootPath;
+        _gdriveRootPathController.text.trim() != _savedGdriveRootPath ||
+        _sftpHostController.text.trim() != _savedSftpHost ||
+        _sftpPortController.text.trim() != _savedSftpPort ||
+        _sftpUserController.text.trim() != _savedSftpUser ||
+        _sftpPasswordController.text != _savedSftpPassword ||
+        _sftpBasePathController.text.trim() != _savedSftpBasePath;
   }
 
   bool _hasAnyChanges() {
@@ -1704,13 +1754,34 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       final trimmedPath = _backupPathController.text.trim();
       final trimmedToken = _ntfymeTokenController.text.trim();
       final trimmedGdriveRoot = _gdriveRootPathController.text.trim().isEmpty ? '/' : _gdriveRootPathController.text.trim();
-      _agentSettings = _agentSettings.copyWith(backupPath: trimmedPath, backupDriverId: _backupDriverId, ntfymeToken: trimmedToken, gdriveScope: _gdriveScope, gdriveRootPath: trimmedGdriveRoot);
+      final sftpHost = _sftpHostController.text.trim();
+      final sftpPort = int.tryParse(_sftpPortController.text.trim()) ?? 22;
+      final sftpUser = _sftpUserController.text.trim();
+      final sftpPassword = _sftpPasswordController.text;
+      final sftpBasePath = _sftpBasePathController.text.trim();
+      _agentSettings = _agentSettings.copyWith(
+        backupPath: trimmedPath,
+        backupDriverId: _backupDriverId,
+        ntfymeToken: trimmedToken,
+        gdriveScope: _gdriveScope,
+        gdriveRootPath: trimmedGdriveRoot,
+        sftpHost: sftpHost,
+        sftpPort: sftpPort,
+        sftpUsername: sftpUser,
+        sftpPassword: sftpPassword,
+        sftpBasePath: sftpBasePath,
+      );
       await _pushAgentSettings();
       _savedBackupPath = trimmedPath;
       _savedBackupDriverId = _backupDriverId;
       _savedNtfymeToken = trimmedToken;
       _savedGdriveScope = _gdriveScope;
       _savedGdriveRootPath = trimmedGdriveRoot;
+      _savedSftpHost = sftpHost;
+      _savedSftpPort = _sftpPortController.text.trim();
+      _savedSftpUser = sftpUser;
+      _savedSftpPassword = sftpPassword;
+      _savedSftpBasePath = sftpBasePath;
       if (mounted && showSnackBar) {
         _showSnackBarInfo('Local settings saved');
       }
@@ -1743,6 +1814,44 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       if (mounted) {
         setState(() {
           _isSendingNtfymeTest = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _testSftpConnection() async {
+    final host = _sftpHostController.text.trim();
+    final port = int.tryParse(_sftpPortController.text.trim()) ?? 22;
+    final username = _sftpUserController.text.trim();
+    final password = _sftpPasswordController.text;
+    final basePath = _sftpBasePathController.text.trim();
+    if (host.isEmpty || username.isEmpty || password.isEmpty || basePath.isEmpty) {
+      _showSnackBarError('Enter SFTP settings first.');
+      return;
+    }
+    if (!_agentReachable || _agentAuthFailed || _agentTokenMissing) {
+      _showSnackBarError('Agent is not reachable.');
+      return;
+    }
+    if (_isTestingSftp) {
+      return;
+    }
+    setState(() {
+      _isTestingSftp = true;
+    });
+    try {
+      final result = await _agentApiClient.testSftpConnection(host: host, port: port, username: username, password: password, basePath: basePath);
+      if (result.success) {
+        _showSnackBarInfo(result.message);
+      } else {
+        _showSnackBarError('SFTP test failed: ${result.message}');
+      }
+    } catch (error) {
+      _showSnackBarError('SFTP test failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isTestingSftp = false;
         });
       }
     }
