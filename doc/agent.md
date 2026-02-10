@@ -271,6 +271,6 @@ The agent supports optional native SFTP via FFI:
 - SFTP password is stored in `agent.yaml` as an encrypted value under `backup.sftp` (`passwordEnc`) using the same AES-GCM key derivation as SSH passwords.
 - The Google Drive storage driver (`driverId: gdrive`) stores data as individual blob files using the same directory layout as the filesystem driver.
 - All Google Drive API calls retry up to 5 times with exponential backoff starting at 2 seconds; each retry recreates the HTTP client connection, and a persistent failure aborts the backup with a clean error.
-- The filesystem backup path is configured via `backup.filesystem.path` and the app creates and uses a `VirtBackup` folder inside that path.
+- The filesystem backup path is configured via `backup.base_path` and the app creates and uses a `VirtBackup` folder inside that path.
 - The Google Drive root folder is configured via `backup.gdrive.rootPath` (default `/`), and the app creates a `VirtBackup` folder inside that path.
 - The SFTP base path is configured via `backup.sftp.basePath` (example `/Backup`), and the app creates and uses a `VirtBackup` folder inside that path.

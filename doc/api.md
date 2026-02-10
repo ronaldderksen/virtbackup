@@ -64,7 +64,7 @@ Response:
 {
   "backup":{
     "driverId":"filesystem",
-    "filesystem":{"path":"/path/to/backups"},
+    "base_path":"/path/to/backups",
     "gdrive":{
       "scope":"https://www.googleapis.com/auth/drive.file",
       "rootPath":"/",
@@ -265,7 +265,6 @@ Body:
 ```json
 {
   "vmName":"my-vm",
-  "backupPath":"/path/to/backups",
   "driverId":"filesystem",
   "driverParams":{},
   "fresh":false
@@ -273,10 +272,10 @@ Body:
 ```
 
 Notes:
-- `backupPath` is required only when the selected driver has `usesPath: true` (see `GET /drivers`).
+- The agent uses `backup.base_path` from config and will create and use a `VirtBackup` folder inside that path.
 - `driverId` overrides the configured default for this job only.
 - `driverParams` are driver-specific parameters defined by `GET /drivers`.
-- `fresh: true` triggers a driver "fresh cleanup" (driver-specific behavior).
+- `fresh: true` triggers a driver "fresh cleanup" (driver-specific behavior). This is only executed when the agent runs in debug mode.
 
 Response:
 ```json

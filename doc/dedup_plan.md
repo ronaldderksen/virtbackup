@@ -16,19 +16,20 @@ Status: implemented. This document describes the dedup storage and manifest form
 - Zero blocks are not stored as blobs; they are recorded as `ZERO` runs in the manifest.
 
 ## Storage layout (filesystem driver)
-The filesystem driver uses `backupPath` as its root:
+The filesystem driver uses `backup.base_path` as its base path and creates and uses a `VirtBackup` folder inside that path:
 ```
-backupPath/
-  blobs/
-    ab/cd/<sha256>
-  manifests/
-    <serverId>/
-      <vmName>/
-        <timestamp>__domain.xml
-        <timestamp>__<diskId>.chain        (only if there is a backing chain)
-        <diskId>/
-          <timestamp>.manifest.gz
-  tmp/
+backup.base_path/
+  VirtBackup/
+    blobs/
+      ab/cd/<sha256>
+    manifests/
+      <serverId>/
+        <vmName>/
+          <timestamp>__domain.xml
+          <timestamp>__<diskId>.chain        (only if there is a backing chain)
+          <diskId>/
+            <timestamp>.manifest.gz
+    tmp/
 ```
 
 The Google Drive driver uses the same logical layout (manifests + `blobs/ab/cd/<hash>`), but syncs to Drive and keeps a local cache.

@@ -10,10 +10,7 @@ import 'package:virtbackup/agent/drv/backup_storage.dart';
 import 'package:virtbackup/common/settings.dart';
 
 class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
-  SftpBackupDriver({required AppSettings settings, void Function(String message)? logInfo})
-    : _settings = settings,
-      _cacheRoot = Directory('${_tempBase()}${Platform.pathSeparator}virtbackup_sftp_cache'),
-      _logInfo = logInfo ?? ((_) {});
+  SftpBackupDriver({required AppSettings settings, void Function(String message)? logInfo}) : _settings = settings, _cacheRoot = _cacheRootForSettings(settings), _logInfo = logInfo ?? ((_) {});
 
   final AppSettings _settings;
   final Directory _cacheRoot;
@@ -33,6 +30,15 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   String get _username => _settings.sftpUsername.trim();
   String get _password => _settings.sftpPassword;
   String get _basePath => _settings.sftpBasePath.trim();
+
+  static Directory _cacheRootForSettings(AppSettings settings) {
+    final basePath = settings.backupPath.trim();
+    if (basePath.isEmpty) {
+      // Fallback for misconfiguration; callers should configure backup.base_path.
+      return Directory('${_tempBase()}${Platform.pathSeparator}virtbackup_sftp_cache');
+    }
+    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}cache${Platform.pathSeparator}sftp');
+  }
 
   @override
   BackupDriverCapabilities get capabilities => const BackupDriverCapabilities(
@@ -59,7 +65,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   Future<void> ensureReady() async {
     await _cacheRoot.create(recursive: true);
     await manifestsDir('tmp', 'tmp').parent.create(recursive: true);
-    await blobsDir().create(recursive: true);
     await tmpDir().create(recursive: true);
     _logInfo('sftp: ready (cache=${_cacheRoot.path})');
   }
@@ -68,7 +73,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   Future<void> prepareBackup(String serverId, String vmName) async {
     _validateConfig();
     await manifestsDir(serverId, vmName).create(recursive: true);
-    await blobsDir().create(recursive: true);
     await tmpDir().create(recursive: true);
 
     await _withSftp('prepare remote layout', (sftp) async {
@@ -101,7 +105,13 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   }
 
   @override
-  Directory blobsDir() => Directory('${_cacheRoot.path}${Platform.pathSeparator}blobs');
+  Directory blobsDir() {
+    final basePath = _settings.backupPath.trim();
+    if (basePath.isEmpty) {
+      return Directory('${_cacheRoot.path}${Platform.pathSeparator}blobs');
+    }
+    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}blobs');
+  }
 
   @override
   Directory tmpDir() => Directory('${_cacheRoot.path}${Platform.pathSeparator}tmp');
@@ -265,8 +275,27 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   @override
   Future<void> freshCleanup() async {
     _validateConfig();
-    // Very conservative: never delete remote data in v1.
-    throw 'SFTP fresh cleanup is not supported.';
+    final base = _normalizeRemotePath(_basePath);
+    final current = _remoteRoot();
+    final stamp = sanitizeFileName(DateTime.now().toUtc().toIso8601String());
+    final renamed = _remoteJoin(base, '${_remoteAppFolderName}__fresh_$stamp');
+
+    await _withSftp('fresh cleanup rename remote root', (sftp) async {
+      try {
+        await sftp.rename(current, renamed);
+      } catch (error) {
+        // If the folder doesn't exist yet, there is nothing to rename.
+        try {
+          await sftp.stat(current);
+        } catch (_) {
+          return;
+        }
+        rethrow;
+      }
+    });
+    _knownRemoteShardKeys.clear();
+    _remoteBlobNames.clear();
+    _remoteBlobSizes.clear();
   }
 
   @override
@@ -357,6 +386,10 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     if (hash.length < 4) {
       return null;
     }
+    final local = blobFile(hash);
+    if (await local.exists()) {
+      return local.length();
+    }
     final cached = _remoteBlobSizes[hash];
     if (cached != null) {
       return cached;
@@ -381,73 +414,116 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     if (hash.length < 4) {
       return;
     }
+    final local = blobFile(hash);
+    if (await local.exists()) {
+      final stream = length == null ? local.openRead() : local.openRead(0, length);
+      await for (final chunk in stream) {
+        yield chunk;
+      }
+      return;
+    }
+
+    await local.parent.create(recursive: true);
+    final tempFile = File('${local.path}.${DateTime.now().microsecondsSinceEpoch}.inprogress');
+    final sink = tempFile.openWrite();
     final remotePath = _remoteBlobPath(hash);
-    final bindings = _nativeSftp;
-    if (bindings != null) {
+    var success = false;
+    try {
+      final bindings = _nativeSftp;
+      if (bindings != null) {
+        final stopwatch = Stopwatch()..start();
+        final lease = await _nativePool.lease(_connectNative);
+        Pointer<Void>? file;
+        Pointer<Uint8>? buffer;
+        try {
+          file = bindings.openRead(lease.session, remotePath);
+          if (file == nullptr) {
+            throw 'Native SFTP openRead failed: $remotePath';
+          }
+          const chunkSize = 256 * 1024;
+          buffer = calloc<Uint8>(chunkSize);
+          var offset = 0;
+          var remaining = length;
+          while (remaining == null || remaining > 0) {
+            final toRead = remaining == null ? chunkSize : remaining.clamp(0, chunkSize);
+            if (toRead == 0) {
+              break;
+            }
+            final read = bindings.read(file, offset, buffer, toRead);
+            if (read < 0) {
+              throw 'Native SFTP read failed: $remotePath';
+            }
+            if (read == 0) {
+              break;
+            }
+            final chunk = Uint8List.fromList(buffer.asTypedList(read));
+            sink.add(chunk);
+            yield chunk;
+            offset += read;
+            if (remaining != null) {
+              remaining -= read;
+            }
+          }
+          success = true;
+        } finally {
+          if (file != null && file != nullptr) {
+            bindings.closeFile(file);
+          }
+          if (buffer != null) {
+            calloc.free(buffer);
+          }
+          lease.release();
+          final elapsedMs = stopwatch.elapsedMilliseconds;
+          if (elapsedMs > 500) {
+            _logInfo('sftp: read blob stream done durationMs=$elapsedMs');
+          }
+        }
+        if (success) {
+          return;
+        }
+      }
+
       final stopwatch = Stopwatch()..start();
-      final lease = await _nativePool.lease(_connectNative);
-      Pointer<Void>? file;
-      Pointer<Uint8>? buffer;
+      final lease = await _pool.lease(_connect);
       try {
-        file = bindings.openRead(lease.session, remotePath);
-        if (file == nullptr) {
-          throw 'Native SFTP openRead failed: $remotePath';
+        final sftp = lease.sftp;
+        final file = await sftp.open(remotePath, mode: SftpFileOpenMode.read);
+        try {
+          await for (final chunk in file.read(length: length)) {
+            sink.add(chunk);
+            yield chunk;
+          }
+        } finally {
+          await file.close();
         }
-        const chunkSize = 256 * 1024;
-        buffer = calloc<Uint8>(chunkSize);
-        var offset = 0;
-        var remaining = length;
-        while (remaining == null || remaining > 0) {
-          final toRead = remaining == null ? chunkSize : remaining.clamp(0, chunkSize);
-          if (toRead == 0) {
-            break;
-          }
-          final read = bindings.read(file, offset, buffer, toRead);
-          if (read < 0) {
-            throw 'Native SFTP read failed: $remotePath';
-          }
-          if (read == 0) {
-            break;
-          }
-          yield Uint8List.fromList(buffer.asTypedList(read));
-          offset += read;
-          if (remaining != null) {
-            remaining -= read;
-          }
-        }
+        success = true;
       } finally {
-        if (file != null && file != nullptr) {
-          bindings.closeFile(file);
-        }
-        if (buffer != null) {
-          calloc.free(buffer);
-        }
         lease.release();
         final elapsedMs = stopwatch.elapsedMilliseconds;
         if (elapsedMs > 500) {
           _logInfo('sftp: read blob stream done durationMs=$elapsedMs');
         }
       }
-      return;
-    }
-
-    final stopwatch = Stopwatch()..start();
-    final lease = await _pool.lease(_connect);
-    try {
-      final sftp = lease.sftp;
-      final file = await sftp.open(remotePath, mode: SftpFileOpenMode.read);
-      try {
-        await for (final chunk in file.read(length: length)) {
-          yield chunk;
-        }
-      } finally {
-        await file.close();
-      }
     } finally {
-      lease.release();
-      final elapsedMs = stopwatch.elapsedMilliseconds;
-      if (elapsedMs > 500) {
-        _logInfo('sftp: read blob stream done durationMs=$elapsedMs');
+      try {
+        await sink.close();
+      } catch (_) {}
+      if (!success) {
+        try {
+          await tempFile.delete();
+        } catch (_) {}
+      }
+      try {
+        final hasLocal = await local.exists();
+        if (hasLocal) {
+          await tempFile.delete();
+        } else {
+          await tempFile.rename(local.path);
+        }
+      } catch (_) {
+        try {
+          await tempFile.delete();
+        } catch (_) {}
       }
     }
   }
@@ -457,11 +533,20 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     if (hash.length < 4) {
       return null;
     }
+    final local = blobFile(hash);
+    if (await local.exists()) {
+      return local.readAsBytes();
+    }
     final remotePath = _remoteBlobPath(hash);
     if (_nativeSftp != null) {
-      return _withSftpLogOnly('read blob', () => _nativeReadAll(remotePath));
+      final bytes = await _withSftpLogOnly('read blob', () => _nativeReadAll(remotePath));
+      if (!await local.exists()) {
+        await local.parent.create(recursive: true);
+        await local.writeAsBytes(bytes, flush: true);
+      }
+      return bytes;
     }
-    return _withSftp('read blob', (sftp) async {
+    final bytes = await _withSftp('read blob', (sftp) async {
       final file = await sftp.open(remotePath, mode: SftpFileOpenMode.read);
       try {
         return await file.readBytes();
@@ -469,6 +554,11 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         await file.close();
       }
     });
+    if (!await local.exists()) {
+      await local.parent.create(recursive: true);
+      await local.writeAsBytes(bytes, flush: true);
+    }
+    return bytes;
   }
 
   @override

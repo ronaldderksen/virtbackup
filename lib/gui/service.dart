@@ -36,9 +36,9 @@ extension _BackupServerSetupBackupService on _BackupServerSetupScreenState {
       _showSnackBarInfo('Backup requires SSH.');
       return;
     }
-    final backupPath = _backupPathController.text.trim();
-    if (_selectedDriverUsesPath() && backupPath.isEmpty) {
-      _showSnackBarInfo('Enter a backup path first');
+    final basePath = _backupPathController.text.trim();
+    if (basePath.isEmpty) {
+      _showSnackBarInfo('Set a Backup base path in Settings first.');
       return;
     }
     final driverParams = <String, dynamic>{};
@@ -67,7 +67,7 @@ extension _BackupServerSetupBackupService on _BackupServerSetupScreenState {
       driverParams[param.key] = rawText;
     }
     try {
-      final start = await _agentApiClient.startBackup(server.id, vm.name, _selectedDriverUsesPath() ? backupPath : '', driverParams: driverParams.isEmpty ? null : driverParams);
+      final start = await _agentApiClient.startBackup(server.id, vm.name, driverParams: driverParams.isEmpty ? null : driverParams);
       _startBackupJobPolling(start.jobId);
     } catch (error) {
       _showSnackBarError('Backup failed: $error');

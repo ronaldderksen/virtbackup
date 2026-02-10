@@ -814,10 +814,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _driverParamBoolValues[key] = value;
   }
 
-  bool _selectedDriverUsesPath() {
-    return _selectedBackupDriver()?.usesPath ?? true;
-  }
-
   void _scheduleAgentReconnect() {
     if (!mounted || _agentReachable) {
       return;
@@ -2372,7 +2368,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   Future<void> _createBackupFolder() async {
     final path = _backupPathController.text.trim();
     if (path.isEmpty) {
-      _showSnackBarInfo('Enter a backup path first');
+      _showSnackBarInfo('Enter a backup base path first.');
       return;
     }
     try {

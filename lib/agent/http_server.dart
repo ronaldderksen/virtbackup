@@ -542,7 +542,6 @@ class AgentHttpServer {
         }
         final body = await _readJson(request);
         final vmName = (body['vmName'] ?? '').toString();
-        final requestedPath = (body['backupPath'] ?? '').toString();
         final requestedDriver = (body['driverId'] ?? '').toString().trim();
         final driverParams = body['driverParams'] is Map ? Map<String, dynamic>.from(body['driverParams'] as Map) : <String, dynamic>{};
         final freshRequested = body['fresh'] == true;
@@ -555,10 +554,9 @@ class AgentHttpServer {
           return;
         }
         final resolvedDriverId = requestedDriver.isNotEmpty ? requestedDriver : (_agentSettings.backupDriverId.trim().isEmpty ? 'filesystem' : _agentSettings.backupDriverId.trim());
-        final driverInfo = _driverCatalog[resolvedDriverId] ?? _driverCatalog['filesystem']!;
-        final backupPath = requestedPath.trim().isEmpty ? _agentSettings.backupPath.trim() : requestedPath.trim();
-        if (driverInfo.usesPath && backupPath.isEmpty) {
-          _json(request, 400, {'error': 'missing backupPath'});
+        final backupPath = _agentSettings.backupPath.trim();
+        if (backupPath.isEmpty) {
+          _json(request, 400, {'error': 'missing backup.base_path'});
           return;
         }
         final registry = _buildDriverRegistry(backupPath: backupPath);

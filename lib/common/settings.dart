@@ -95,7 +95,7 @@ class AppSettings {
     return {
       'backup': {
         'driverId': backupDriverId,
-        'filesystem': {'path': backupPath},
+        'base_path': backupPath,
         'gdrive': {
           'scope': gdriveScope,
           'rootPath': gdriveRootPath,
@@ -118,7 +118,6 @@ class AppSettings {
 
   factory AppSettings.fromMap(Map<String, dynamic> json) {
     final backup = json['backup'] is Map ? Map<String, dynamic>.from(json['backup'] as Map) : const <String, dynamic>{};
-    final filesystem = backup['filesystem'] is Map ? Map<String, dynamic>.from(backup['filesystem'] as Map) : const <String, dynamic>{};
     final gdrive = backup['gdrive'] is Map ? Map<String, dynamic>.from(backup['gdrive'] as Map) : const <String, dynamic>{};
     final sftp = backup['sftp'] is Map ? Map<String, dynamic>.from(backup['sftp'] as Map) : const <String, dynamic>{};
 
@@ -132,7 +131,7 @@ class AppSettings {
       }
     }
     return AppSettings(
-      backupPath: (filesystem['path'] ?? '').toString(),
+      backupPath: (backup['base_path'] ?? '').toString(),
       backupDriverId: (backup['driverId'] ?? 'filesystem').toString(),
       connectionVerified: json['connectionVerified'] == true,
       hashblocksLimitBufferMb: _parseHashblocksLimitBufferMb(json['hashblocksLimitBufferMb']),

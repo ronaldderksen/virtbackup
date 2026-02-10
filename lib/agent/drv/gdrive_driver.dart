@@ -24,7 +24,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     : _settings = settings,
       _persistSettings = persistSettings,
       _settingsDir = settingsDir,
-      _cacheRoot = Directory('${_tempBase()}${Platform.pathSeparator}virtbackup_gdrive_cache'),
+      _cacheRoot = _cacheRootForSettings(settings),
       _logInfo = logInfo ?? ((_) {});
 
   final Directory? _settingsDir;
@@ -54,6 +54,15 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   String? _tmpFolderId;
   String? _blobsRootId;
   void Function(GdrivePrefillStats stats, bool done)? onPrefillProgress;
+
+  static Directory _cacheRootForSettings(AppSettings settings) {
+    final basePath = settings.backupPath.trim();
+    if (basePath.isEmpty) {
+      // Fallback for misconfiguration; callers should configure backup.base_path.
+      return Directory('${_tempBase()}${Platform.pathSeparator}virtbackup_gdrive_cache');
+    }
+    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}cache${Platform.pathSeparator}gdrive');
+  }
 
   @override
   BackupDriverCapabilities get capabilities => const BackupDriverCapabilities(
@@ -101,7 +110,11 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   @override
   Directory blobsDir() {
-    return Directory('${_cacheRoot.path}${Platform.pathSeparator}blobs');
+    final basePath = _settings.backupPath.trim();
+    if (basePath.isEmpty) {
+      return Directory('${_cacheRoot.path}${Platform.pathSeparator}blobs');
+    }
+    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}blobs');
   }
 
   @override
@@ -196,7 +209,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   Future<void> ensureReady() async {
     await _cacheRoot.create(recursive: true);
     await manifestsDir('tmp', 'tmp').parent.create(recursive: true);
-    await blobsDir().create(recursive: true);
     await tmpDir().create(recursive: true);
     await _ensureBlobsRoot();
     await _warmFolderCache();
@@ -206,7 +218,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   @override
   Future<void> prepareBackup(String serverId, String vmName) async {
     await manifestsDir(serverId, vmName).create(recursive: true);
-    await blobsDir().create(recursive: true);
     await tmpDir().create(recursive: true);
     await _ensureTmpFolder();
     await _ensureManifestFolder(serverId, vmName);
@@ -394,6 +405,10 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     if (hash.length < 4) {
       return null;
     }
+    final local = blobFile(hash);
+    if (await local.exists()) {
+      return local.length();
+    }
     if (_cacheBlobsEnabled) {
       final cached = _blobFiles[hash];
       if (cached != null) {
@@ -432,7 +447,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     if (hash.length < 4) {
       return null;
     }
-    final cacheFile = File(_blobCachePath(hash));
+    final cacheFile = blobFile(hash);
     if (await cacheFile.exists()) {
       return cacheFile.readAsBytes();
     }
@@ -1187,11 +1202,11 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   String _blobCachePath(String hash) {
     if (hash.length < 4) {
-      return '${_cacheRoot.path}${Platform.pathSeparator}blobs${Platform.pathSeparator}$hash';
+      return '${blobsDir().path}${Platform.pathSeparator}$hash';
     }
     final shard1 = hash.substring(0, 2);
     final shard2 = hash.substring(2, 4);
-    return '${_cacheRoot.path}${Platform.pathSeparator}blobs${Platform.pathSeparator}$shard1${Platform.pathSeparator}$shard2${Platform.pathSeparator}$hash';
+    return '${blobsDir().path}${Platform.pathSeparator}$shard1${Platform.pathSeparator}$shard2${Platform.pathSeparator}$hash';
   }
 
   _ServerVmLocation? _resolveServerVm(Directory vmDir) {

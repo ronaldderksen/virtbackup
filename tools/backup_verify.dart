@@ -190,7 +190,7 @@ void main(List<String> args) async {
     final targetHost = _resolveHost(config, resolvedTargetId, resolvedArgs.targetHost, resolvedArgs.targetHostExplicit);
     final resolved = resolvedArgs.copyWith(sourceServerId: resolvedSourceId, targetServerId: resolvedTargetId, sourceHost: sourceHost, targetHost: targetHost);
     signalSubs = registerCancelHandler(resolved);
-    stdout.writeln('Backup path: $backupPath');
+    stdout.writeln('Backup base path: $backupPath');
 
     if (resolved.fresh) {
       stdout.writeln('Fresh cleanup requested: agent will handle cleanup (debug only).');
@@ -199,7 +199,7 @@ void main(List<String> args) async {
     if (resolved.skipBackup) {
       stdout.writeln('Skipping backup due to --no-backup');
     } else {
-      final backupJobId = await _startBackup(client, resolved, backupPath);
+      final backupJobId = await _startBackup(client, resolved);
       activeJobId = backupJobId;
       stdout.writeln('Started backup job: $backupJobId');
       if (resolved.cancelAfterRandom) {
@@ -583,23 +583,15 @@ Future<Map<String, dynamic>> _fetchConfig(http.Client client, _Args args) async 
 }
 
 String _extractBackupPath(Map<String, dynamic> payload) {
-  final legacy = payload['backupPath']?.toString().trim();
-  if (legacy != null && legacy.isNotEmpty) {
-    return legacy;
-  }
-
   final backup = payload['backup'];
   if (backup is Map) {
-    final filesystem = backup['filesystem'];
-    if (filesystem is Map) {
-      final path = filesystem['path']?.toString().trim();
-      if (path != null && path.isNotEmpty) {
-        return path;
-      }
+    final path = backup['base_path']?.toString().trim();
+    if (path != null && path.isNotEmpty) {
+      return path;
     }
   }
 
-  throw StateError('Config missing backup path (expected backup.filesystem.path or legacy backupPath).');
+  throw StateError('Config missing backup path (expected backup.base_path).');
 }
 
 String _resolveServerId(Map<String, dynamic> payload, String value) {
@@ -648,9 +640,9 @@ String _resolveHost(Map<String, dynamic> payload, String serverId, String fallba
   return fallback;
 }
 
-Future<String> _startBackup(http.Client client, _Args args, String backupPath) async {
+Future<String> _startBackup(http.Client client, _Args args) async {
   final uri = args.agentUrl.replace(path: '/servers/${args.sourceServerId}/backup');
-  final payload = <String, dynamic>{'vmName': args.vmName, 'backupPath': backupPath};
+  final payload = <String, dynamic>{'vmName': args.vmName};
   if (args.fresh) {
     payload['fresh'] = true;
   }

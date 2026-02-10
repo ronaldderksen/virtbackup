@@ -231,6 +231,28 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
               children: [
                 Text('Local settings', style: Theme.of(context).textTheme.titleMedium),
                 const SizedBox(height: 16),
+                TextFormField(
+                  controller: _backupPathController,
+                  decoration: InputDecoration(
+                    labelText: 'Backup base path',
+                    hintText: '/mnt/backups',
+                    helperText: 'VirtBackup will create a "VirtBackup" folder inside this path.',
+                    prefixIcon: Icon(Icons.folder_outlined),
+                    suffixIcon: SizedBox(
+                      width: 96,
+                      child: Row(
+                        children: [
+                          IconButton(tooltip: 'Browse folders', onPressed: _pickBackupFolder, icon: const Icon(Icons.folder_open_outlined)),
+                          IconButton(tooltip: 'Create folder', onPressed: _createBackupFolder, icon: const Icon(Icons.create_new_folder_outlined)),
+                        ],
+                      ),
+                    ),
+                    border: OutlineInputBorder(),
+                  ),
+                  textInputAction: TextInputAction.done,
+                  validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a base path' : null,
+                ),
+                const SizedBox(height: 16),
                 DropdownButtonFormField<String>(
                   key: ValueKey(_backupDriverId),
                   initialValue: _selectedBackupDriver()?.id,
@@ -306,38 +328,6 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                       const SizedBox(width: 12),
                       Expanded(child: Text('Tests login and write access to the base path.', style: Theme.of(context).textTheme.bodySmall)),
                     ],
-                  ),
-                ],
-                const SizedBox(height: 16),
-                if (_selectedDriverUsesPath()) ...[
-                  TextFormField(
-                    controller: _backupPathController,
-                    decoration: InputDecoration(
-                      labelText: 'Backup path',
-                      hintText: '/mnt/backups/libvirt',
-                      helperText: 'VirtBackup will create a "VirtBackup" folder inside this path.',
-                      prefixIcon: Icon(Icons.folder_outlined),
-                      suffixIcon: SizedBox(
-                        width: 96,
-                        child: Row(
-                          children: [
-                            IconButton(tooltip: 'Browse folders', onPressed: _pickBackupFolder, icon: const Icon(Icons.folder_open_outlined)),
-                            IconButton(tooltip: 'Create folder', onPressed: _createBackupFolder, icon: const Icon(Icons.create_new_folder_outlined)),
-                          ],
-                        ),
-                      ),
-                      border: OutlineInputBorder(),
-                    ),
-                    textInputAction: TextInputAction.done,
-                    validator: (value) {
-                      if (!_selectedDriverUsesPath()) {
-                        return null;
-                      }
-                      if (value == null || value.trim().isEmpty) {
-                        return 'Enter a path';
-                      }
-                      return null;
-                    },
                   ),
                 ],
                 if (_backupDriverId == 'gdrive') ...[

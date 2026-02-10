@@ -5,21 +5,24 @@ LOG_FILE="/var/tmp/loop.log"
 exec > >(tee "$LOG_FILE") 2>&1
 
 VMS=(
-  #rocky10
+  rocky10
   win10
 )
 
 DRIVERS=(
   filesystem
   sftp
-  dummy
   gdrive
+  dummy
 )
+
+EXTRA_PARAMS=( )
+EXTRA_PARAMS=( --fresh )
 
 for vm in ${VMS[@]}; do
   for driver in ${DRIVERS[@]}; do
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] vm=${vm} driver=${driver}"
-    [ "${driver}" = dummy ] && EXTRA_PARAMS=( --no-restore ) || EXTRA_PARAMS=()
+    [ "${driver}" = dummy ] && EXTRA_PARAMS+=( --no-restore )
     dart run tools/backup_verify.dart --vm ${vm} --driver ${driver} ${EXTRA_PARAMS[@]}
   done
 done

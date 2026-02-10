@@ -138,7 +138,6 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
   }
 
   List<Widget> _buildRestoreSection(ColorScheme colorScheme) {
-    final backupPath = _backupPathController.text.trim();
     final selectedEntry = _selectedRestoreEntry();
     final restoreServer = _getRestoreServer();
     final canRestore = !_isRestoring && restoreServer != null && restoreServer.connectionType == ConnectionType.ssh && selectedEntry != null && selectedEntry.hasAllDisks;
@@ -219,10 +218,8 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
                 ],
               ),
               const SizedBox(height: 12),
-              if (_selectedDriverUsesPath() && backupPath.isEmpty)
-                Text('Set a Backup path in Settings first.', style: Theme.of(context).textTheme.bodyMedium)
-              else if (_restoreEntries.isEmpty && !_isLoadingRestoreEntries)
-                Text(_selectedDriverUsesPath() ? 'No backup XML files found under: $backupPath' : 'No backup XML files found.', style: Theme.of(context).textTheme.bodyMedium)
+              if (_restoreEntries.isEmpty && !_isLoadingRestoreEntries)
+                Text('No backup XML files found.', style: Theme.of(context).textTheme.bodyMedium)
               else if (selectedEntry != null) ...[
                 const SizedBox(height: 8),
                 Text('VM: ${selectedEntry.vmName}', style: Theme.of(context).textTheme.titleMedium),
