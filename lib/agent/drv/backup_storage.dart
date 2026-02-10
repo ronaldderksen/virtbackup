@@ -77,6 +77,7 @@ abstract class BackupDriver {
   String baseName(String path);
   String sanitizeFileName(String name);
   Future<void> cleanupInProgressFiles();
+  Future<void> closeConnections();
 }
 
 abstract class RemoteBlobDriver {
@@ -84,6 +85,12 @@ abstract class RemoteBlobDriver {
   Future<int?> blobLength(String hash);
   Stream<List<int>> openBlobStream(String hash, {int? length});
   Future<List<int>?> readBlobBytes(String hash);
+}
+
+abstract class BlobDirectoryLister {
+  Future<Set<String>> listBlobShard1();
+  Future<Set<String>> listBlobShard2(String shard1);
+  Future<Set<String>> listBlobNames(String shard1, String shard2);
 }
 
 class DriverFileWrite {

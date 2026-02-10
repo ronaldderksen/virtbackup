@@ -315,6 +315,7 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                     decoration: InputDecoration(
                       labelText: 'Backup path',
                       hintText: '/mnt/backups/libvirt',
+                      helperText: 'VirtBackup will create a "VirtBackup" folder inside this path.',
                       prefixIcon: Icon(Icons.folder_outlined),
                       suffixIcon: SizedBox(
                         width: 96,

@@ -100,7 +100,7 @@ There are two paths:
 
 1. **Backup start**
    - Agent selects the driver and prepares the destination.
-   - For the GDrive driver, the status message updates during prefill with live counts (blobs when `cacheBlobs` is enabled, otherwise shard dirs), and marks completion after prefill finishes.
+   - The agent initializes a lazy, in-memory blob directory cache used during hash checks (root and shard lists are fetched on demand, once per shard).
    - Manifests and folders are created as needed.
 
 2. **Hashblocks starts**
@@ -135,7 +135,7 @@ There are two paths:
    - GDrive: blobs are uploaded as individual files under `blobs/<shard1>/<shard2>/`.
    - Filesystem: blobs are written directly.
    - Dummy: blob existence is simulated per driver rules.
-   - GDrive pre-fills a per-backup cache of shard folders and blob names; `blobExists` uses the cache (no Drive list calls during backup).
+   - The agent maintains a per-backup, lazy blob directory cache outside the drivers; each shard is listed at most once and the cached results are reused for all hash checks.
 
 8. **Finalize**
    - Manifests are committed and the job completes.
@@ -149,9 +149,12 @@ The hashblocks path is divided into logical workers:
   - Parses hashes and zero runs.
   - Enqueues missing blocks.
   - Applies `LIMIT` backpressure when necessary.
+- `BlobCacheWorker` (in `workers/blob_cache_worker.dart`)
+  - Prefetches shard directory listings based on incoming hashes.
+  - Runs in the background so hash parsing does not block on dirlist calls.
 
 - `DirCreateWorker` (in `workers/dir_create_worker.dart`)
-  - Creates `blobs/<shard1>/<shard2>/` directories as hashes are seen.
+  - Creates `blobs/<shard1>/<shard2>/` directories when the agent's shard cache identifies missing dirs.
   - Uses its own queue and does **not** apply backpressure.
   - Caches created shards for the duration of a backup.
 
@@ -268,5 +271,6 @@ The agent supports optional native SFTP via FFI:
 - SFTP password is stored in `agent.yaml` as an encrypted value under `backup.sftp` (`passwordEnc`) using the same AES-GCM key derivation as SSH passwords.
 - The Google Drive storage driver (`driverId: gdrive`) stores data as individual blob files using the same directory layout as the filesystem driver.
 - All Google Drive API calls retry up to 5 times with exponential backoff starting at 2 seconds; each retry recreates the HTTP client connection, and a persistent failure aborts the backup with a clean error.
+- The filesystem backup path is configured via `backup.filesystem.path` and the app creates and uses a `VirtBackup` folder inside that path.
 - The Google Drive root folder is configured via `backup.gdrive.rootPath` (default `/`), and the app creates a `VirtBackup` folder inside that path.
 - The SFTP base path is configured via `backup.sftp.basePath` (example `/Backup`), and the app creates and uses a `VirtBackup` folder inside that path.

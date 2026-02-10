@@ -19,7 +19,7 @@ class GdrivePrefillStats {
   final int durationMs;
 }
 
-class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
+class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
   GdriveBackupDriver({required AppSettings settings, required Future<void> Function(AppSettings) persistSettings, Directory? settingsDir, void Function(String message)? logInfo})
     : _settings = settings,
       _persistSettings = persistSettings,
@@ -41,6 +41,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
   final Map<String, Future<String>> _folderInFlight = {};
   final Set<String> _folderChildrenLoaded = {};
   final Map<String, String> _blobShardFolderIds = {};
+  final Map<String, String> _blobShard1FolderIds = {};
   final Set<String> _blobShard1Names = {};
   final Map<String, Set<String>> _blobShard2Names = {};
   final Map<String, _DriveFileRef> _blobFiles = {};
@@ -142,6 +143,56 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
   }
 
   @override
+  Future<Set<String>> listBlobShard1() async {
+    await _ensureBlobsRoot();
+    final rootId = _blobsRootId;
+    if (rootId == null || rootId.isEmpty) {
+      return <String>{};
+    }
+    final folders = await _listChildFolders(rootId);
+    final names = <String>{};
+    for (final folder in folders) {
+      names.add(folder.name);
+      _blobShard1FolderIds[folder.name] = folder.id;
+    }
+    return names;
+  }
+
+  @override
+  Future<Set<String>> listBlobShard2(String shard1) async {
+    final shard1Id = await _findFolderByPath(['blobs', shard1]);
+    if (shard1Id == null || shard1Id.isEmpty) {
+      return <String>{};
+    }
+    _blobShard1FolderIds[shard1] = shard1Id;
+    final folders = await _listChildFolders(shard1Id);
+    final names = <String>{};
+    for (final folder in folders) {
+      names.add(folder.name);
+      _blobShardFolderIds['$shard1${folder.name}'] = folder.id;
+    }
+    return names;
+  }
+
+  @override
+  Future<Set<String>> listBlobNames(String shard1, String shard2) async {
+    final shard2Id = await _findFolderByPath(['blobs', shard1, shard2]);
+    if (shard2Id == null || shard2Id.isEmpty) {
+      return <String>{};
+    }
+    _blobShardFolderIds['$shard1$shard2'] = shard2Id;
+    final files = await _listFilesRaw("mimeType!='$_driveFolderMime' and '$shard2Id' in parents and trashed=false", fields: 'nextPageToken,files(id,name,parents)');
+    final names = <String>{};
+    for (final file in files) {
+      if (file.name.endsWith('.inprogress')) {
+        continue;
+      }
+      names.add(file.name);
+    }
+    return names;
+  }
+
+  @override
   Future<void> ensureReady() async {
     await _cacheRoot.create(recursive: true);
     await manifestsDir('tmp', 'tmp').parent.create(recursive: true);
@@ -160,10 +211,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
     await _ensureTmpFolder();
     await _ensureManifestFolder(serverId, vmName);
     await _ensureBlobsRoot();
-    final prefillStart = DateTime.now();
-    await _prefillBlobShardCache();
-    final prefillMs = DateTime.now().difference(prefillStart).inMilliseconds;
-    _logInfo('gdrive: prefill blob cache durationMs=$prefillMs');
     _logInfo('gdrive: prepare backup for $serverId/$vmName');
   }
 
@@ -239,6 +286,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
     _folderChildrenLoaded.clear();
     _blobsRootId = null;
     _blobShardFolderIds.clear();
+    _blobShard1FolderIds.clear();
     _blobShard1Names.clear();
     _blobShard2Names.clear();
     _blobNames.clear();
@@ -260,8 +308,15 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
     }
     final shard1 = hash.substring(0, 2);
     final shard2 = hash.substring(2, 4);
-    final folderId = await _ensureFolderByPath(['blobs', shard1, shard2]);
-    _blobShardFolderIds[shardKey] = folderId;
+    await _ensureBlobsRoot();
+    final rootId = _blobsRootId;
+    if (rootId == null || rootId.isEmpty) {
+      throw 'Missing blobs root for shard $shardKey';
+    }
+    final shard1Ref = _blobShard1FolderIds[shard1] ?? (await _createFolder(rootId, shard1)).id;
+    _blobShard1FolderIds[shard1] = shard1Ref;
+    final folderRef = await _createFolder(shard1Ref, shard2);
+    _blobShardFolderIds[shardKey] = folderRef.id;
     _blobShard1Names.add(shard1);
     _blobShard2Names.putIfAbsent(shard1, () => <String>{}).add(shard2);
   }
@@ -272,9 +327,26 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
       return false;
     }
     final shardKey = hash.substring(0, 4);
-    final parentId = _blobShardFolderIds[shardKey];
+    var parentId = _blobShardFolderIds[shardKey];
     if (parentId == null) {
+      parentId = await _findBlobShardFolderId(hash);
+      if (parentId != null && parentId.isNotEmpty) {
+        _blobShardFolderIds[shardKey] = parentId;
+      } else {
+        await ensureBlobDir(hash);
+        parentId = _blobShardFolderIds[shardKey];
+      }
+    }
+    if (parentId == null || parentId.isEmpty) {
       throw 'Blob shard folder not ready for $shardKey';
+    }
+    if (_cacheBlobsEnabled && !_blobNames.contains(hash)) {
+      final existing = await _findFileByName(parentId, hash);
+      if (existing != null) {
+        _blobNames.add(hash);
+        _blobFiles[hash] = existing;
+        return false;
+      }
     }
     final ref = await _uploadSimple(name: hash, parentId: parentId, bytes: bytes, contentType: 'application/octet-stream');
     if (_cacheBlobsEnabled) {
@@ -638,6 +710,18 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
     await _deleteInProgressInDir(tmpDir());
   }
 
+  @override
+  Future<void> closeConnections() async {
+    try {
+      _client.close();
+    } catch (_) {}
+    for (final client in _uploadClients) {
+      try {
+        client.close();
+      } catch (_) {}
+    }
+  }
+
   Future<void> _ensureBlobsRoot() async {
     if (_blobsRootId != null) {
       return;
@@ -678,98 +762,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
       _blobShard2Names.putIfAbsent(shard1, () => <String>{}).add(shard2);
     }
     return folderId;
-  }
-
-  Future<void> _prefillBlobShardCache() async {
-    if (_blobCachePrefilled) {
-      return;
-    }
-    final startedAt = DateTime.now();
-    DateTime? lastEmitAt;
-    _logInfo('gdrive: prefill blob cache start (cacheBlobs=$_cacheBlobsEnabled)');
-    await _ensureBlobsRoot();
-    final rootId = _blobsRootId;
-    if (rootId == null || rootId.isEmpty) {
-      _prefillStats = GdrivePrefillStats(shard1Count: 0, shard2Count: 0, blobCount: 0, durationMs: DateTime.now().difference(startedAt).inMilliseconds);
-      onPrefillProgress?.call(_prefillStats, true);
-      _logInfo('gdrive: prefill blob cache skipped (missing blobs root)');
-      return;
-    }
-    _blobShardFolderIds.clear();
-    _blobShard1Names.clear();
-    _blobShard2Names.clear();
-    if (_cacheBlobsEnabled) {
-      _blobNames.clear();
-      _blobFiles.clear();
-    }
-    var shard1Count = 0;
-    var shard2Count = 0;
-    var blobCount = 0;
-    void emitPrefill({required bool done}) {
-      final now = DateTime.now();
-      if (!done && lastEmitAt != null && now.difference(lastEmitAt!) < const Duration(seconds: 1)) {
-        return;
-      }
-      lastEmitAt = now;
-      final durationMs = now.difference(startedAt).inMilliseconds;
-      _prefillStats = GdrivePrefillStats(shard1Count: shard1Count, shard2Count: shard2Count, blobCount: blobCount, durationMs: durationMs);
-      onPrefillProgress?.call(_prefillStats, done);
-    }
-
-    final shard1Folders = await _listChildFolders(rootId);
-    final shard2Folders = <(String shard1, _DriveFileRef shard2)>[];
-    for (final shard1 in shard1Folders) {
-      _blobShard1Names.add(shard1.name);
-      shard1Count++;
-      final shard2Children = await _listChildFolders(shard1.id);
-      if (shard2Children.isEmpty) {
-        continue;
-      }
-      final shard2Names = _blobShard2Names.putIfAbsent(shard1.name, () => <String>{});
-      for (final shard2 in shard2Children) {
-        shard2Names.add(shard2.name);
-        _blobShardFolderIds['${shard1.name}${shard2.name}'] = shard2.id;
-        shard2Count++;
-        shard2Folders.add((shard1.name, shard2));
-      }
-      emitPrefill(done: false);
-    }
-    emitPrefill(done: false);
-
-    if (_cacheBlobsEnabled) {
-      const maxConcurrentLists = 8;
-      var nextShard2Index = 0;
-      final shard2Fetchers = List<Future<void>>.generate(maxConcurrentLists, (_) async {
-        while (true) {
-          final currentIndex = nextShard2Index;
-          if (currentIndex >= shard2Folders.length) {
-            break;
-          }
-          nextShard2Index += 1;
-          final entry = shard2Folders[currentIndex];
-          final shard1 = entry.$1;
-          final shard2 = entry.$2;
-          final files = await _listFilesRaw("mimeType!='$_driveFolderMime' and '${shard2.id}' in parents and trashed=false", fields: 'nextPageToken,files(id,name,parents,size)');
-          for (final file in files) {
-            if (file.name.endsWith('.inprogress')) {
-              continue;
-            }
-            _blobNames.add(file.name);
-            _blobFiles[file.name] = file;
-            blobCount += 1;
-            _blobShard2Names.putIfAbsent(shard1, () => <String>{}).add(shard2.name);
-          }
-          emitPrefill(done: false);
-        }
-      });
-      await Future.wait(shard2Fetchers);
-    }
-
-    _blobCachePrefilled = true;
-    final elapsedMs = DateTime.now().difference(startedAt).inMilliseconds;
-    _prefillStats = GdrivePrefillStats(shard1Count: shard1Count, shard2Count: shard2Count, blobCount: blobCount, durationMs: elapsedMs);
-    onPrefillProgress?.call(_prefillStats, true);
-    _logInfo('gdrive: prefill blob cache done shard1=$shard1Count shard2=$shard2Count blobs=$blobCount durationMs=$elapsedMs');
   }
 
   Future<String?> _resolveDriveRootId() async {

@@ -36,6 +36,31 @@ class _DirCreateWorker {
     return _knownShards.contains(shardKey);
   }
 
+  void markReady(String shardKey) {
+    if (_knownShards.contains(shardKey)) {
+      return;
+    }
+    _knownShards.add(shardKey);
+    _pendingShards.remove(shardKey);
+    _queue.removeWhere((hash) => hash.length >= 4 && hash.substring(0, 4) == shardKey);
+    if (_readyWaiters.isNotEmpty) {
+      for (final waiter in _readyWaiters) {
+        if (!waiter.isCompleted) {
+          waiter.complete();
+        }
+      }
+      _readyWaiters.clear();
+    }
+    final waiters = _waiters.remove(shardKey);
+    if (waiters != null) {
+      for (final waiter in waiters) {
+        if (!waiter.isCompleted) {
+          waiter.complete();
+        }
+      }
+    }
+  }
+
   Future<void> waitForAnyReady() async {
     throwIfError();
     final completer = Completer<void>();

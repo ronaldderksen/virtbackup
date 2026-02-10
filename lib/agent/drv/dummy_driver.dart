@@ -2,7 +2,7 @@ import 'dart:io';
 
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 
-class DummyBackupDriver implements BackupDriver {
+class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
   DummyBackupDriver(this._destination, {required bool tmpWritesEnabled, Map<String, dynamic> driverParams = const <String, dynamic>{}})
     : _tmpWritesEnabled = tmpWritesEnabled,
       _throttleBytesPerSecond = _resolveThrottleBytesPerSecond(driverParams);
@@ -307,29 +307,21 @@ class DummyBackupDriver implements BackupDriver {
       return false;
     }
     await _simulateWriteDelay(bytes.length);
-    if (!_tmpWritesEnabled) {
-      return true;
-    }
-    final blob = blobFile(hash);
-    if (await blob.exists()) {
-      return false;
-    }
-    final dir = blob.parent;
-    await dir.create(recursive: true);
-    final tempPath = '${tmpDir().path}${Platform.pathSeparator}$hash.inprogress.${DateTime.now().microsecondsSinceEpoch}';
-    final tempFile = File(tempPath);
-    await tempFile.writeAsBytes(bytes);
-    try {
-      if (await tempFile.exists()) {
-        await tempFile.delete();
-      }
-      return true;
-    } catch (_) {
+    if (_tmpWritesEnabled) {
+      final tempPath = '${tmpDir().path}${Platform.pathSeparator}$hash.inprogress.${DateTime.now().microsecondsSinceEpoch}';
+      final tempFile = File(tempPath);
+      await tempFile.writeAsBytes(bytes);
       try {
-        await tempFile.delete();
-      } catch (_) {}
+        if (await tempFile.exists()) {
+          await tempFile.delete();
+        }
+      } catch (_) {
+        try {
+          await tempFile.delete();
+        } catch (_) {}
+      }
     }
-    return false;
+    return true;
   }
 
   Future<void> _simulateWriteDelay(int byteCount) async {
@@ -373,7 +365,22 @@ class DummyBackupDriver implements BackupDriver {
     if (hash.length < 4) {
       return false;
     }
-    return blobFile(hash).exists();
+    return false;
+  }
+
+  @override
+  Future<Set<String>> listBlobShard1() async {
+    return <String>{};
+  }
+
+  @override
+  Future<Set<String>> listBlobShard2(String shard1) async {
+    return <String>{};
+  }
+
+  @override
+  Future<Set<String>> listBlobNames(String shard1, String shard2) async {
+    return <String>{};
   }
 
   @override
@@ -384,6 +391,11 @@ class DummyBackupDriver implements BackupDriver {
     await _deleteInProgressInDir(_manifestsRoot());
     await _deleteInProgressInDir(tmpDir());
     await _deleteInProgressInDir(blobsDir());
+  }
+
+  @override
+  Future<void> closeConnections() async {
+    return;
   }
 
   Future<void> _deleteDirIfExists(Directory dir) async {

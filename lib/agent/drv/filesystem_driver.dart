@@ -2,10 +2,11 @@ import 'dart:io';
 
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 
-class FilesystemBackupDriver implements BackupDriver {
+class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
   FilesystemBackupDriver(this._destination);
 
   final String _destination;
+  static const String _appFolderName = 'VirtBackup';
 
   @override
   BackupDriverCapabilities get capabilities => const BackupDriverCapabilities(
@@ -19,7 +20,7 @@ class FilesystemBackupDriver implements BackupDriver {
   );
 
   @override
-  String get destination => _destination;
+  String get destination => _rootDir().path;
 
   @override
   bool get discardWrites => false;
@@ -27,9 +28,9 @@ class FilesystemBackupDriver implements BackupDriver {
   @override
   int get bufferedBytes => 0;
 
-  Directory _rootDir() => Directory(_destination);
+  Directory _rootDir() => Directory('$_destination${Platform.pathSeparator}$_appFolderName');
 
-  Directory _manifestsRoot() => Directory('$_destination${Platform.pathSeparator}manifests');
+  Directory _manifestsRoot() => Directory('${_rootDir().path}${Platform.pathSeparator}manifests');
 
   @override
   Directory manifestsDir(String serverId, String vmName) {
@@ -38,12 +39,12 @@ class FilesystemBackupDriver implements BackupDriver {
 
   @override
   Directory blobsDir() {
-    return Directory('$_destination${Platform.pathSeparator}blobs');
+    return Directory('${_rootDir().path}${Platform.pathSeparator}blobs');
   }
 
   @override
   Directory tmpDir() {
-    return Directory('$_destination${Platform.pathSeparator}tmp');
+    return Directory('${_rootDir().path}${Platform.pathSeparator}tmp');
   }
 
   @override
@@ -84,8 +85,60 @@ class FilesystemBackupDriver implements BackupDriver {
   }
 
   @override
+  Future<Set<String>> listBlobShard1() async {
+    final root = blobsDir();
+    if (!await root.exists()) {
+      return <String>{};
+    }
+    final names = <String>{};
+    await for (final entity in root.list(followLinks: false)) {
+      if (entity is Directory) {
+        names.add(baseName(entity.path));
+      }
+    }
+    return names;
+  }
+
+  @override
+  Future<Set<String>> listBlobShard2(String shard1) async {
+    final path = '${blobsDir().path}${Platform.pathSeparator}$shard1';
+    final dir = Directory(path);
+    if (!await dir.exists()) {
+      return <String>{};
+    }
+    final names = <String>{};
+    await for (final entity in dir.list(followLinks: false)) {
+      if (entity is Directory) {
+        names.add(baseName(entity.path));
+      }
+    }
+    return names;
+  }
+
+  @override
+  Future<Set<String>> listBlobNames(String shard1, String shard2) async {
+    final path = '${blobsDir().path}${Platform.pathSeparator}$shard1${Platform.pathSeparator}$shard2';
+    final dir = Directory(path);
+    if (!await dir.exists()) {
+      return <String>{};
+    }
+    final names = <String>{};
+    await for (final entity in dir.list(followLinks: false)) {
+      if (entity is! File) {
+        continue;
+      }
+      final name = baseName(entity.path);
+      if (name.endsWith('.inprogress')) {
+        continue;
+      }
+      names.add(name);
+    }
+    return names;
+  }
+
+  @override
   Stream<File> listXmlFiles() async* {
-    final root = _rootDir();
+    final root = _manifestsRoot();
     if (!await root.exists()) {
       return;
     }
@@ -316,9 +369,6 @@ class FilesystemBackupDriver implements BackupDriver {
       return;
     }
     final dir = blobFile(hash).parent;
-    if (await dir.exists()) {
-      return;
-    }
     await dir.create(recursive: true);
   }
 
@@ -328,6 +378,7 @@ class FilesystemBackupDriver implements BackupDriver {
       return false;
     }
     final blob = blobFile(hash);
+    await blob.parent.create(recursive: true);
     final tempPath = '${blob.path}.inprogress.${DateTime.now().microsecondsSinceEpoch}';
     final tempFile = File(tempPath);
     await tempFile.writeAsBytes(bytes);
@@ -360,6 +411,11 @@ class FilesystemBackupDriver implements BackupDriver {
     await _deleteInProgressInDir(_manifestsRoot());
     await _deleteInProgressInDir(tmpDir());
     await _deleteInProgressInDir(blobsDir());
+  }
+
+  @override
+  Future<void> closeConnections() async {
+    return;
   }
 
   Future<void> _deleteDirIfExists(Directory dir) async {

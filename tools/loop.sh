@@ -10,10 +10,10 @@ VMS=(
 )
 
 DRIVERS=(
-  sftp
   filesystem
-  gdrive
+  sftp
   dummy
+  gdrive
 )
 
 for vm in ${VMS[@]}; do

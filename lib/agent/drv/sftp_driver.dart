@@ -9,16 +9,7 @@ import 'package:ffi/ffi.dart';
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 import 'package:virtbackup/common/settings.dart';
 
-class SftpPrefillStats {
-  const SftpPrefillStats({required this.shard1Count, required this.shard2Count, required this.blobCount, required this.durationMs});
-
-  final int shard1Count;
-  final int shard2Count;
-  final int blobCount;
-  final int durationMs;
-}
-
-class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
+class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
   SftpBackupDriver({required AppSettings settings, void Function(String message)? logInfo})
     : _settings = settings,
       _cacheRoot = Directory('${_tempBase()}${Platform.pathSeparator}virtbackup_sftp_cache'),
@@ -31,18 +22,11 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
 
   static const int _writeConcurrency = 8;
   static const String _remoteAppFolderName = 'VirtBackup';
-  static const int _sftpStatusNoSuchFile = 2;
-
-  void Function(SftpPrefillStats stats, bool done)? onPrefillProgress;
-  SftpPrefillStats _prefillStats = const SftpPrefillStats(shard1Count: 0, shard2Count: 0, blobCount: 0, durationMs: 0);
-  SftpPrefillStats get prefillStats => _prefillStats;
-
   final _SftpPool _pool = _SftpPool(maxSessions: _writeConcurrency);
   final _NativeSftpPool _nativePool = _NativeSftpPool(maxSessions: _writeConcurrency);
   final Set<String> _knownRemoteShardKeys = <String>{};
   final Set<String> _remoteBlobNames = <String>{};
   final Map<String, int> _remoteBlobSizes = <String, int>{};
-  bool _blobIndexFullyPrefilled = false;
 
   String get _host => _settings.sftpHost.trim();
   int get _port => _settings.sftpPort;
@@ -94,11 +78,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
       await _ensureRemoteDir(sftp, _remoteTmpRoot());
       await _ensureRemoteDir(sftp, _remoteManifestFolder(serverId, vmName));
     });
-
-    final prefillStart = DateTime.now();
-    await _prefillRemoteBlobCache();
-    final prefillMs = DateTime.now().difference(prefillStart).inMilliseconds;
-    _logInfo('sftp: prefill blob cache durationMs=$prefillMs');
   }
 
   void _validateConfig() {
@@ -162,6 +141,66 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
     final shard1 = hash.substring(0, 2);
     final shard2 = hash.substring(2, 4);
     return File('${blobsDir().path}${Platform.pathSeparator}$shard1${Platform.pathSeparator}$shard2${Platform.pathSeparator}$hash');
+  }
+
+  @override
+  Future<Set<String>> listBlobShard1() async {
+    return _withSftp('list blob shard1', (sftp) async {
+      final entries = await sftp.listdir(_remoteBlobsRoot());
+      final names = <String>{};
+      for (final entry in entries) {
+        final name = entry.filename;
+        if (name == '.' || name == '..') {
+          continue;
+        }
+        if (!entry.attr.isDirectory) {
+          continue;
+        }
+        names.add(name);
+      }
+      return names;
+    });
+  }
+
+  @override
+  Future<Set<String>> listBlobShard2(String shard1) async {
+    return _withSftp('list blob shard2', (sftp) async {
+      final entries = await sftp.listdir(_remoteJoin(_remoteBlobsRoot(), shard1));
+      final names = <String>{};
+      for (final entry in entries) {
+        final name = entry.filename;
+        if (name == '.' || name == '..') {
+          continue;
+        }
+        if (!entry.attr.isDirectory) {
+          continue;
+        }
+        names.add(name);
+      }
+      return names;
+    });
+  }
+
+  @override
+  Future<Set<String>> listBlobNames(String shard1, String shard2) async {
+    return _withSftp('list blob names', (sftp) async {
+      final entries = await sftp.listdir(_remoteJoin(_remoteBlobsRoot(), shard1, shard2));
+      final names = <String>{};
+      for (final entry in entries) {
+        final name = entry.filename;
+        if (name == '.' || name == '..') {
+          continue;
+        }
+        if (entry.attr.isDirectory) {
+          continue;
+        }
+        if (name.endsWith('.inprogress')) {
+          continue;
+        }
+        names.add(name);
+      }
+      return names;
+    });
   }
 
   @override
@@ -239,19 +278,11 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
     if (_knownRemoteShardKeys.contains(shardKey)) {
       return;
     }
-    // If prefill fully indexed remote blobs/dirs, then:
-    // - existing shard dirs are in `_knownRemoteShardKeys`
-    // - missing shard dirs must be created as part of the write path (blind mkdir, no stat)
-    // So we must not do remote ensure calls here, and we must not "mark as known" because that
-    // would prevent the write path from creating the directory.
-    if (_blobIndexFullyPrefilled) {
-      return;
-    }
     final shard1 = hash.substring(0, 2);
     final shard2 = hash.substring(2, 4);
     final remoteDir = _remoteJoin(_remoteBlobsRoot(), shard1, shard2);
-    await _withSftp('ensure blob dir', (sftp) async {
-      await _ensureRemoteDir(sftp, remoteDir);
+    await _withSftp('ensure blob dir:$remoteDir', (sftp) async {
+      await _ensureRemoteDirBlind(sftp, remoteDir);
     });
     _knownRemoteShardKeys.add(shardKey);
   }
@@ -268,24 +299,15 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
     final remoteTemp = '$remotePath.inprogress.${DateTime.now().microsecondsSinceEpoch}';
     final data = Uint8List.fromList(bytes);
     return _withSftp('write blob', (sftp) async {
-      if (!_blobIndexFullyPrefilled) {
-        if (await _remoteExists(sftp, remotePath)) {
-          _remoteBlobNames.add(hash);
-          return false;
-        }
+      if (await _remoteExists(sftp, remotePath)) {
+        _remoteBlobNames.add(hash);
+        return false;
       }
 
-      // If prefill fully indexed remote blobs, we must not do any remote `stat` calls here.
-      // We either skip directory creation (known shard) or do a best-effort mkdir without checking.
       final shardKey = hash.substring(0, 4);
-      if (!_blobIndexFullyPrefilled || !_knownRemoteShardKeys.contains(shardKey)) {
-        if (_blobIndexFullyPrefilled) {
-          await _ensureRemoteDirBlind(sftp, _remoteBlobDir(hash));
-          _knownRemoteShardKeys.add(shardKey);
-        } else {
-          await _ensureRemoteDir(sftp, _remoteBlobDir(hash));
-          _knownRemoteShardKeys.add(shardKey);
-        }
+      if (!_knownRemoteShardKeys.contains(shardKey)) {
+        await _ensureRemoteDir(sftp, _remoteBlobDir(hash));
+        _knownRemoteShardKeys.add(shardKey);
       }
       if (_nativeSftp != null) {
         await _nativeWriteAll(remoteTemp, data, truncate: true);
@@ -303,21 +325,10 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
         _remoteBlobSizes[hash] = bytes.length;
         return true;
       } catch (error) {
-        // We must not `stat` when prefill indexed all remote blobs, but we still want correct behavior.
-        // If rename failed because the target already exists, treat it as "missing write" without failing the backup.
-        if (_blobIndexFullyPrefilled) {
-          final exists = await _remoteFileExistsByOpenRead(sftp, remotePath);
-          if (exists) {
-            await _tryRemoveRemoteFile(sftp, remoteTemp);
-            _remoteBlobNames.add(hash);
-            return false;
-          }
-        } else {
-          if (await _remoteExists(sftp, remotePath)) {
-            await _tryRemoveRemoteFile(sftp, remoteTemp);
-            _remoteBlobNames.add(hash);
-            return false;
-          }
+        if (await _remoteExists(sftp, remotePath)) {
+          await _tryRemoveRemoteFile(sftp, remoteTemp);
+          _remoteBlobNames.add(hash);
+          return false;
         }
         await _tryRemoveRemoteFile(sftp, remoteTemp);
         rethrow;
@@ -332,9 +343,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
     }
     if (_remoteBlobNames.contains(hash)) {
       return true;
-    }
-    if (_blobIndexFullyPrefilled) {
-      return false;
     }
     return _withSftp('blob exists', (sftp) async => _remoteExists(sftp, _remoteBlobPath(hash)));
   }
@@ -352,9 +360,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
     final cached = _remoteBlobSizes[hash];
     if (cached != null) {
       return cached;
-    }
-    if (_blobIndexFullyPrefilled) {
-      return null;
     }
     return _withSftp('blob length', (sftp) async {
       try {
@@ -380,7 +385,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
     final bindings = _nativeSftp;
     if (bindings != null) {
       final stopwatch = Stopwatch()..start();
-      _logInfo('sftp: read blob stream start');
       final lease = await _nativePool.lease(_connectNative);
       Pointer<Void>? file;
       Pointer<Uint8>? buffer;
@@ -419,13 +423,15 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
           calloc.free(buffer);
         }
         lease.release();
-        _logInfo('sftp: read blob stream done durationMs=${stopwatch.elapsedMilliseconds}');
+        final elapsedMs = stopwatch.elapsedMilliseconds;
+        if (elapsedMs > 500) {
+          _logInfo('sftp: read blob stream done durationMs=$elapsedMs');
+        }
       }
       return;
     }
 
     final stopwatch = Stopwatch()..start();
-    _logInfo('sftp: read blob stream start');
     final lease = await _pool.lease(_connect);
     try {
       final sftp = lease.sftp;
@@ -439,7 +445,10 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
       }
     } finally {
       lease.release();
-      _logInfo('sftp: read blob stream done durationMs=${stopwatch.elapsedMilliseconds}');
+      final elapsedMs = stopwatch.elapsedMilliseconds;
+      if (elapsedMs > 500) {
+        _logInfo('sftp: read blob stream done durationMs=$elapsedMs');
+      }
     }
   }
 
@@ -724,6 +733,12 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
     await _deleteInProgressInDir(blobsDir());
   }
 
+  @override
+  Future<void> closeConnections() async {
+    _pool.closeAll();
+    _nativePool.closeAll();
+  }
+
   Future<_SshSftpSession> _connect() async {
     final socket = await SSHSocket.connect(_host, _port, timeout: const Duration(seconds: 10));
     final client = SSHClient(socket, username: _username, onPasswordRequest: () => _password);
@@ -744,6 +759,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
   }
 
   Future<void> _nativeWriteAll(String remotePath, Uint8List data, {required bool truncate}) async {
+    final stopwatch = Stopwatch()..start();
     final bindings = _nativeSftp;
     if (bindings == null) {
       throw 'Native SFTP is not available.';
@@ -770,6 +786,10 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
         calloc.free(buffer);
       }
       lease.release();
+      final elapsedMs = stopwatch.elapsedMilliseconds;
+      if (elapsedMs > 250) {
+        _logInfo('sftp: native write done durationMs=$elapsedMs path=$remotePath bytes=${data.length}');
+      }
     }
   }
 
@@ -814,7 +834,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
   }
 
   Future<T> _withSftp<T>(String label, Future<T> Function(SftpClient sftp) action) async {
-    final shouldLog = label != 'write blob';
+    final shouldLog = label != 'write blob' && !label.startsWith('list blob ') && !label.startsWith('ensure blob dir');
     final stopwatch = Stopwatch()..start();
     if (shouldLog) {
       _logInfo('sftp: $label start');
@@ -823,7 +843,14 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
     try {
       final result = await action(lease.sftp);
       if (shouldLog) {
-        _logInfo('sftp: $label done durationMs=${stopwatch.elapsedMilliseconds}');
+        final elapsedMs = stopwatch.elapsedMilliseconds;
+        _logInfo('sftp: $label done durationMs=$elapsedMs');
+      } else if (label.startsWith('ensure blob dir:')) {
+        final elapsedMs = stopwatch.elapsedMilliseconds;
+        if (elapsedMs > 250) {
+          final path = label.substring('ensure blob dir:'.length);
+          _logInfo('sftp: ensure blob dir done durationMs=$elapsedMs path=$path');
+        }
       }
       return result;
     } catch (error) {
@@ -861,147 +888,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
   String _remoteBlobDir(String hash) => _remoteJoin(_remoteBlobsRoot(), hash.substring(0, 2), hash.substring(2, 4));
   String _remoteBlobPath(String hash) => _remoteJoin(_remoteBlobDir(hash), hash);
 
-  Future<void> _prefillRemoteBlobCache() async {
-    if (_blobIndexFullyPrefilled) {
-      return;
-    }
-    _logInfo('sftp: prefill blob cache start');
-    _knownRemoteShardKeys.clear();
-    _remoteBlobNames.clear();
-    _remoteBlobSizes.clear();
-    final startedAt = DateTime.now();
-    DateTime? lastEmitAt;
-
-    final blobsRoot = _remoteBlobsRoot();
-    final shard2Folders = <String>[];
-    var shard1Count = 0;
-    var shard2Count = 0;
-    var blobCount = 0;
-    var prefillOk = false;
-    var hadError = false;
-
-    void emitPrefill({required bool done}) {
-      final now = DateTime.now();
-      if (!done && lastEmitAt != null && now.difference(lastEmitAt!) < const Duration(seconds: 1)) {
-        return;
-      }
-      lastEmitAt = now;
-      final durationMs = now.difference(startedAt).inMilliseconds;
-      _prefillStats = SftpPrefillStats(shard1Count: shard1Count, shard2Count: shard2Count, blobCount: blobCount, durationMs: durationMs);
-      onPrefillProgress?.call(_prefillStats, done);
-    }
-
-    await _withSftp('prefill shard folders', (sftp) async {
-      List<SftpName> shard1Entries;
-      try {
-        shard1Entries = await sftp.listdir(blobsRoot);
-      } catch (_) {
-        // If the blobs root can't be listed, we keep caches empty and do not mark as prefetched.
-        hadError = true;
-        return;
-      }
-      prefillOk = true;
-      for (final shard1 in shard1Entries) {
-        final name1 = shard1.filename;
-        if (name1 == '.' || name1 == '..') continue;
-        if (!shard1.attr.isDirectory) continue;
-        shard1Count += 1;
-        final shard1Path = _remoteJoin(blobsRoot, name1);
-        List<SftpName> shard2Entries;
-        try {
-          shard2Entries = await sftp.listdir(shard1Path);
-        } catch (_) {
-          hadError = true;
-          continue;
-        }
-        for (final shard2 in shard2Entries) {
-          final name2 = shard2.filename;
-          if (name2 == '.' || name2 == '..') continue;
-          if (!shard2.attr.isDirectory) continue;
-          shard2Count += 1;
-          if (name1.length == 2 && name2.length == 2) {
-            _knownRemoteShardKeys.add('$name1$name2');
-          }
-          shard2Folders.add(_remoteJoin(shard1Path, name2));
-        }
-        emitPrefill(done: false);
-      }
-    });
-    emitPrefill(done: false);
-
-    const maxConcurrentLists = _writeConcurrency;
-    var nextShard2Index = 0;
-    final listers = List<Future<void>>.generate(maxConcurrentLists, (_) {
-      return _withSftp('prefill blobs', (sftp) async {
-        while (true) {
-          final index = nextShard2Index;
-          if (index >= shard2Folders.length) {
-            break;
-          }
-          nextShard2Index += 1;
-          final folder = shard2Folders[index];
-          List<SftpName> entries;
-          try {
-            entries = await sftp.listdir(folder);
-          } catch (_) {
-            hadError = true;
-            return;
-          }
-          for (final entry in entries) {
-            final name = entry.filename;
-            if (name == '.' || name == '..') continue;
-            if (entry.attr.isDirectory) continue;
-            if (name.endsWith('.inprogress')) continue;
-            _remoteBlobNames.add(name);
-            final size = entry.attr.size;
-            if (size != null) {
-              _remoteBlobSizes[name] = size;
-            }
-            blobCount += 1;
-          }
-          emitPrefill(done: false);
-        }
-      });
-    });
-    await Future.wait(listers);
-
-    _blobIndexFullyPrefilled = prefillOk && !hadError;
-    final elapsedMs = DateTime.now().difference(startedAt).inMilliseconds;
-    _logInfo('sftp: prefill blob cache done shard1=$shard1Count shard2=$shard2Count blobs=$blobCount durationMs=$elapsedMs fullyPrefilled=$_blobIndexFullyPrefilled');
-    _prefillStats = SftpPrefillStats(shard1Count: shard1Count, shard2Count: shard2Count, blobCount: blobCount, durationMs: elapsedMs);
-    onPrefillProgress?.call(_prefillStats, true);
-  }
-
-  Future<void> _ensureRemoteDirBlind(SftpClient sftp, String remotePath) async {
-    final normalized = _normalizeRemotePath(remotePath);
-    if (normalized == '/' || normalized.isEmpty) {
-      return;
-    }
-    final parts = normalized.split('/').where((part) => part.trim().isNotEmpty).toList();
-    var current = normalized.startsWith('/') ? '/' : '';
-    for (final part in parts) {
-      current = current.isEmpty || current == '/' ? '$current$part' : '$current/$part';
-      try {
-        await sftp.mkdir(current);
-      } catch (_) {
-        // Don't check via `stat`: callers use this in "no remote stat" paths.
-      }
-    }
-  }
-
-  Future<bool> _remoteFileExistsByOpenRead(SftpClient sftp, String remotePath) async {
-    try {
-      final file = await sftp.open(remotePath, mode: SftpFileOpenMode.read);
-      await file.close();
-      return true;
-    } on SftpStatusError catch (error) {
-      if (error.code == _sftpStatusNoSuchFile) {
-        return false;
-      }
-      rethrow;
-    }
-  }
-
   Future<void> _commitSmallRemoteFile({required File localFile, required String remotePath}) async {
     if (!await localFile.exists()) {
       return;
@@ -1027,6 +913,23 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
         rethrow;
       }
     });
+  }
+
+  Future<void> _ensureRemoteDirBlind(SftpClient sftp, String remotePath) async {
+    final normalized = _normalizeRemotePath(remotePath);
+    if (normalized == '/' || normalized.isEmpty) {
+      return;
+    }
+    final parts = normalized.split('/').where((part) => part.trim().isNotEmpty).toList();
+    var current = normalized.startsWith('/') ? '/' : '';
+    for (final part in parts) {
+      current = current.isEmpty || current == '/' ? '$current$part' : '$current/$part';
+      try {
+        await sftp.mkdir(current);
+      } catch (_) {
+        // Ignore: blind create should not stat or fail on existing dirs.
+      }
+    }
   }
 
   Future<List<int>> _downloadRemoteFile(SftpClient sftp, String remotePath) async {
@@ -1247,16 +1150,26 @@ class _SftpPool {
   final List<_SshSftpSession> _idle = <_SshSftpSession>[];
   final List<_SshSftpSession> _all = <_SshSftpSession>[];
   final List<Completer<_SftpLease>> _waiters = <Completer<_SftpLease>>[];
+  bool _closed = false;
+  var _connecting = 0;
 
   Future<_SftpLease> lease(Future<_SshSftpSession> Function() connect) async {
+    if (_closed) {
+      throw 'SFTP pool is closed.';
+    }
     if (_idle.isNotEmpty) {
       final session = _idle.removeLast();
       return _SftpLease(this, session);
     }
-    if (_all.length < maxSessions) {
-      final session = await connect();
-      _all.add(session);
-      return _SftpLease(this, session);
+    if (_all.length + _connecting < maxSessions) {
+      _connecting += 1;
+      try {
+        final session = await connect();
+        _all.add(session);
+        return _SftpLease(this, session);
+      } finally {
+        _connecting -= 1;
+      }
     }
     final waiter = Completer<_SftpLease>();
     _waiters.add(waiter);
@@ -1264,6 +1177,12 @@ class _SftpPool {
   }
 
   void release(_SshSftpSession session) {
+    if (_closed) {
+      try {
+        session.close();
+      } catch (_) {}
+      return;
+    }
     if (_waiters.isNotEmpty) {
       final waiter = _waiters.removeAt(0);
       if (!waiter.isCompleted) {
@@ -1272,6 +1191,24 @@ class _SftpPool {
       }
     }
     _idle.add(session);
+  }
+
+  void closeAll() {
+    _closed = true;
+    for (final waiter in _waiters) {
+      if (!waiter.isCompleted) {
+        waiter.completeError('SFTP pool closed.');
+      }
+    }
+    _waiters.clear();
+    for (final session in _all) {
+      try {
+        session.close();
+      } catch (_) {}
+    }
+    _all.clear();
+    _idle.clear();
+    _connecting = 0;
   }
 }
 
@@ -1389,16 +1326,26 @@ class _NativeSftpPool {
   final List<_NativeSftpSession> _idle = <_NativeSftpSession>[];
   final List<_NativeSftpSession> _all = <_NativeSftpSession>[];
   final List<Completer<_NativeSftpLease>> _waiters = <Completer<_NativeSftpLease>>[];
+  bool _closed = false;
+  var _connecting = 0;
 
   Future<_NativeSftpLease> lease(Future<_NativeSftpSession> Function() connect) async {
+    if (_closed) {
+      throw 'Native SFTP pool is closed.';
+    }
     if (_idle.isNotEmpty) {
       final session = _idle.removeLast();
       return _NativeSftpLease(this, session);
     }
-    if (_all.length < maxSessions) {
-      final session = await connect();
-      _all.add(session);
-      return _NativeSftpLease(this, session);
+    if (_all.length + _connecting < maxSessions) {
+      _connecting += 1;
+      try {
+        final session = await connect();
+        _all.add(session);
+        return _NativeSftpLease(this, session);
+      } finally {
+        _connecting -= 1;
+      }
     }
     final waiter = Completer<_NativeSftpLease>();
     _waiters.add(waiter);
@@ -1406,6 +1353,12 @@ class _NativeSftpPool {
   }
 
   void release(_NativeSftpSession session) {
+    if (_closed) {
+      try {
+        session.close();
+      } catch (_) {}
+      return;
+    }
     if (_waiters.isNotEmpty) {
       final waiter = _waiters.removeAt(0);
       if (!waiter.isCompleted) {
@@ -1414,6 +1367,24 @@ class _NativeSftpPool {
       }
     }
     _idle.add(session);
+  }
+
+  void closeAll() {
+    _closed = true;
+    for (final waiter in _waiters) {
+      if (!waiter.isCompleted) {
+        waiter.completeError('Native SFTP pool closed.');
+      }
+    }
+    _waiters.clear();
+    for (final session in _all) {
+      try {
+        session.close();
+      } catch (_) {}
+    }
+    _all.clear();
+    _idle.clear();
+    _connecting = 0;
   }
 }
 

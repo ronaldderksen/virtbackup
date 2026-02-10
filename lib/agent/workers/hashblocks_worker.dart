@@ -18,6 +18,7 @@ class _HashblocksWorker {
     required this.handleHashblocksBytes,
     required this.registerProgressBlocks,
     required this.blobExists,
+    required this.prefetchBlob,
     required this.enqueueBlobDir,
     required this.enqueueMissingRun,
     required this.sendLimit,
@@ -40,6 +41,7 @@ class _HashblocksWorker {
   final void Function(int bytes) handleHashblocksBytes;
   final void Function(int blocks) registerProgressBlocks;
   final Future<bool> Function(String hash) blobExists;
+  final void Function(String hash) prefetchBlob;
   final void Function(String hash) enqueueBlobDir;
   final void Function(int startIndex, List<String> hashes) enqueueMissingRun;
   final void Function(int maxIndex, {bool force}) sendLimit;
@@ -80,6 +82,7 @@ class _HashblocksWorker {
     final index = hashEntry.$1;
     final hash = hashEntry.$2;
     sink.writeln('$index -> $hash');
+    prefetchBlob(hash);
     final blockLength = blockLengthForIndex(index, fileSize);
     handleHashblocksBytes(blockLength);
     batchEntries.add(_MissingEntry(index, hash));
