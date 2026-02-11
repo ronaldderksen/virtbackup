@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
 import 'package:virtbackup/agent/drv/backup_storage.dart';
+import 'package:virtbackup/common/debug_log_writer.dart';
 import 'package:virtbackup/common/google_oauth_client.dart';
 import 'package:virtbackup/common/settings.dart';
 
@@ -38,6 +39,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   final Directory _cacheRoot;
   final void Function(String message) _logInfo;
   final Map<String, String> _folderCache = {};
+  final Map<String, String> _folderPathById = {};
   final Map<String, Future<String>> _folderInFlight = {};
   final Set<String> _folderChildrenLoaded = {};
   final Map<String, String> _blobShardFolderIds = {};
@@ -46,13 +48,16 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   final Map<String, Set<String>> _blobShard2Names = {};
   final Map<String, _DriveFileRef> _blobFiles = {};
   final Set<String> _blobNames = {};
-  bool _blobCachePrefilled = false;
+  final Set<String> _duplicateFolderWarned = <String>{};
+  final Map<String, Future<void>> _duplicateFolderMergeInFlight = <String, Future<void>>{};
+  final _NamedAsyncLock _folderLocks = _NamedAsyncLock();
+  bool _debugLogPrepared = false;
   http.Client _client = IOClient(_createHttpClient());
-  final List<http.Client> _uploadClients = List<http.Client>.generate(_uploadConcurrency, (_) => IOClient(_createHttpClient()));
-  int _uploadClientIndex = 0;
+  final _HttpClientPool _uploadClientPool = _HttpClientPool(maxClients: _uploadConcurrency);
   int _inFlightUploads = 0;
   String? _tmpFolderId;
   String? _blobsRootId;
+  String? _resolvedDriveRootId;
   void Function(GdrivePrefillStats stats, bool done)? onPrefillProgress;
 
   static Directory _cacheRootForSettings(AppSettings settings) {
@@ -72,7 +77,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     supportsServerSideCopy: false,
     supportsConditionalWrite: false,
     supportsVersioning: false,
-    maxConcurrentWrites: 8,
+    maxConcurrentWrites: 4,
   );
 
   @override
@@ -208,6 +213,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   @override
   Future<void> ensureReady() async {
     await _cacheRoot.create(recursive: true);
+    await _prepareDebugLogFile();
     await manifestsDir('tmp', 'tmp').parent.create(recursive: true);
     await tmpDir().create(recursive: true);
     await _ensureBlobsRoot();
@@ -296,13 +302,13 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     _folderCache.clear();
     _folderChildrenLoaded.clear();
     _blobsRootId = null;
+    _resolvedDriveRootId = null;
     _blobShardFolderIds.clear();
     _blobShard1FolderIds.clear();
     _blobShard1Names.clear();
     _blobShard2Names.clear();
     _blobNames.clear();
     _blobFiles.clear();
-    _blobCachePrefilled = false;
     _prefillStats = const GdrivePrefillStats(shard1Count: 0, shard2Count: 0, blobCount: 0, durationMs: 0);
     await _deleteDirIfExists(Directory('${_cacheRoot.path}${Platform.pathSeparator}manifests'));
     await _deleteDirIfExists(Directory('${_cacheRoot.path}${Platform.pathSeparator}blobs'));
@@ -324,47 +330,36 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     if (rootId == null || rootId.isEmpty) {
       throw 'Missing blobs root for shard $shardKey';
     }
-    final shard1Ref = _blobShard1FolderIds[shard1] ?? (await _createFolder(rootId, shard1)).id;
+    final shard1Ref = _blobShard1FolderIds[shard1] ?? (await _createFolderBlind(rootId, shard1)).id;
     _blobShard1FolderIds[shard1] = shard1Ref;
-    final folderRef = await _createFolder(shard1Ref, shard2);
+    final shard1Path = _folderPathById[rootId] == null || _folderPathById[rootId]!.isEmpty ? shard1 : '${_folderPathById[rootId]}/$shard1';
+    _folderPathById[shard1Ref] = shard1Path;
+    final folderRef = await _createFolderBlind(shard1Ref, shard2);
     _blobShardFolderIds[shardKey] = folderRef.id;
+    _folderPathById[folderRef.id] = '$shard1Path/$shard2';
     _blobShard1Names.add(shard1);
     _blobShard2Names.putIfAbsent(shard1, () => <String>{}).add(shard2);
   }
 
   @override
-  Future<bool> writeBlobIfMissing(String hash, List<int> bytes) async {
+  Future<void> writeBlob(String hash, List<int> bytes) async {
     if (hash.length < 4 || bytes.isEmpty) {
-      return false;
+      return;
     }
     final shardKey = hash.substring(0, 4);
     var parentId = _blobShardFolderIds[shardKey];
     if (parentId == null) {
-      parentId = await _findBlobShardFolderId(hash);
-      if (parentId != null && parentId.isNotEmpty) {
-        _blobShardFolderIds[shardKey] = parentId;
-      } else {
-        await ensureBlobDir(hash);
-        parentId = _blobShardFolderIds[shardKey];
-      }
+      await ensureBlobDir(hash);
+      parentId = _blobShardFolderIds[shardKey];
     }
     if (parentId == null || parentId.isEmpty) {
       throw 'Blob shard folder not ready for $shardKey';
-    }
-    if (_cacheBlobsEnabled && !_blobNames.contains(hash)) {
-      final existing = await _findFileByName(parentId, hash);
-      if (existing != null) {
-        _blobNames.add(hash);
-        _blobFiles[hash] = existing;
-        return false;
-      }
     }
     final ref = await _uploadSimple(name: hash, parentId: parentId, bytes: bytes, contentType: 'application/octet-stream');
     if (_cacheBlobsEnabled) {
       _blobNames.add(hash);
       _blobFiles[hash] = ref;
     }
-    return true;
   }
 
   @override
@@ -372,27 +367,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     if (hash.length < 4) {
       return false;
     }
-    if (_cacheBlobsEnabled) {
-      if (_blobNames.contains(hash)) {
-        return true;
-      }
-      if (_blobCachePrefilled) {
-        return false;
-      }
-    }
-    final shardFolder = await _findBlobShardFolderId(hash);
-    if (shardFolder == null) {
-      return false;
-    }
-    final found = await _findFileByName(shardFolder, hash);
-    if (found == null) {
-      return false;
-    }
-    if (_cacheBlobsEnabled) {
-      _blobNames.add(hash);
-      _blobFiles[hash] = found;
-    }
-    return true;
+    return _blobNames.contains(hash);
   }
 
   @override
@@ -409,27 +384,16 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     if (await local.exists()) {
       return local.length();
     }
-    if (_cacheBlobsEnabled) {
-      final cached = _blobFiles[hash];
-      if (cached != null) {
-        return cached.size;
-      }
-      if (_blobCachePrefilled) {
-        return null;
-      }
+    final cached = _blobFiles[hash];
+    if (cached != null) {
+      return cached.size;
     }
-    final shardFolder = await _findBlobShardFolderId(hash);
-    if (shardFolder == null) {
-      return null;
-    }
-    final found = await _findFileByName(shardFolder, hash, includeSize: true);
+    final found = await _findBlobByHash(hash, includeSize: true);
     if (found == null) {
       return null;
     }
-    if (_cacheBlobsEnabled) {
-      _blobNames.add(hash);
-      _blobFiles[hash] = found;
-    }
+    _blobNames.add(hash);
+    _blobFiles[hash] = found;
     return found.size;
   }
 
@@ -451,39 +415,36 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     if (await cacheFile.exists()) {
       return cacheFile.readAsBytes();
     }
-    _DriveFileRef? fileRef;
-    if (_cacheBlobsEnabled) {
-      fileRef = _blobFiles[hash];
-      if (fileRef == null && !_blobCachePrefilled) {
-        final shardFolder = await _findBlobShardFolderId(hash);
-        if (shardFolder == null) {
-          throw 'Missing blob folder for hash: $hash';
-        }
-        fileRef = await _findFileByName(shardFolder, hash);
-        if (fileRef != null) {
-          _blobNames.add(hash);
-          _blobFiles[hash] = fileRef;
-        }
-      }
-      if (fileRef == null) {
-        throw 'Missing blob in cache: $hash';
-      }
-    } else {
-      final shardFolder = await _findBlobShardFolderId(hash);
-      if (shardFolder == null) {
-        throw 'Missing blob folder for hash: $hash';
-      }
-      fileRef = await _findFileByName(shardFolder, hash);
-      if (fileRef == null) {
-        throw 'Missing blob in Drive: $hash';
-      }
+    _DriveFileRef? fileRef = _blobFiles[hash];
+    fileRef ??= await _findBlobByHash(hash, includeSize: true);
+    if (fileRef == null) {
+      return null;
     }
+    _blobNames.add(hash);
+    _blobFiles[hash] = fileRef;
     final bytes = await _downloadFile(fileRef.id);
     if (!await cacheFile.exists()) {
       await cacheFile.parent.create(recursive: true);
       await cacheFile.writeAsBytes(bytes, flush: true);
     }
     return bytes;
+  }
+
+  Future<_DriveFileRef?> _findBlobByHash(String hash, {bool includeSize = false}) async {
+    if (hash.length < 4) {
+      return null;
+    }
+    final shard1 = hash.substring(0, 2);
+    final shard2 = hash.substring(2, 4);
+    final shardKey = '$shard1$shard2';
+    final folderId = _blobShardFolderIds[shardKey] ?? await _findFolderByPath(['blobs', shard1, shard2]);
+    if (folderId == null || folderId.isEmpty) {
+      return null;
+    }
+    _blobShardFolderIds[shardKey] = folderId;
+    _blobShard1Names.add(shard1);
+    _blobShard2Names.putIfAbsent(shard1, () => <String>{}).add(shard2);
+    return _findFileByName(folderId, hash, includeSize: includeSize);
   }
 
   @override
@@ -730,11 +691,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     try {
       _client.close();
     } catch (_) {}
-    for (final client in _uploadClients) {
-      try {
-        client.close();
-      } catch (_) {}
-    }
+    _uploadClientPool.closeAll();
   }
 
   Future<void> _ensureBlobsRoot() async {
@@ -753,45 +710,40 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return _tmpFolderId!;
   }
 
-  Future<String?> _findBlobShardFolderId(String hash) async {
-    final shardKey = hash.substring(0, 4);
-    final cached = _blobShardFolderIds[shardKey];
-    if (cached != null) {
-      return cached;
-    }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    if (_blobCachePrefilled) {
-      if (!_blobShard1Names.contains(shard1)) {
-        return null;
-      }
-      final shard2Names = _blobShard2Names[shard1];
-      if (shard2Names == null || !shard2Names.contains(shard2)) {
-        return null;
-      }
-    }
-    final folderId = await _findFolderByPath(['blobs', shard1, shard2]);
-    if (folderId != null) {
-      _blobShardFolderIds[shardKey] = folderId;
-      _blobShard1Names.add(shard1);
-      _blobShard2Names.putIfAbsent(shard1, () => <String>{}).add(shard2);
-    }
-    return folderId;
-  }
-
   Future<String?> _resolveDriveRootId() async {
+    final cachedRoot = _resolvedDriveRootId;
+    if (cachedRoot != null && cachedRoot.isNotEmpty) {
+      return cachedRoot;
+    }
     final rootPath = _settings.gdriveRootPath.trim();
     final parts = rootPath.split('/').where((part) => part.trim().isNotEmpty).toList();
     var current = _driveFolderId(_driveRootId);
     for (final part in parts) {
-      final child = await _findChildFolder(current, part.trim());
+      final name = part.trim();
+      final cachedId = _folderCache['$current/$name'];
+      _DriveFileRef? child;
+      if (cachedId != null && cachedId.isNotEmpty) {
+        child = _DriveFileRef(id: cachedId, name: name, parentId: current, mimeType: _driveFolderMime);
+      } else {
+        child = await _findChildFolder(current, name);
+      }
       if (child == null) {
         return null;
       }
       current = child.id;
     }
-    final virtBackup = await _findChildFolder(current, 'VirtBackup');
-    return virtBackup?.id;
+    final cachedVirtBackupId = _folderCache['$current/VirtBackup'];
+    _DriveFileRef? virtBackup;
+    if (cachedVirtBackupId != null && cachedVirtBackupId.isNotEmpty) {
+      virtBackup = _DriveFileRef(id: cachedVirtBackupId, name: 'VirtBackup', parentId: current, mimeType: _driveFolderMime);
+    } else {
+      virtBackup = await _findChildFolder(current, 'VirtBackup');
+    }
+    final resolved = virtBackup?.id;
+    if (resolved != null && resolved.isNotEmpty) {
+      _resolvedDriveRootId = resolved;
+    }
+    return resolved;
   }
 
   Future<void> _commitManifestFile({required File localFile, required String finalName, required String remoteFolder}) async {
@@ -813,9 +765,13 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   Future<String> _ensureFolderByPath(List<String> parts) async {
     final root = await _ensureDriveRoot();
+    _folderPathById[root] = '';
     var current = root;
+    var currentPath = '';
     for (final part in parts) {
       current = await _ensureFolder(current, part);
+      currentPath = currentPath.isEmpty ? part : '$currentPath/$part';
+      _folderPathById[current] = currentPath;
     }
     return current;
   }
@@ -825,20 +781,34 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     if (rootId == null) {
       return null;
     }
+    _folderPathById[rootId] = '';
     var current = rootId;
+    var currentPath = '';
     for (final part in parts) {
       final parentId = current;
-      final child = await _findChildFolder(parentId, part);
+      final cachedId = _folderCache['$parentId/$part'];
+      _DriveFileRef? child;
+      if (cachedId != null && cachedId.isNotEmpty) {
+        child = _DriveFileRef(id: cachedId, name: part, parentId: parentId, mimeType: _driveFolderMime);
+      } else {
+        child = await _findChildFolder(parentId, part);
+      }
       if (child == null) {
         return null;
       }
       current = child.id;
+      currentPath = currentPath.isEmpty ? part : '$currentPath/$part';
+      _folderPathById[current] = currentPath;
       _folderCache['$parentId/$part'] = child.id;
     }
     return current;
   }
 
   Future<String> _ensureDriveRoot() async {
+    final cachedRoot = _resolvedDriveRootId;
+    if (cachedRoot != null && cachedRoot.isNotEmpty) {
+      return cachedRoot;
+    }
     final rootPath = _settings.gdriveRootPath.trim();
     final parts = rootPath.split('/').where((part) => part.trim().isNotEmpty).toList();
     var current = _driveFolderId(_driveRootId);
@@ -846,6 +816,8 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       current = _driveFolderId(await _ensureFolder(current, part.trim()));
     }
     final virtBackupId = await _ensureFolder(current, 'VirtBackup');
+    _folderPathById[virtBackupId] = '';
+    _resolvedDriveRootId = virtBackupId;
     return virtBackupId;
   }
 
@@ -873,7 +845,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     if (inFlight != null) {
       return inFlight;
     }
-    final future = () async {
+    final future = _withFolderCreateLock(parentId, name, () async {
       final existing = await _findChildFolder(parentId, name);
       if (existing != null) {
         _folderCache[key] = existing.id;
@@ -882,7 +854,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       final created = await _createFolder(parentId, name);
       _folderCache[key] = created.id;
       return created.id;
-    }();
+    });
     _folderInFlight[key] = future;
     try {
       return await future;
@@ -892,13 +864,123 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }
 
   Future<_DriveFileRef?> _findChildFolder(String parentId, String name) async {
-    final query = "mimeType='$_driveFolderMime' and name='${_escapeQuery(name)}' and '$parentId' in parents and trashed=false";
-    final files = await _listFilesRaw(query, fields: 'nextPageToken,files(id,name,parents)');
+    final files = await _findChildFolders(parentId, name);
     return files.isEmpty ? null : files.first;
+  }
+
+  Future<List<_DriveFileRef>> _findChildFolders(String parentId, String name) async {
+    final query = "mimeType='$_driveFolderMime' and name='${_escapeQuery(name)}' and '$parentId' in parents and trashed=false";
+    var files = await _listFilesRaw(query, fields: 'nextPageToken,files(id,name,parents,mimeType,createdTime)');
+    if (files.length > 1) {
+      final warnKey = '$parentId/$name';
+      final warnPath = _folderDisplayPath(parentId, name);
+      if (_duplicateFolderWarned.add(warnKey)) {
+        _logInfo('gdrive: duplicate folders detected for $warnPath (count=${files.length}); attempting strict merge');
+      }
+      await _mergeDuplicateFolders(parentId, name, files);
+      files = await _listFilesRaw(query, fields: 'nextPageToken,files(id,name,parents,mimeType,createdTime)');
+      if (files.length > 1) {
+        throw 'gdrive duplicate folder merge failed for $warnPath: still ${files.length} folders present';
+      }
+    }
+    files.sort((a, b) => a.id.compareTo(b.id));
+    return files;
+  }
+
+  Future<void> _mergeDuplicateFolders(String parentId, String name, List<_DriveFileRef> folders) async {
+    final key = '$parentId/$name';
+    final existing = _duplicateFolderMergeInFlight[key];
+    if (existing != null) {
+      await existing;
+      return;
+    }
+    final future = _withFolderCreateLock(parentId, name, () async {
+      final folderPath = _folderDisplayPath(parentId, name);
+      final current = List<_DriveFileRef>.from(folders)..sort((a, b) => a.id.compareTo(b.id));
+      if (current.length < 2) {
+        return;
+      }
+      final primary = current.first;
+      for (final duplicate in current.skip(1)) {
+        await _mergeFolderContents(primary.id, duplicate.id);
+        final remaining = await _listFilesRaw("'${duplicate.id}' in parents and trashed=false", fields: 'nextPageToken,files(id,name,parents,mimeType)');
+        if (remaining.isEmpty) {
+          await _trashFile(duplicate.id);
+          _logInfo('gdrive: duplicate folder merged for $folderPath (removed duplicate id=${duplicate.id}, primary id=${primary.id})');
+        } else {
+          throw 'gdrive duplicate folder merge incomplete for $folderPath: duplicate=${duplicate.id} primary=${primary.id} remaining=${remaining.length}';
+        }
+      }
+    });
+    _duplicateFolderMergeInFlight[key] = future;
+    try {
+      await future;
+    } finally {
+      _duplicateFolderMergeInFlight.remove(key);
+    }
+  }
+
+  Future<void> _mergeFolderContents(String targetFolderId, String sourceFolderId) async {
+    final targetChildren = await _listFilesRaw("'$targetFolderId' in parents and trashed=false", fields: 'nextPageToken,files(id,name,parents,mimeType)');
+    final sourceChildren = await _listFilesRaw("'$sourceFolderId' in parents and trashed=false", fields: 'nextPageToken,files(id,name,parents,mimeType)');
+    final existing = <String, _DriveFileRef>{};
+    for (final child in targetChildren) {
+      existing['${child.mimeType ?? ''}::${child.name}'] = child;
+    }
+    for (final child in sourceChildren) {
+      final signature = '${child.mimeType ?? ''}::${child.name}';
+      final targetChild = existing[signature];
+      if (targetChild != null) {
+        final isFolderDuplicate = child.mimeType == _driveFolderMime && targetChild.mimeType == _driveFolderMime;
+        if (isFolderDuplicate) {
+          await _mergeFolderContents(targetChild.id, child.id);
+          final remaining = await _listFilesRaw("'${child.id}' in parents and trashed=false", fields: 'nextPageToken,files(id)');
+          if (remaining.isEmpty) {
+            await _trashFile(child.id);
+            continue;
+          }
+          throw 'gdrive duplicate folder merge incomplete source=$sourceFolderId target=$targetFolderId name=${child.name}';
+        }
+        await _trashFile(child.id);
+        _logInfo('gdrive: duplicate file dropped during merge name=${child.name} source=$sourceFolderId target=$targetFolderId');
+        continue;
+      }
+      await _moveFileToFolder(fileId: child.id, fromParentId: sourceFolderId, toParentId: targetFolderId);
+      existing[signature] = child;
+    }
+  }
+
+  Future<void> _moveFileToFolder({required String fileId, required String fromParentId, required String toParentId}) async {
+    await _withRetry('move file $fileId', () async {
+      final token = await _ensureAccessToken();
+      final uri = Uri.https('www.googleapis.com', '/drive/v3/files/$fileId', {'addParents': toParentId, 'removeParents': fromParentId, 'fields': 'id,parents'});
+      final response = await _requestWithApiLog(
+        action: 'move',
+        target: '${_displayPathForId(fromParentId)}/${_displayPathForId(toParentId)}',
+        method: 'PATCH',
+        uri: uri,
+        send: () => _client.patch(uri, headers: _authHeaders(token)..['Content-Type'] = 'application/json', body: '{}'),
+      );
+      if (response.statusCode >= 300) {
+        throw 'Drive move failed: ${response.statusCode} ${response.body}';
+      }
+    });
+  }
+
+  String _folderDisplayPath(String parentId, String name) {
+    final parentPath = _folderPathById[parentId];
+    if (parentPath == null || parentPath.isEmpty) {
+      return name;
+    }
+    return '$parentPath/$name';
   }
 
   Future<_DriveFileRef> _createFolder(String parentId, String name) async {
     return _withRetry('create folder "$name"', () async {
+      final existing = await _findChildFolder(parentId, name);
+      if (existing != null) {
+        return existing;
+      }
       final token = await _ensureAccessToken();
       final uri = Uri.parse('https://www.googleapis.com/drive/v3/files');
       final body = jsonEncode({
@@ -906,13 +988,51 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         'mimeType': _driveFolderMime,
         'parents': [parentId],
       });
-      final response = await _client.post(uri, headers: _authHeaders(token)..['Content-Type'] = 'application/json', body: body);
+      final response = await _requestWithApiLog(
+        action: 'mkdir',
+        target: _folderDisplayPath(parentId, name),
+        method: 'POST',
+        uri: uri,
+        send: () => _client.post(uri, headers: _authHeaders(token)..['Content-Type'] = 'application/json', body: body),
+      );
+      if (response.statusCode >= 300) {
+        throw 'Drive folder create failed: ${response.statusCode} ${response.body}';
+      }
+      final decoded = jsonDecode(response.body);
+      final created = _DriveFileRef(id: decoded['id'].toString(), name: name, parentId: parentId);
+      final reconciled = await _findChildFolder(parentId, name);
+      return reconciled ?? created;
+    });
+  }
+
+  Future<_DriveFileRef> _createFolderBlind(String parentId, String name) async {
+    return _withRetry('create folder blind "$name"', () async {
+      final token = await _ensureAccessToken();
+      final uri = Uri.parse('https://www.googleapis.com/drive/v3/files');
+      final body = jsonEncode({
+        'name': name,
+        'mimeType': _driveFolderMime,
+        'parents': [parentId],
+      });
+      final response = await _requestWithApiLog(
+        action: 'mkdir',
+        target: _folderDisplayPath(parentId, name),
+        detail: 'blind',
+        method: 'POST',
+        uri: uri,
+        send: () => _client.post(uri, headers: _authHeaders(token)..['Content-Type'] = 'application/json', body: body),
+      );
       if (response.statusCode >= 300) {
         throw 'Drive folder create failed: ${response.statusCode} ${response.body}';
       }
       final decoded = jsonDecode(response.body);
       return _DriveFileRef(id: decoded['id'].toString(), name: name, parentId: parentId);
     });
+  }
+
+  Future<T> _withFolderCreateLock<T>(String parentId, String name, Future<T> Function() action) async {
+    final key = '$parentId/$name';
+    return _folderLocks.withLock(key, action);
   }
 
   Future<List<_DriveFileRef>> _listChildFolders(String parentId) async {
@@ -933,6 +1053,8 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   Future<List<_DriveFileRef>> _listFilesRaw(String query, {required String fields}) async {
     final results = <_DriveFileRef>[];
+    final listTarget = _listTargetFromQuery(query);
+    final isFolderQuery = query.contains("mimeType='$_driveFolderMime'");
     String? pageToken;
     do {
       final params = <String, String>{'q': query, 'fields': fields, 'pageSize': '1000'};
@@ -942,7 +1064,13 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       final uri = Uri.https('www.googleapis.com', '/drive/v3/files', params);
       final response = await _withRetry('list files', () async {
         final token = await _ensureAccessToken();
-        final response = await _client.get(uri, headers: _authHeaders(token));
+        final response = await _requestWithApiLog(
+          action: 'list',
+          target: listTarget,
+          method: 'GET',
+          uri: uri,
+          send: () => _client.get(uri, headers: _authHeaders(token)),
+        );
         if (response.statusCode >= 300) {
           throw 'Drive list failed: ${response.statusCode} ${response.body}';
         }
@@ -956,7 +1084,13 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
           final parents = map['parents'];
           final parentId = parents is List && parents.isNotEmpty ? parents.first.toString() : '';
           final size = map['size'] == null ? null : int.tryParse(map['size'].toString());
-          results.add(_DriveFileRef(id: map['id'].toString(), name: map['name'].toString(), parentId: parentId, size: size));
+          final mimeType = map['mimeType']?.toString();
+          final id = map['id'].toString();
+          final name = map['name'].toString();
+          results.add(_DriveFileRef(id: id, name: name, parentId: parentId, size: size, mimeType: mimeType));
+          if (isFolderQuery || mimeType == _driveFolderMime) {
+            _folderPathById[id] = _folderDisplayPath(parentId, name);
+          }
         }
       }
       pageToken = decoded['nextPageToken']?.toString();
@@ -964,11 +1098,43 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return results;
   }
 
+  String _listTargetFromQuery(String query) {
+    final match = RegExp("'([^']+)'\\s+in\\s+parents").firstMatch(query);
+    if (match == null) {
+      return 'unknown';
+    }
+    final parentId = match.group(1);
+    if (parentId == null || parentId.isEmpty) {
+      return 'unknown';
+    }
+    return _displayPathForId(parentId);
+  }
+
+  String _displayPathForId(String id) {
+    if (id == _driveRootId) {
+      return 'root';
+    }
+    if (!_folderPathById.containsKey(id)) {
+      return 'unknown';
+    }
+    final path = _folderPathById[id] ?? '';
+    if (path.isEmpty) {
+      return 'VirtBackup';
+    }
+    return path;
+  }
+
   Future<void> _trashFile(String fileId) async {
     await _withRetry('trash file', () async {
       final token = await _ensureAccessToken();
       final uri = Uri.parse('https://www.googleapis.com/drive/v3/files/$fileId');
-      final response = await _client.patch(uri, headers: _authHeaders(token)..['Content-Type'] = 'application/json', body: jsonEncode({'trashed': true}));
+      final response = await _requestWithApiLog(
+        action: 'trash',
+        target: _displayPathForId(fileId),
+        method: 'PATCH',
+        uri: uri,
+        send: () => _client.patch(uri, headers: _authHeaders(token)..['Content-Type'] = 'application/json', body: jsonEncode({'trashed': true})),
+      );
       if (response.statusCode >= 300) {
         throw 'Drive trash failed: ${response.statusCode} ${response.body}';
       }
@@ -985,7 +1151,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   Future<_DriveFileRef> _uploadSimple({required String name, required String parentId, required List<int> bytes, required String contentType}) async {
     final stopwatch = Stopwatch()..start();
     _inFlightUploads += 1;
-    final lease = _leaseUploadClient();
+    final lease = await _leaseUploadClient();
     try {
       final uri = Uri.parse('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable');
       return await _uploadSimpleWithClient(lease: lease, uri: uri, bytes: bytes, name: name, parentId: parentId, stopwatch: stopwatch);
@@ -1002,6 +1168,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       rethrow;
     } finally {
       _inFlightUploads = max(0, _inFlightUploads - 1);
+      lease.release();
     }
   }
 
@@ -1020,19 +1187,26 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
             ..['Content-Type'] = 'application/json; charset=UTF-8'
             ..['X-Upload-Content-Type'] = 'application/octet-stream'
             ..['X-Upload-Content-Length'] = bytes.length.toString();
-          final response = await lease.client.post(
-            uri,
-            headers: headers,
-            body: jsonEncode({
-              'name': name,
-              'parents': [parentId],
-            }),
+          final response = await _requestWithApiLog(
+            action: 'upload',
+            target: name,
+            detail: 'session',
+            method: 'POST',
+            uri: uri,
+            send: () => lease.client.post(
+              uri,
+              headers: headers,
+              body: jsonEncode({
+                'name': name,
+                'parents': [parentId],
+              }),
+            ),
           );
           if (response.statusCode >= 300 && response.statusCode != 401) {
             throw _DriveHttpException('Drive upload session failed', response.statusCode, response.body);
           }
           return response;
-        }, onRetry: () => _resetUploadClient(lease.index));
+        }, onRetry: lease.resetClient);
       }
 
       Future<http.Response> uploadData(Uri sessionUri, String token) {
@@ -1040,12 +1214,19 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
           final headers = _authHeaders(token)
             ..['Content-Type'] = 'application/octet-stream'
             ..['Content-Length'] = bytes.length.toString();
-          final response = await lease.client.put(sessionUri, headers: headers, body: bytes);
+          final response = await _requestWithApiLog(
+            action: 'upload',
+            target: name,
+            detail: 'data',
+            method: 'PUT',
+            uri: sessionUri,
+            send: () => lease.client.put(sessionUri, headers: headers, body: bytes),
+          );
           if (response.statusCode >= 300 && response.statusCode != 401) {
             throw _DriveHttpException('Drive upload failed', response.statusCode, response.body);
           }
           return response;
-        }, onRetry: () => _resetUploadClient(lease.index));
+        }, onRetry: lease.resetClient);
       }
 
       var token = await _ensureAccessToken();
@@ -1086,7 +1267,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       stopwatch.stop();
       return _DriveFileRef(id: decoded['id'].toString(), name: name, parentId: parentId);
     } catch (error) {
-      _resetUploadClient(lease.index);
+      lease.resetClient();
       rethrow;
     }
   }
@@ -1096,7 +1277,13 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       final token = await _ensureAccessToken();
       final uri = Uri.parse('https://www.googleapis.com/drive/v3/files/$fileId?alt=media');
       final headers = _authHeaders(token);
-      final response = await _client.get(uri, headers: headers);
+      final response = await _requestWithApiLog(
+        action: 'download',
+        target: _displayPathForId(fileId),
+        method: 'GET',
+        uri: uri,
+        send: () => _client.get(uri, headers: headers),
+      );
       if (response.statusCode >= 300) {
         _logInfo('gdrive: downloadFile request headers=${_redactHeaders(headers)}');
         _logInfo('gdrive: downloadFile response headers=${response.headers}');
@@ -1123,7 +1310,12 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     final uri = Uri.parse('https://oauth2.googleapis.com/token');
     final response = await _withRetry('refresh token', () async {
       final body = <String, String>{'client_id': oauth.clientId, 'client_secret': oauth.clientSecret, 'refresh_token': refresh, 'grant_type': 'refresh_token'};
-      final response = await _client.post(uri, headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: body);
+      final response = await _requestWithApiLog(
+        action: 'auth.refresh',
+        method: 'POST',
+        uri: uri,
+        send: () => _client.post(uri, headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: body),
+      );
       if (response.statusCode >= 300) {
         throw 'Token refresh failed: ${response.statusCode} ${response.body}';
       }
@@ -1152,7 +1344,13 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     final uri = Uri.parse('https://oauth2.googleapis.com/token');
     final response = await _withRetry('refresh token (forced)', () async {
       final body = <String, String>{'client_id': oauth.clientId, 'client_secret': oauth.clientSecret, 'refresh_token': refresh, 'grant_type': 'refresh_token'};
-      final response = await _client.post(uri, headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: body);
+      final response = await _requestWithApiLog(
+        action: 'auth.refresh',
+        detail: 'forced',
+        method: 'POST',
+        uri: uri,
+        send: () => _client.post(uri, headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: body),
+      );
       if (response.statusCode >= 300) {
         throw 'Token refresh failed: ${response.statusCode} ${response.body}';
       }
@@ -1330,6 +1528,50 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     }
   }
 
+  File _debugLogFile() {
+    final basePath = _settings.backupPath.trim();
+    if (basePath.isNotEmpty) {
+      return File('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}logs${Platform.pathSeparator}debug.log');
+    }
+    return File('${_cacheRoot.path}${Platform.pathSeparator}logs${Platform.pathSeparator}debug.log');
+  }
+
+  Future<void> _prepareDebugLogFile() async {
+    final path = _debugLogFile().path;
+    if (_debugLogPrepared) {
+      await Directory(_debugLogFile().parent.path).create(recursive: true);
+      return;
+    }
+    await DebugLogWriter.truncate(path);
+    _debugLogPrepared = true;
+  }
+
+  Future<http.Response> _requestWithApiLog({required String action, required String method, required Uri uri, required Future<http.Response> Function() send, String? target, String? detail}) async {
+    final stopwatch = Stopwatch()..start();
+    final targetText = target == null || target.isEmpty ? '' : ' target=$target';
+    final detailText = detail == null || detail.isEmpty ? '' : ' detail=$detail';
+    try {
+      final response = await send();
+      stopwatch.stop();
+      await _appendApiLogLine(
+        '${DateTime.now().toIso8601String()} action=$action status=${response.statusCode} durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()}',
+      );
+      return response;
+    } catch (error) {
+      stopwatch.stop();
+      await _appendApiLogLine(
+        '${DateTime.now().toIso8601String()} action=$action status=error durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()} error=$error',
+      );
+      rethrow;
+    }
+  }
+
+  Future<void> _appendApiLogLine(String line) async {
+    try {
+      await DebugLogWriter.appendLine(_debugLogFile().path, line);
+    } catch (_) {}
+  }
+
   static HttpClient _createHttpClient() {
     final client = HttpClient();
     client.connectionTimeout = const Duration(seconds: 10);
@@ -1348,40 +1590,156 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return '${Platform.pathSeparator}var${Platform.pathSeparator}tmp';
   }
 
-  _UploadClientLease _leaseUploadClient() {
-    if (_uploadClients.isEmpty) {
-      return _UploadClientLease(index: 0, client: IOClient(_createHttpClient()));
-    }
-    final index = _uploadClientIndex % _uploadClients.length;
-    _uploadClientIndex += 1;
-    return _UploadClientLease(index: index, client: _uploadClients[index]);
-  }
-
-  void _resetUploadClient(int index) {
-    if (index < 0 || index >= _uploadClients.length) {
-      return;
-    }
-    try {
-      _uploadClients[index].close();
-    } catch (_) {}
-    _uploadClients[index] = IOClient(_createHttpClient());
+  Future<_UploadClientLease> _leaseUploadClient() async {
+    return _uploadClientPool.lease(() => IOClient(_createHttpClient()));
   }
 }
 
 class _UploadClientLease {
-  _UploadClientLease({required this.index, required this.client});
+  _UploadClientLease(this._pool, this._slot, this._createClient);
 
-  final int index;
-  final http.Client client;
+  final _HttpClientPool _pool;
+  final _PooledHttpClient _slot;
+  final http.Client Function() _createClient;
+  bool _released = false;
+
+  http.Client get client => _slot.client;
+
+  void resetClient() {
+    _pool.reset(_slot, _createClient);
+  }
+
+  void release() {
+    if (_released) {
+      return;
+    }
+    _released = true;
+    _pool.release(_slot, _createClient);
+  }
+}
+
+class _HttpClientPool {
+  _HttpClientPool({required this.maxClients});
+
+  final int maxClients;
+  final List<_PooledHttpClient> _idle = <_PooledHttpClient>[];
+  final List<_PooledHttpClient> _all = <_PooledHttpClient>[];
+  final List<Completer<_UploadClientLease>> _waiters = <Completer<_UploadClientLease>>[];
+  var _connecting = 0;
+  bool _closed = false;
+
+  Future<_UploadClientLease> lease(http.Client Function() createClient) async {
+    if (_closed) {
+      throw 'GDrive upload client pool is closed.';
+    }
+    if (_idle.isNotEmpty) {
+      final slot = _idle.removeLast();
+      return _UploadClientLease(this, slot, createClient);
+    }
+    if (_all.length + _connecting < maxClients) {
+      _connecting += 1;
+      try {
+        final slot = _PooledHttpClient(client: createClient());
+        _all.add(slot);
+        return _UploadClientLease(this, slot, createClient);
+      } finally {
+        _connecting -= 1;
+      }
+    }
+    final waiter = Completer<_UploadClientLease>();
+    _waiters.add(waiter);
+    return waiter.future;
+  }
+
+  void reset(_PooledHttpClient slot, http.Client Function() createClient) {
+    if (_closed) {
+      return;
+    }
+    try {
+      slot.client.close();
+    } catch (_) {}
+    slot.client = createClient();
+  }
+
+  void release(_PooledHttpClient slot, http.Client Function() createClient) {
+    if (_closed) {
+      try {
+        slot.client.close();
+      } catch (_) {}
+      return;
+    }
+    if (_waiters.isNotEmpty) {
+      final waiter = _waiters.removeAt(0);
+      if (!waiter.isCompleted) {
+        waiter.complete(_UploadClientLease(this, slot, createClient));
+        return;
+      }
+    }
+    _idle.add(slot);
+  }
+
+  void closeAll() {
+    _closed = true;
+    for (final waiter in _waiters) {
+      if (!waiter.isCompleted) {
+        waiter.completeError('GDrive upload client pool is closed.');
+      }
+    }
+    _waiters.clear();
+    for (final slot in _all) {
+      try {
+        slot.client.close();
+      } catch (_) {}
+    }
+    _all.clear();
+    _idle.clear();
+    _connecting = 0;
+  }
+}
+
+class _PooledHttpClient {
+  _PooledHttpClient({required this.client});
+
+  http.Client client;
+}
+
+class _NamedAsyncLock {
+  final Map<String, _AsyncLockQueue> _queues = <String, _AsyncLockQueue>{};
+
+  Future<T> withLock<T>(String key, Future<T> Function() action) async {
+    final queue = _queues.putIfAbsent(key, () => _AsyncLockQueue());
+    queue.pending += 1;
+    final previous = queue.tail;
+    final release = Completer<void>();
+    queue.tail = release.future;
+    await previous;
+    try {
+      return await action();
+    } finally {
+      if (!release.isCompleted) {
+        release.complete();
+      }
+      queue.pending -= 1;
+      if (queue.pending <= 0) {
+        _queues.remove(key);
+      }
+    }
+  }
+}
+
+class _AsyncLockQueue {
+  Future<void> tail = Future<void>.value();
+  int pending = 0;
 }
 
 class _DriveFileRef {
-  _DriveFileRef({required this.id, required this.name, required this.parentId, this.size});
+  _DriveFileRef({required this.id, required this.name, required this.parentId, this.size, this.mimeType});
 
   final String id;
   final String name;
   final String parentId;
   final int? size;
+  final String? mimeType;
 }
 
 class _DriveHttpException implements Exception {

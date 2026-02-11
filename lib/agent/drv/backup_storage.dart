@@ -52,7 +52,10 @@ abstract class BackupDriver {
   Future<void> finalizeManifest(DriverManifestWrite write);
   Future<void> freshCleanup();
   Future<void> ensureBlobDir(String hash);
-  Future<bool> writeBlobIfMissing(String hash, List<int> bytes);
+  // Hard rule: always blind-write in every driver implementation.
+  // No exists/list/stat/mkdir checks are allowed in this write path.
+  // Existence/dir decisions are owned by agent-side cache/workers.
+  Future<void> writeBlob(String hash, List<int> bytes);
   Future<bool> blobExists(String hash);
   String backupCompletedMessage(String manifestsPath);
 

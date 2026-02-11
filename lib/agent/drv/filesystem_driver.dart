@@ -373,9 +373,9 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
   }
 
   @override
-  Future<bool> writeBlobIfMissing(String hash, List<int> bytes) async {
+  Future<void> writeBlob(String hash, List<int> bytes) async {
     if (hash.length < 4) {
-      return false;
+      return;
     }
     final blob = blobFile(hash);
     await blob.parent.create(recursive: true);
@@ -384,21 +384,16 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
     await tempFile.writeAsBytes(bytes);
     try {
       await tempFile.rename(blob.path);
-      return true;
     } catch (_) {
       try {
         await tempFile.delete();
       } catch (_) {}
     }
-    return false;
   }
 
   @override
   Future<bool> blobExists(String hash) async {
-    if (hash.length < 4) {
-      return false;
-    }
-    return blobFile(hash).exists();
+    return false;
   }
 
   @override

@@ -11,7 +11,7 @@ import 'package:virtbackup/common/models.dart';
 part 'backup_models.dart';
 part 'backup_types.dart';
 part 'workers/blob_cache_worker.dart';
-part 'workers/dir_create_worker.dart';
+part 'workers/exists_worker.dart';
 part 'workers/hashblocks_worker.dart';
 part 'workers/sftp_worker.dart';
 part 'workers/writer_worker.dart';
@@ -101,8 +101,6 @@ class BackupAgent {
   final int _writerBacklogBytesLimit;
   final int _writerBacklogClearBytes;
   final int _hashblocksLimitBufferMb;
-  _DirCreateWorker? _dirCreateWorker;
-  Future<void>? _dirCreateWorkerFuture;
   _BlobDirectoryCache? _blobDirectoryCache;
   _BlobCacheWorker? _blobCacheWorker;
   Future<void>? _blobCacheWorkerFuture;
@@ -174,25 +172,9 @@ class BackupAgent {
       final serverFolderName = _dependencies.sanitizeFileName(server.id);
       await driver.ensureReady();
       final BlobDirectoryLister? blobLister = driver is BlobDirectoryLister ? driver as BlobDirectoryLister : null;
-      _blobDirectoryCache = blobLister == null
-          ? null
-          : _BlobDirectoryCache(
-              driver: blobLister,
-              logInfo: _logInfo,
-              markShardReady: (shardKey) {
-                _dirCreateWorker?.markReady(shardKey);
-              },
-              createShard: (hash) async {
-                final worker = _dirCreateWorker;
-                if (worker == null) {
-                  return;
-                }
-                await worker.waitForShard(hash);
-              },
-            );
+      _blobDirectoryCache = blobLister == null ? null : _BlobDirectoryCache(driver: blobLister, createShard: (hash) => driver.ensureBlobDir(hash));
       _startBlobCacheWorker();
       await driver.prepareBackup(serverFolderName, vmFolderName);
-      _startDirCreateWorker(driver);
       final manifestsBase = driver.manifestsDir(serverFolderName, vmFolderName);
       final backupTimestamp = _dependencies.sanitizeFileName(DateTime.now().toIso8601String());
 
@@ -368,14 +350,6 @@ class BackupAgent {
       return BackupAgentResult(success: false, message: error.toString());
     } finally {
       try {
-        await _stopDirCreateWorker();
-      } catch (error, stackTrace) {
-        if (runError == null) {
-          Error.throwWithStackTrace(error, stackTrace);
-        }
-        _logInfo('dir-create worker cleanup failed: $error');
-      }
-      try {
         await _stopBlobCacheWorker();
       } catch (error, stackTrace) {
         if (runError == null) {
@@ -420,33 +394,13 @@ class BackupAgent {
     _progress = _progress.copyWith(writerQueuedBytes: _writerQueuedBytes, writerInFlightBytes: _writerInFlightBytes, driverBufferedBytes: _driverBufferedBytes);
   }
 
-  void _startDirCreateWorker(BackupDriver driver) {
-    _dirCreateWorker = _DirCreateWorker(ensureBlobDir: driver.ensureBlobDir, logInfo: _logInfo);
-    _dirCreateWorkerFuture = _dirCreateWorker!.run();
-  }
-
   void _startBlobCacheWorker() {
     final cache = _blobDirectoryCache;
     if (cache == null) {
       return;
     }
-    _blobCacheWorker = _BlobCacheWorker(prefetch: cache.prefetchHash, logInfo: _logInfo, logInterval: agentLogInterval);
+    _blobCacheWorker = _BlobCacheWorker(initialize: cache.initialize, processHash: cache.prefetchHash, logInfo: _logInfo);
     _blobCacheWorkerFuture = _blobCacheWorker!.run();
-  }
-
-  Future<void> _stopDirCreateWorker() async {
-    final worker = _dirCreateWorker;
-    if (worker == null) {
-      return;
-    }
-    worker.signalDone();
-    final future = _dirCreateWorkerFuture;
-    _dirCreateWorker = null;
-    _dirCreateWorkerFuture = null;
-    if (future != null) {
-      await future;
-    }
-    worker.throwIfError();
   }
 
   Future<void> _stopBlobCacheWorker() async {
@@ -465,14 +419,7 @@ class BackupAgent {
   }
 
   void _enqueueBlobDir(String hash) {
-    if (_blobDirectoryCache != null) {
-      return;
-    }
-    final cache = _blobDirectoryCache;
-    if (cache != null && !cache.shouldEnsureBlobDir(hash)) {
-      return;
-    }
-    _dirCreateWorker?.enqueue(hash);
+    _blobCacheWorker?.enqueue(hash);
   }
 
   void _prefetchBlobCache(String hash) {
@@ -800,11 +747,18 @@ class BackupAgent {
                 zeroRunEnd = -1;
               }
               final hash = sha256.convert(buffer).toString();
-              _enqueueBlobDir(hash);
-              final wrote = await _scheduleWriteBlobIfMissing(hash, buffer, driver);
-              if (wrote) {
-                _handlePhysicalBytes(buffer.length);
+              final exists = await _blobExists(hash);
+              if (exists) {
+                sink.writeln('$index -> $hash');
+                final blockLength = (fileSize != null && fileSize > 0) ? _blockLengthForIndex(index, fileSize) : _blockSize;
+                _handleBytes(blockLength);
+                index++;
+                bufferOffset = 0;
+                continue;
               }
+              _enqueueBlobDir(hash);
+              await _scheduleWriteBlob(hash, buffer, driver);
+              _handlePhysicalBytes(buffer.length);
               sink.writeln('$index -> $hash');
             }
             final blockLength = (fileSize != null && fileSize > 0) ? _blockLengthForIndex(index, fileSize) : _blockSize;
@@ -823,18 +777,26 @@ class BackupAgent {
           }
           zeroRunEnd = index;
         } else {
+          var tailHandled = false;
           if (zeroRunStart >= 0) {
             _writeZeroRun(sink, zeroRunStart, zeroRunEnd);
             zeroRunStart = -1;
             zeroRunEnd = -1;
           }
           final hash = sha256.convert(tail).toString();
-          _enqueueBlobDir(hash);
-          final wrote = await _scheduleWriteBlobIfMissing(hash, tail, driver);
-          if (wrote) {
-            _handlePhysicalBytes(tail.length);
+          final exists = await _blobExists(hash);
+          if (exists) {
+            sink.writeln('$index -> $hash');
+            _handleBytes(bufferOffset);
+            index++;
+            tailHandled = true;
           }
-          sink.writeln('$index -> $hash');
+          if (!tailHandled) {
+            _enqueueBlobDir(hash);
+            await _scheduleWriteBlob(hash, tail, driver);
+            _handlePhysicalBytes(tail.length);
+            sink.writeln('$index -> $hash');
+          }
         }
         _handleBytes(bufferOffset);
         index++;
@@ -920,6 +882,7 @@ class BackupAgent {
 
     late final _WriterWorker writerWorker;
     late final _SftpWorker sftpWorker;
+    late final _ExistsWorker existsWorker;
     late final _HashblocksWorker hashblocksWorker;
 
     String formatLimitBlocks(int blocks) {
@@ -934,7 +897,7 @@ class BackupAgent {
         return;
       }
       final writerBufferedBytes = _writerQueuedBytes + _writerInFlightBytes + _driverBufferedBytes;
-      if (writerBufferedBytes > _writerBacklogClearBytes && maxIndex > lastLimitSent) {
+      if (writerBufferedBytes > _writerBacklogBytesLimit && maxIndex > lastLimitSent) {
         return;
       }
       lastLimitSent = maxIndex;
@@ -952,7 +915,7 @@ class BackupAgent {
         return;
       }
       final writerBufferedBytes = _writerQueuedBytes + _writerInFlightBytes + _driverBufferedBytes;
-      if (!force && writerBufferedBytes > _writerBacklogClearBytes) {
+      if (!force && writerBufferedBytes > _writerBacklogBytesLimit) {
         return;
       }
       final maxIndex = max(0, sftpProgressBlocks + bufferBlocks - 1);
@@ -994,7 +957,7 @@ class BackupAgent {
     }
 
     final writerTimeout = const Duration(minutes: 5);
-    final dirWorker = _dirCreateWorker;
+    final cache = _blobDirectoryCache;
     writerWorker = _WriterWorker(
       maxConcurrentWrites: max(1, driver.capabilities.maxConcurrentWrites),
       blockTimeout: writerTimeout,
@@ -1003,11 +966,11 @@ class BackupAgent {
       backlogClearBytes: _writerBacklogClearBytes,
       driverBufferedBytes: () => driver.bufferedBytes,
       onMetrics: _handleWriterMetrics,
-      scheduleWrite: (hash, bytes) => _scheduleWriteBlobIfMissing(hash, bytes, driver),
+      scheduleWrite: (hash, bytes) => _scheduleWriteBlob(hash, bytes, driver),
       handlePhysicalBytes: _handlePhysicalBytes,
       logInfo: _logInfo,
-      isShardReady: (shardKey) => dirWorker?.isShardReady(shardKey) ?? true,
-      waitForAnyShardReady: dirWorker?.waitForAnyReady,
+      isShardReady: (shardKey) => cache?.isShardReady(shardKey) ?? true,
+      waitForAnyShardReady: cache?.waitForAnyReady,
       onBackpressureStart: () {},
       onBackpressureEnd: () => updateLimitFromProgress(force: true),
     );
@@ -1036,16 +999,25 @@ class BackupAgent {
       logInfo: _logInfo,
     );
 
-    final maxBatchBlocks = (1024 * 1024 * 1024) ~/ _blockSize;
-    final maxNonZeroBlocks = maxBatchBlocks > 0 ? maxBatchBlocks : 1;
-    const maxMissingRun = 2048;
+    const maxMissingRun = 1;
+
+    existsWorker = _ExistsWorker(
+      maxMissingRun: maxMissingRun,
+      blobExists: _blobExists,
+      isShardReady: (shardKey) => cache?.isShardReady(shardKey) ?? true,
+      waitForAnyShardReady: cache?.waitForAnyReady,
+      enqueueMissingRun: enqueueMissingRun,
+      handleBytes: _handleBytes,
+      registerProgressBlocks: registerProgressBlocks,
+      logInfo: _logInfo,
+      ensureNotCanceled: _ensureNotCanceled,
+      onExisting: () => hashblocksWorker.markExisting(),
+      onMissing: () => hashblocksWorker.markMissing(),
+    );
 
     hashblocksWorker = _HashblocksWorker(
       sink: sink,
-      blockSize: _blockSize,
       fileSize: fileSize,
-      maxNonZeroBlocks: maxNonZeroBlocks,
-      maxMissingRun: maxMissingRun,
       logInfo: _logInfo,
       ensureNotCanceled: _ensureNotCanceled,
       writeZeroRun: (start, end) => _writeZeroRun(sink, start, end),
@@ -1056,12 +1028,8 @@ class BackupAgent {
       handleBytes: _handleBytes,
       handleHashblocksBytes: handleHashblocksBytes,
       registerProgressBlocks: registerProgressBlocks,
-      blobExists: (hash) => _blobExists(hash, driver),
       prefetchBlob: _prefetchBlobCache,
-      enqueueBlobDir: _enqueueBlobDir,
-      enqueueMissingRun: enqueueMissingRun,
-      sendLimit: sendLimit,
-      updateLimitFromProgress: updateLimitFromProgress,
+      enqueueExists: existsWorker.enqueue,
     );
 
     var manifestClosed = false;
@@ -1069,6 +1037,7 @@ class BackupAgent {
     try {
       final writerFuture = writerWorker.run();
       writerFutureRef = writerFuture;
+      final existsWorkerFuture = existsWorker.run();
 
       final missingWorkerFuture =
           () async {
@@ -1079,7 +1048,6 @@ class BackupAgent {
               }
               while (missingQueue.isNotEmpty) {
                 final run = missingQueue.removeAt(0);
-                await writerWorker.waitForBackpressureClear();
                 await sftpWorker.fetchMissingRun(run.startIndex, run.hashes);
               }
             }
@@ -1131,6 +1099,9 @@ class BackupAgent {
         throw const _BackupCanceled();
       }
       await hashblocksWorker.finishBatch();
+      existsWorker.signalDone();
+      await existsWorkerFuture;
+      existsWorker.throwIfError();
       if (!eofSeen) {
         hashblocksWorker.logStats();
       }
@@ -1170,6 +1141,7 @@ class BackupAgent {
       if (_activeHashblocksController == controller) {
         _activeHashblocksController = null;
       }
+      existsWorker.signalDone();
       writerWorker.signalDone();
       if (writerFutureRef != null && !writerAwaited) {
         await writerFutureRef;
@@ -1191,18 +1163,15 @@ class BackupAgent {
     return true;
   }
 
-  Future<bool> _writeBlobIfMissing(String hash, List<int> bytes, BackupDriver driver) async {
-    return driver.writeBlobIfMissing(hash, bytes);
+  Future<void> _writeBlob(String hash, List<int> bytes, BackupDriver driver) async {
+    await driver.writeBlob(hash, bytes);
+    _blobDirectoryCache?.markHashKnown(hash);
   }
 
-  Future<bool> _scheduleWriteBlobIfMissing(String hash, Uint8List bytes, BackupDriver driver) async {
-    final dirWorker = _dirCreateWorker;
-    if (dirWorker != null) {
-      dirWorker.enqueue(hash);
-    }
+  Future<void> _scheduleWriteBlob(String hash, Uint8List bytes, BackupDriver driver) async {
     _ensureNotCanceled();
     final payload = Uint8List.fromList(bytes);
-    final future = _writeBlobIfMissing(hash, payload, driver);
+    final future = _writeBlob(hash, payload, driver);
     final tracking = future.then((_) {});
     _inFlightWrites.add(tracking);
     tracking.whenComplete(() => _inFlightWrites.remove(tracking));
@@ -1217,12 +1186,12 @@ class BackupAgent {
     _inFlightWrites.clear();
   }
 
-  Future<bool> _blobExists(String hash, BackupDriver driver) async {
+  Future<bool> _blobExists(String hash) async {
     final cache = _blobDirectoryCache;
-    if (cache != null) {
-      return cache.blobExists(hash);
+    if (cache == null) {
+      return false;
     }
-    return driver.blobExists(hash);
+    return cache.blobExists(hash);
   }
 
   bool _isAllZero(Uint8List data, int length) {
@@ -1302,7 +1271,7 @@ class BackupAgent {
   }
 
   void _ensureNotCanceled() {
-    _dirCreateWorker?.throwIfError();
+    _blobCacheWorker?.throwIfError();
     if (_cancelRequested) {
       throw const _BackupCanceled();
     }
@@ -1374,11 +1343,9 @@ class _SpeedSample {
 }
 
 class _BlobDirectoryCache {
-  _BlobDirectoryCache({required BlobDirectoryLister driver, required this.logInfo, required this.markShardReady, required this.createShard}) : _driver = driver;
+  _BlobDirectoryCache({required BlobDirectoryLister driver, required this.createShard}) : _driver = driver;
 
   final BlobDirectoryLister _driver;
-  final void Function(String message) logInfo;
-  final void Function(String shardKey) markShardReady;
   final Future<void> Function(String hash) createShard;
 
   Set<String>? _shard1Names;
@@ -1387,6 +1354,23 @@ class _BlobDirectoryCache {
   final Map<String, Future<Set<String>>> _shard2InFlight = {};
   final Map<String, Set<String>> _blobNamesByShardKey = {};
   final Map<String, Future<Set<String>>> _blobNamesInFlight = {};
+  final Map<String, Future<void>> _shardCreateInFlight = {};
+  final Set<String> _readyShards = <String>{};
+  final List<Completer<void>> _readyWaiters = <Completer<void>>[];
+
+  Future<void> initialize() async {
+    await _loadShard1();
+  }
+
+  bool isShardReady(String shardKey) {
+    return _readyShards.contains(shardKey);
+  }
+
+  Future<void> waitForAnyReady() async {
+    final completer = Completer<void>();
+    _readyWaiters.add(completer);
+    return completer.future;
+  }
 
   Future<bool> blobExists(String hash) async {
     if (hash.length < 4) {
@@ -1397,7 +1381,7 @@ class _BlobDirectoryCache {
     final shardKey = '$shard1$shard2';
     final shard1Names = _shard1Names;
     if (shard1Names == null) {
-      _loadShard1().catchError((_) => <String>{});
+      unawaited(prefetchHash(hash));
       return false;
     }
     if (!shard1Names.contains(shard1)) {
@@ -1405,36 +1389,19 @@ class _BlobDirectoryCache {
     }
     final shard2Names = _shard2NamesByShard1[shard1];
     if (shard2Names == null) {
-      _loadShard2(shard1).catchError((_) => <String>{});
+      unawaited(prefetchHash(hash));
       return false;
     }
     if (!shard2Names.contains(shard2)) {
       return false;
     }
-    markShardReady(shardKey);
     final blobNames = _blobNamesByShardKey[shardKey];
     if (blobNames == null) {
-      _loadBlobNames(shard1, shard2).catchError((_) => <String>{});
+      unawaited(prefetchHash(hash));
       return false;
     }
+    _markShardReady(shardKey);
     return blobNames.contains(hash);
-  }
-
-  bool shouldEnsureBlobDir(String hash) {
-    if (hash.length < 4) {
-      return false;
-    }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    final shard1Names = _shard1Names;
-    if (shard1Names != null && !shard1Names.contains(shard1)) {
-      return true;
-    }
-    final shard2Names = _shard2NamesByShard1[shard1];
-    if (shard2Names != null && !shard2Names.contains(shard2)) {
-      return true;
-    }
-    return false;
   }
 
   Future<void> prefetchHash(String hash) async {
@@ -1446,23 +1413,29 @@ class _BlobDirectoryCache {
     final shardKey = '$shard1$shard2';
     final shard1Names = await _loadShard1();
     if (!shard1Names.contains(shard1)) {
-      await createShard(hash);
-      _shard1Names?.add(shard1);
-      _shard2NamesByShard1.putIfAbsent(shard1, () => <String>{}).add(shard2);
-      _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{});
-      markShardReady(shardKey);
+      await _ensureShardCreated(hash: hash, shard1: shard1, shard2: shard2, shardKey: shardKey);
       return;
     }
     final shard2Names = await _loadShard2(shard1);
     if (!shard2Names.contains(shard2)) {
-      await createShard(hash);
-      _shard2NamesByShard1.putIfAbsent(shard1, () => <String>{}).add(shard2);
-      _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{});
-      markShardReady(shardKey);
+      await _ensureShardCreated(hash: hash, shard1: shard1, shard2: shard2, shardKey: shardKey);
       return;
     }
-    markShardReady(shardKey);
     await _loadBlobNames(shard1, shard2);
+    _markShardReady(shardKey);
+  }
+
+  void markHashKnown(String hash) {
+    if (hash.length < 4) {
+      return;
+    }
+    final shard1 = hash.substring(0, 2);
+    final shard2 = hash.substring(2, 4);
+    final shardKey = '$shard1$shard2';
+    (_shard1Names ??= <String>{}).add(shard1);
+    _shard2NamesByShard1.putIfAbsent(shard1, () => <String>{}).add(shard2);
+    _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{}).add(hash);
+    _markShardReady(shardKey);
   }
 
   Future<Set<String>> _loadShard1() async {
@@ -1501,7 +1474,7 @@ class _BlobDirectoryCache {
       _shard2NamesByShard1[shard1] = names;
       for (final shard2 in names) {
         final shardKey = '$shard1$shard2';
-        markShardReady(shardKey);
+        _markShardReady(shardKey);
       }
       return names;
     } finally {
@@ -1528,5 +1501,44 @@ class _BlobDirectoryCache {
     } finally {
       _blobNamesInFlight.remove(key);
     }
+  }
+
+  Future<void> _ensureShardCreated({required String hash, required String shard1, required String shard2, required String shardKey}) async {
+    final existing = _shardCreateInFlight[shardKey];
+    if (existing != null) {
+      await existing;
+      return;
+    }
+    final createFuture = () async {
+      await createShard(hash);
+      (_shard1Names ??= <String>{}).add(shard1);
+      _shard2NamesByShard1.putIfAbsent(shard1, () => <String>{}).add(shard2);
+      _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{});
+      _markShardReady(shardKey);
+    }();
+    _shardCreateInFlight[shardKey] = createFuture;
+    try {
+      await createFuture;
+    } finally {
+      if (identical(_shardCreateInFlight[shardKey], createFuture)) {
+        _shardCreateInFlight.remove(shardKey);
+      }
+    }
+  }
+
+  void _markShardReady(String shardKey) {
+    if (_readyShards.contains(shardKey)) {
+      return;
+    }
+    _readyShards.add(shardKey);
+    if (_readyWaiters.isEmpty) {
+      return;
+    }
+    for (final waiter in _readyWaiters) {
+      if (!waiter.isCompleted) {
+        waiter.complete();
+      }
+    }
+    _readyWaiters.clear();
   }
 }

@@ -8,10 +8,11 @@ class _MissingRun {
 }
 
 class _MissingEntry {
-  const _MissingEntry(this.index, this.hash);
+  const _MissingEntry(this.index, this.hash, this.blockLength);
 
   final int index;
   final String hash;
+  final int blockLength;
 }
 
 class _MissingBlock {
@@ -19,13 +20,6 @@ class _MissingBlock {
 
   final String hash;
   final Uint8List bytes;
-}
-
-class _WriteResult {
-  const _WriteResult(this.future, this.wrote);
-
-  final Future<bool> future;
-  final bool wrote;
 }
 
 class _BackupCanceled implements Exception {

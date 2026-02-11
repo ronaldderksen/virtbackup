@@ -7,6 +7,7 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
     : _tmpWritesEnabled = tmpWritesEnabled,
       _throttleBytesPerSecond = _resolveThrottleBytesPerSecond(driverParams);
   final String _destination;
+  static const String _appFolderName = 'VirtBackup';
   final bool _tmpWritesEnabled;
   final int? _throttleBytesPerSecond;
   final Stopwatch _throttleClock = Stopwatch();
@@ -25,7 +26,7 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
   );
 
   @override
-  String get destination => _destination;
+  String get destination => _rootDir().path;
 
   @override
   bool get discardWrites => true;
@@ -33,9 +34,9 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
   @override
   int get bufferedBytes => 0;
 
-  Directory _rootDir() => Directory(_destination);
+  Directory _rootDir() => Directory('$_destination${Platform.pathSeparator}$_appFolderName');
 
-  Directory _manifestsRoot() => Directory('$_destination${Platform.pathSeparator}manifests');
+  Directory _manifestsRoot() => Directory('${_rootDir().path}${Platform.pathSeparator}manifests');
 
   @override
   Directory manifestsDir(String serverId, String vmName) {
@@ -44,12 +45,12 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
 
   @override
   Directory blobsDir() {
-    return Directory('$_destination${Platform.pathSeparator}blobs');
+    return Directory('${_rootDir().path}${Platform.pathSeparator}blobs');
   }
 
   @override
   Directory tmpDir() {
-    return Directory('$_destination${Platform.pathSeparator}tmp');
+    return Directory('${_rootDir().path}${Platform.pathSeparator}tmp');
   }
 
   @override
@@ -302,9 +303,9 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
   Future<void> ensureBlobDir(String hash) async {}
 
   @override
-  Future<bool> writeBlobIfMissing(String hash, List<int> bytes) async {
+  Future<void> writeBlob(String hash, List<int> bytes) async {
     if (hash.length < 4) {
-      return false;
+      return;
     }
     await _simulateWriteDelay(bytes.length);
     if (_tmpWritesEnabled) {
@@ -321,7 +322,6 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
         } catch (_) {}
       }
     }
-    return true;
   }
 
   Future<void> _simulateWriteDelay(int byteCount) async {

@@ -1,32 +1,24 @@
 part of '../backup.dart';
 
 class _BlobCacheWorker {
-  _BlobCacheWorker({required this.prefetch, required this.logInfo, required this.logInterval});
+  _BlobCacheWorker({required this.initialize, required this.processHash, required this.logInfo});
 
-  final Future<void> Function(String hash) prefetch;
+  final Future<void> Function() initialize;
+  final Future<void> Function(String hash) processHash;
   final void Function(String message) logInfo;
-  final Duration logInterval;
 
-  final Set<String> _pendingShards = {};
   final List<String> _queue = [];
   Completer<void>? _wakeWorker;
   bool _done = false;
   Object? _error;
   StackTrace? _errorStack;
-  DateTime? _lastQueueLogAt;
-  var _processed = 0;
+  var _inFlightTasks = 0;
 
   void enqueue(String hash) {
     if (hash.length < 4) {
       return;
     }
-    final shardKey = hash.substring(0, 4);
-    if (_pendingShards.contains(shardKey)) {
-      return;
-    }
-    _pendingShards.add(shardKey);
     _queue.add(hash);
-    _maybeLogQueue();
     if (_wakeWorker != null && !_wakeWorker!.isCompleted) {
       _wakeWorker!.complete();
       _wakeWorker = null;
@@ -51,50 +43,34 @@ class _BlobCacheWorker {
   Future<void> run() async {
     try {
       logInfo('blob-cache worker started');
-      const concurrency = 4;
-      while (!_done || _queue.isNotEmpty) {
+      await initialize();
+      logInfo('blob-cache worker initial scan done');
+
+      while (!_done || _queue.isNotEmpty || _inFlightTasks > 0) {
+        while (_queue.isNotEmpty) {
+          final hash = _queue.removeAt(0);
+          _inFlightTasks += 1;
+          unawaited(() async {
+            try {
+              await processHash(hash);
+            } catch (error, stackTrace) {
+              _error = error;
+              _errorStack = stackTrace;
+              logInfo('blob-cache worker error: $error');
+            } finally {
+              _inFlightTasks -= 1;
+            }
+          }());
+        }
         if (_queue.isEmpty) {
           _wakeWorker ??= Completer<void>();
-          await _wakeWorker!.future;
+          await Future.any<void>(<Future<void>>[_wakeWorker!.future, Future<void>.delayed(const Duration(milliseconds: 100))]);
         }
-        if (_queue.isEmpty) {
-          continue;
-        }
-        final batch = <String>[];
-        while (_queue.isNotEmpty && batch.length < concurrency) {
-          batch.add(_queue.removeAt(0));
-        }
-        final workers = List<Future<void>>.generate(batch.length, (index) async {
-          final hash = batch[index];
-          final shardKey = hash.substring(0, 4);
-          try {
-            await prefetch(hash);
-          } catch (error, stackTrace) {
-            _error = error;
-            _errorStack = stackTrace;
-            logInfo('blob-cache worker error: $error');
-            return;
-          } finally {
-            _pendingShards.remove(shardKey);
-            _processed += 1;
-          }
-        });
-        await Future.wait(workers);
-        _maybeLogQueue();
       }
     } catch (error, stackTrace) {
       _error = error;
       _errorStack = stackTrace;
       logInfo('blob-cache worker failed: $error');
     }
-  }
-
-  void _maybeLogQueue() {
-    final now = DateTime.now();
-    if (_lastQueueLogAt != null && now.difference(_lastQueueLogAt!) < logInterval) {
-      return;
-    }
-    _lastQueueLogAt = now;
-    logInfo('blob-cache queue: pending=${_pendingShards.length} queued=${_queue.length} processed=$_processed');
   }
 }

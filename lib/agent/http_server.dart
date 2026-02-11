@@ -1073,7 +1073,7 @@ class AgentHttpServer {
       settingsDir: _agentSettingsStore.file.parent,
       logInfo: _hostLog,
     );
-    final sftp = SftpBackupDriver(settings: _agentSettings, logInfo: _hostLog);
+    final sftp = SftpBackupDriver(settings: _agentSettings);
 
     return {
       'filesystem': _DriverDescriptor(
@@ -1120,7 +1120,7 @@ class AgentHttpServer {
           }
           return null;
         },
-        create: (_) => SftpBackupDriver(settings: _agentSettings, logInfo: _hostLog),
+        create: (_) => SftpBackupDriver(settings: _agentSettings),
       ),
     };
   }
@@ -1230,7 +1230,7 @@ class AgentHttpServer {
     final defaultDriverId = _agentSettings.backupDriverId.trim().isEmpty ? 'filesystem' : _agentSettings.backupDriverId.trim();
     final driverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : defaultDriverId;
     final driverInfo = _driverCatalog[driverId] ?? _driverCatalog['filesystem']!;
-    _setJobContext(jobId, source: _formatJobSource(server, vm.name), target: _formatBackupTarget(driverInfo, backupPath, driverId));
+    _setJobContext(jobId, source: _formatJobSource(server, vm.name), target: _formatBackupTarget(driverInfo, backupPath, driverId), driverLabel: driverInfo.label);
     _hostLog('Backup job $jobId using driver: $driverId');
     final control = _jobControls[jobId];
     if (control == null) {
@@ -1595,6 +1595,7 @@ class AgentHttpServer {
     final defaultDriverId = _agentSettings.backupDriverId.trim().isEmpty ? 'filesystem' : _agentSettings.backupDriverId.trim();
     final driverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : defaultDriverId;
     final driverInfo = _driverCatalog[driverId] ?? _driverCatalog['filesystem']!;
+    _setJobContext(jobId, source: xmlPath, driverLabel: driverInfo.label);
     final backupPath = _agentSettings.backupPath.trim();
     if (driverInfo.usesPath && backupPath.isEmpty) {
       final current = _jobs[jobId];
@@ -1604,7 +1605,6 @@ class AgentHttpServer {
       }
       return;
     }
-    _setJobContext(jobId, source: xmlPath);
     _hostLog('Restore job $jobId using driver: $driverId');
     final control = _jobControls[jobId];
     if (control == null) {
@@ -1689,7 +1689,7 @@ class AgentHttpServer {
     return name.isEmpty ? 'Unknown VM' : name;
   }
 
-  void _setJobContext(String jobId, {String? source, String? target}) {
+  void _setJobContext(String jobId, {String? source, String? target, String? driverLabel}) {
     final control = _jobControls[jobId];
     if (control == null) {
       return;
@@ -1699,6 +1699,9 @@ class AgentHttpServer {
     }
     if (target != null && target.trim().isNotEmpty) {
       control.target = target.trim();
+    }
+    if (driverLabel != null && driverLabel.trim().isNotEmpty) {
+      control.driverLabel = driverLabel.trim();
     }
   }
 
@@ -1736,8 +1739,10 @@ class AgentHttpServer {
     final control = _jobControls[jobId];
     final duration = control?.startedAt == null ? null : DateTime.now().difference(control!.startedAt).inSeconds;
     final status = state == AgentJobState.success ? 'success' : 'failed';
-    final message = _buildNtfymeMessage(type, status, control?.source, control?.target);
-    final payload = <String, dynamic>{'topic': _ntfymeTopic, 'msg': message, 'push_msg': message, 'type': type.name, 'status': status};
+    final driverLabel = _resolveDriverLabel(control?.driverLabel);
+    final messageText = _buildNtfymeMessage(type, status, control?.source, control?.target);
+    final pushMessage = _buildNtfymePushMessage(messageText, driverLabel);
+    final payload = <String, dynamic>{'topic': _ntfymeTopic, 'msg': messageText, 'push_msg': pushMessage, 'type': type.name, 'status': status, 'driver': driverLabel};
     if (duration != null) {
       payload['duration_sec'] = duration;
     }
@@ -1751,7 +1756,7 @@ class AgentHttpServer {
       payload['size'] = _formatBytes(sizeBytes);
     }
     if (state == AgentJobState.failure) {
-      payload['error'] = message;
+      payload['error'] = messageText;
     }
     _hostLog('Ntfy me notification queued: ${jsonEncode(payload)}');
     unawaited(_postNtfymeNotification(token, payload));
@@ -1761,6 +1766,19 @@ class AgentHttpServer {
     final label = type == AgentJobType.backup ? 'Backup' : 'Restore';
     final statusText = status == 'success' ? 'succeeded' : 'failed';
     return '$label $statusText';
+  }
+
+  String _buildNtfymePushMessage(String message, String? driverLabel) {
+    final label = driverLabel?.trim() ?? '';
+    if (label.isEmpty) {
+      return message;
+    }
+    return '$message on $label';
+  }
+
+  String _resolveDriverLabel(String? driverLabel) {
+    final label = driverLabel?.trim() ?? '';
+    return label.isEmpty ? 'Unknown driver' : label;
   }
 
   String _formatBytes(int bytes) {
@@ -1958,6 +1976,7 @@ class _JobControl {
   SendPort? workerSendPort;
   String? source;
   String? target;
+  String? driverLabel;
 }
 
 class _JobCanceled implements Exception {

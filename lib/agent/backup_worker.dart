@@ -84,7 +84,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
           logInfo: (message) => mainPort.send({'type': _typeLog, 'level': 'info', 'message': message}),
         ),
         'filesystem': (_) => FilesystemBackupDriver(backupPath.trim()),
-        'sftp': (_) => SftpBackupDriver(settings: settings, logInfo: (message) => mainPort.send({'type': _typeLog, 'level': 'info', 'message': message})),
+        'sftp': (_) => SftpBackupDriver(settings: settings),
       };
       final factory = factories[driverId] ?? factories['filesystem']!;
       return factory(driverParams);
@@ -102,6 +102,8 @@ void backupWorkerMain(Map<String, dynamic> init) {
 
     try {
       if (freshRequested && _isDebug) {
+        // Prepare local debug log first so fresh-cleanup logs are not lost by a later ensureReady() call.
+        await driver.ensureReady();
         host.logInfo('Fresh cleanup requested (debug only).');
         await _deleteSharedBlobCacheIfNeeded(host, settings, driverId);
         await driver.freshCleanup();

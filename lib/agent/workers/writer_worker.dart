@@ -25,7 +25,7 @@ class _WriterWorker {
   final int backlogClearBytes;
   final int Function() driverBufferedBytes;
   final void Function(int queuedBytes, int inFlightBytes, int driverBufferedBytes) onMetrics;
-  final Future<bool> Function(String hash, Uint8List bytes) scheduleWrite;
+  final Future<void> Function(String hash, Uint8List bytes) scheduleWrite;
   final void Function(int bytes) handlePhysicalBytes;
   final void Function(String message) logInfo;
   final bool Function(String shardKey) isShardReady;
@@ -40,6 +40,7 @@ class _WriterWorker {
   var _inFlightBytes = 0;
   var _writtenBlocks = 0;
   DateTime? _lastQueueStatsLogAt;
+  DateTime? _lastLoopDebugLogAt;
 
   bool _backpressureActive = false;
   Completer<void>? _backpressureWaiter;
@@ -97,14 +98,13 @@ class _WriterWorker {
 
   Future<void> run() async {
     try {
-      const maxBatchBlocks = 128;
-      final writeFutures = <Future<bool>>[];
-      final writeSizes = <Future<bool>, int>{};
+      final writeFutures = <Future<void>>[];
+      final writeSizes = <Future<void>, int>{};
 
-      Future<_WriteResult> awaitAnyWrite() {
+      Future<Future<void>> awaitAnyWrite() {
         return Future.any(
           writeFutures.map((future) {
-            return future.then((wrote) => _WriteResult(future, wrote));
+            return future.then((_) => future);
           }),
         );
       }
@@ -113,10 +113,10 @@ class _WriterWorker {
         if (writeFutures.isEmpty) {
           return;
         }
-        final result = await awaitAnyWrite();
-        writeFutures.remove(result.future);
-        final size = writeSizes.remove(result.future) ?? 0;
-        if (result.wrote && size > 0) {
+        final doneFuture = await awaitAnyWrite();
+        writeFutures.remove(doneFuture);
+        final size = writeSizes.remove(doneFuture) ?? 0;
+        if (size > 0) {
           handlePhysicalBytes(size);
         }
         _writtenBlocks += 1;
@@ -145,59 +145,75 @@ class _WriterWorker {
       }
 
       while (!_done || _queuedBlocks > 0 || writeFutures.isNotEmpty) {
-        if (_queuedBlocks == 0 && writeFutures.isEmpty) {
+        if (_queuedBlocks == 0) {
+          if (writeFutures.isNotEmpty) {
+            await drainOne();
+            continue;
+          }
           _wakeWriter ??= Completer<void>();
           await _wakeWriter!.future;
+          continue;
         }
-        while (_shardQueue.isNotEmpty) {
-          final passSize = _shardQueue.length;
-          var wroteThisPass = false;
-          for (var i = 0; i < passSize; i += 1) {
-            final shardKey = _shardQueue.removeAt(0);
-            final bucket = _writeQueues[shardKey];
-            if (bucket == null || bucket.isEmpty) {
-              _writeQueues.remove(shardKey);
-              continue;
-            }
-            if (!isShardReady(shardKey)) {
-              _shardQueue.add(shardKey);
-              continue;
-            }
-            var batchCount = 0;
-            while (bucket.isNotEmpty && batchCount < maxBatchBlocks) {
-              await drainCompleted();
-              final entry = bucket.removeAt(0);
-              _queuedBlocks -= 1;
-              _queuedBytes -= entry.bytes.length;
-              _inFlightBytes += entry.bytes.length;
-              _reportMetrics();
-              final future = scheduleWrite(entry.hash, entry.bytes).timeout(
-                blockTimeout,
-                onTimeout: () {
-                  throw TimeoutException('hashblocks writer timeout after ${blockTimeout.inSeconds}s');
-                },
-              );
-              writeFutures.add(future);
-              writeSizes[future] = entry.bytes.length;
-              batchCount += 1;
-            }
-            wroteThisPass = true;
-            if (bucket.isNotEmpty) {
-              _shardQueue.add(shardKey);
-            } else {
-              _writeQueues.remove(shardKey);
-            }
+        var scheduled = false;
+        final passSize = _shardQueue.length;
+        for (var i = 0; i < passSize; i += 1) {
+          final shardKey = _shardQueue.removeAt(0);
+          final bucket = _writeQueues[shardKey];
+          if (bucket == null || bucket.isEmpty) {
+            _writeQueues.remove(shardKey);
+            continue;
           }
-          if (!wroteThisPass && _queuedBlocks > 0) {
-            if (waitForAnyShardReady != null) {
-              await waitForAnyShardReady!();
-            } else {
-              await Future<void>.delayed(const Duration(milliseconds: 50));
-            }
+          if (!isShardReady(shardKey)) {
+            _shardQueue.add(shardKey);
+            continue;
+          }
+          await drainCompleted();
+          if (writeFutures.length >= maxConcurrentWrites) {
+            _shardQueue.add(shardKey);
+            break;
+          }
+          final entry = bucket.removeAt(0);
+          _queuedBlocks -= 1;
+          _queuedBytes -= entry.bytes.length;
+          _inFlightBytes += entry.bytes.length;
+          _reportMetrics();
+          final future = scheduleWrite(entry.hash, entry.bytes).timeout(
+            blockTimeout,
+            onTimeout: () {
+              throw TimeoutException('hashblocks writer timeout after ${blockTimeout.inSeconds}s');
+            },
+          );
+          writeFutures.add(future);
+          writeSizes[future] = entry.bytes.length;
+          scheduled = true;
+          if (bucket.isNotEmpty) {
+            _shardQueue.add(shardKey);
+          } else {
+            _writeQueues.remove(shardKey);
           }
         }
-        await drainCompleted(force: true);
+        if (scheduled) {
+          _maybeLogLoopDebug('scheduled');
+          continue;
+        }
+        if (writeFutures.isNotEmpty) {
+          _maybeLogLoopDebug('drain-inflight');
+          await drainOne();
+          continue;
+        }
+        if (_queuedBlocks > 0) {
+          _maybeLogLoopDebug('wait-shard-ready');
+          if (waitForAnyShardReady != null) {
+            // Avoid indefinite stalls when a ready signal is missed due to timing;
+            // keep re-checking the queue at a short interval while work is pending.
+            await Future.any<void>(<Future<void>>[waitForAnyShardReady!(), Future<void>.delayed(const Duration(milliseconds: 100))]);
+          } else {
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+          }
+          continue;
+        }
       }
+      await drainCompleted(force: true);
     } catch (error, stackTrace) {
       _writerError = error;
       _writerStack = stackTrace;
@@ -247,6 +263,27 @@ class _WriterWorker {
 
   void _reportMetrics() {
     onMetrics(_queuedBytes, _inFlightBytes, driverBufferedBytes());
+  }
+
+  void _maybeLogLoopDebug(String reason) {
+    final now = DateTime.now();
+    if (_lastLoopDebugLogAt != null && now.difference(_lastLoopDebugLogAt!) < logInterval) {
+      return;
+    }
+    _lastLoopDebugLogAt = now;
+    var schedulableShards = 0;
+    for (final shardKey in _shardQueue) {
+      final bucket = _writeQueues[shardKey];
+      if (bucket == null || bucket.isEmpty) {
+        continue;
+      }
+      if (isShardReady(shardKey)) {
+        schedulableShards += 1;
+      }
+    }
+    logInfo(
+      'writer debug: reason=$reason queuedBlocks=$_queuedBlocks queuedBytes=$_queuedBytes inFlightBytes=$_inFlightBytes shards=${_shardQueue.length} schedulableShards=$schedulableShards backpressure=$_backpressureActive',
+    );
   }
 
   String _shardKeyForHash(String hash) {

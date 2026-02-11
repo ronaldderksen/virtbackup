@@ -3,10 +3,7 @@ part of '../backup.dart';
 class _HashblocksWorker {
   _HashblocksWorker({
     required this.sink,
-    required this.blockSize,
     required this.fileSize,
-    required this.maxNonZeroBlocks,
-    required this.maxMissingRun,
     required this.logInfo,
     required this.ensureNotCanceled,
     required this.writeZeroRun,
@@ -17,19 +14,12 @@ class _HashblocksWorker {
     required this.handleBytes,
     required this.handleHashblocksBytes,
     required this.registerProgressBlocks,
-    required this.blobExists,
     required this.prefetchBlob,
-    required this.enqueueBlobDir,
-    required this.enqueueMissingRun,
-    required this.sendLimit,
-    required this.updateLimitFromProgress,
+    required this.enqueueExists,
   });
 
   final IOSink sink;
-  final int blockSize;
   final int fileSize;
-  final int maxNonZeroBlocks;
-  final int maxMissingRun;
   final void Function(String message) logInfo;
   final void Function() ensureNotCanceled;
   final void Function(int start, int end) writeZeroRun;
@@ -40,25 +30,15 @@ class _HashblocksWorker {
   final void Function(int bytes) handleBytes;
   final void Function(int bytes) handleHashblocksBytes;
   final void Function(int blocks) registerProgressBlocks;
-  final Future<bool> Function(String hash) blobExists;
   final void Function(String hash) prefetchBlob;
-  final void Function(String hash) enqueueBlobDir;
-  final void Function(int startIndex, List<String> hashes) enqueueMissingRun;
-  final void Function(int maxIndex, {bool force}) sendLimit;
-  final void Function({bool force}) updateLimitFromProgress;
+  final void Function(int index, String hash, int blockLength) enqueueExists;
 
   var totalLines = 0;
   var zeroBlocks = 0;
   var existingBlocks = 0;
   var missingBlocks = 0;
   var lastHashblocksIndex = -1;
-  var batchHold = false;
-
-  final batchEntries = <_MissingEntry>[];
-  var batchNonZeroCount = 0;
-
-  var pendingMissingStart = -1;
-  final pendingMissingHashes = <String>[];
+  bool batchHold = false;
 
   Future<void> handleLine(String line) async {
     ensureNotCanceled();
@@ -85,28 +65,12 @@ class _HashblocksWorker {
     prefetchBlob(hash);
     final blockLength = blockLengthForIndex(index, fileSize);
     handleHashblocksBytes(blockLength);
-    batchEntries.add(_MissingEntry(index, hash));
-    batchNonZeroCount += 1;
+    enqueueExists(index, hash, blockLength);
     lastHashblocksIndex = index;
     registerProgressBlocks(1);
-
-    if (batchNonZeroCount >= maxNonZeroBlocks) {
-      if (!batchHold) {
-        batchHold = true;
-        sendLimit(max(0, lastHashblocksIndex), force: true);
-      }
-      await _bulkCheckBatch();
-      logStats();
-      if (batchHold) {
-        batchHold = false;
-        updateLimitFromProgress(force: true);
-      }
-    }
   }
 
-  Future<void> finishBatch() async {
-    await _bulkCheckBatch();
-  }
+  Future<void> finishBatch() async {}
 
   void logStats({String? prefix}) {
     if (prefix == null || prefix.isEmpty) {
@@ -116,48 +80,11 @@ class _HashblocksWorker {
     logInfo('$prefix lines=$totalLines existing=$existingBlocks missing=$missingBlocks zero=$zeroBlocks');
   }
 
-  Future<void> _bulkCheckBatch() async {
-    if (batchEntries.isEmpty) {
-      return;
-    }
-    for (final entry in batchEntries) {
-      ensureNotCanceled();
-      final exists = await blobExists(entry.hash);
-      if (exists) {
-        existingBlocks++;
-        handleBytes(blockLengthForIndex(entry.index, fileSize));
-        registerProgressBlocks(1);
-        continue;
-      }
-      enqueueBlobDir(entry.hash);
-      missingBlocks++;
-      if (pendingMissingStart < 0) {
-        pendingMissingStart = entry.index;
-      } else {
-        final expectedNext = pendingMissingStart + pendingMissingHashes.length;
-        if (entry.index != expectedNext) {
-          await _flushPendingMissing();
-          pendingMissingStart = entry.index;
-        }
-      }
-      pendingMissingHashes.add(entry.hash);
-      if (pendingMissingHashes.length >= maxMissingRun) {
-        await _flushPendingMissing();
-      }
-    }
-    await _flushPendingMissing();
-    batchEntries.clear();
-    batchNonZeroCount = 0;
+  void markExisting() {
+    existingBlocks += 1;
   }
 
-  Future<void> _flushPendingMissing() async {
-    if (pendingMissingHashes.isEmpty) {
-      return;
-    }
-    final startIndex = pendingMissingStart;
-    final hashes = List<String>.from(pendingMissingHashes);
-    pendingMissingHashes.clear();
-    pendingMissingStart = -1;
-    enqueueMissingRun(startIndex, hashes);
+  void markMissing() {
+    missingBlocks += 1;
   }
 }

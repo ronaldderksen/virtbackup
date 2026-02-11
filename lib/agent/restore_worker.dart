@@ -118,7 +118,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           logInfo: (message) => mainPort.send({'type': _typeLog, 'level': 'info', 'message': message}),
         ),
         'filesystem': () => FilesystemBackupDriver(backupPath.trim()),
-        'sftp': () => SftpBackupDriver(settings: settings, logInfo: (message) => mainPort.send({'type': _typeLog, 'level': 'info', 'message': message})),
+        'sftp': () => SftpBackupDriver(settings: settings),
       };
       final factory = factories[driverId] ?? factories['filesystem']!;
       return factory();
@@ -269,7 +269,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         if (target.fileSize != null && target.fileSize! > 0) {
           totalBytes += target.fileSize!;
         } else {
-          totalBytes += await _sumBlobSizes(driver, target.blocks);
+          totalBytes += target.blocks.length * target.blockSize;
         }
       }
       sendStatus(
@@ -578,30 +578,6 @@ int _blockLengthForIndex(int index, int totalSize, int blockSize) {
   return end - start;
 }
 
-Future<int> _sumBlobSizes(BackupDriver driver, List<_BlockRef> blocks) async {
-  var total = 0;
-  final remote = driver is RemoteBlobDriver ? driver as RemoteBlobDriver : null;
-  for (final block in blocks) {
-    if (block.zeroRun) {
-      continue;
-    }
-    final hash = block.hash;
-    if (hash == null) {
-      continue;
-    }
-    if (remote != null) {
-      final length = await remote.blobLength(hash);
-      total += length ?? 0;
-    } else {
-      final blob = driver.blobFile(hash);
-      if (await blob.exists()) {
-        total += await blob.length();
-      }
-    }
-  }
-  return total;
-}
-
 Stream<List<int>> _blobStream(BackupDriver driver, List<_BlockRef> blocks, int blockSize, int? totalSize, [bool Function()? isCanceled]) async* {
   var totalEmitted = 0;
   final remote = driver is RemoteBlobDriver ? driver as RemoteBlobDriver : null;
@@ -632,7 +608,14 @@ Stream<List<int>> _blobStream(BackupDriver driver, List<_BlockRef> blocks, int b
         }
         builder.add(chunk);
       }
-      return _BlockData(index, builder.takeBytes());
+      final bytes = builder.takeBytes();
+      if (expectedLength > 0 && bytes.isEmpty) {
+        throw 'restore missing blob hash=$hash index=$index';
+      }
+      if (bytes.length != expectedLength) {
+        throw 'restore blob size mismatch hash=$hash index=$index expected=$expectedLength got=${bytes.length}';
+      }
+      return _BlockData(index, bytes);
     }
 
     void schedule() {
@@ -677,6 +660,9 @@ Stream<List<int>> _blobStream(BackupDriver driver, List<_BlockRef> blocks, int b
         continue;
       }
       final blobFile = driver.blobFile(hash);
+      if (!await blobFile.exists()) {
+        throw 'restore missing local blob hash=$hash index=$i path=${blobFile.path}';
+      }
       final stream = expectedLength < blockSize ? blobFile.openRead(0, expectedLength) : blobFile.openRead();
       await for (final chunk in stream) {
         yield chunk;

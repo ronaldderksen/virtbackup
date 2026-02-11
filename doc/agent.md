@@ -100,7 +100,7 @@ There are two paths:
 
 1. **Backup start**
    - Agent selects the driver and prepares the destination.
-   - The agent initializes a lazy, in-memory blob directory cache used during hash checks (root and shard lists are fetched on demand, once per shard).
+   - The agent initializes an in-memory blob cache and performs an upfront scan (`shard1` -> `shard2` -> blob names) before hash checks start.
    - Manifests and folders are created as needed.
 
 2. **Hashblocks starts**
@@ -113,9 +113,9 @@ There are two paths:
 3. **Hashblocks processing**
    - Each line advances hashblocks progress (including ZERO/existing).
    - ZERO runs are written to the manifest (no SFTP).
-   - For hashes, the blob store is checked:
-     - **existing** → no SFTP
-     - **missing** → queued for SFTP range reads
+   - For hashes, entries are pushed to:
+     - blob-cache queue (directory hydration/ready)
+     - exists queue (existing/missing decision)
 
 4. **SFTP missing runs**
    - The SFTP worker fetches only missing ranges.
@@ -133,9 +133,12 @@ There are two paths:
 
 7. **Driver writes**
    - GDrive: blobs are uploaded as individual files under `blobs/<shard1>/<shard2>/`.
+   - SFTP: operations use retry with exponential backoff (2s, 4s, 8s, ...) on transient failures.
    - Filesystem: blobs are written directly.
    - Dummy: blob existence is simulated per driver rules.
-   - The agent maintains a per-backup, lazy blob directory cache outside the drivers; each shard is listed at most once and the cached results are reused for all hash checks.
+   - The agent maintains a per-backup blob cache outside the drivers; write decisions are made by this cache.
+   - Driver `writeBlob` paths are blind-write only (no exists/list/dir scans in the write call).
+   - This is a strict invariant for all drivers; do not add safety checks into `writeBlob`.
 
 8. **Finalize**
    - Manifests are committed and the job completes.
@@ -147,25 +150,30 @@ The hashblocks path is divided into logical workers:
 - `HashblocksWorker` (in `workers/hashblocks_worker.dart`)
   - Consumes lines from the hashblocks process.
   - Parses hashes and zero runs.
-  - Enqueues missing blocks.
+  - Pushes every hash to blob-cache and exists queue without blocking on exists checks.
   - Applies `LIMIT` backpressure when necessary.
 - `BlobCacheWorker` (in `workers/blob_cache_worker.dart`)
+  - Runs an initial `blobs` scan at startup via the active driver.
   - Prefetches shard directory listings based on incoming hashes.
-  - Runs in the background so hash parsing does not block on dirlist calls.
+  - Hash parsing does not wait for dirlist scans.
+  - When a shard is missing, blob-cache performs shard creation via driver calls and updates shard-ready state.
+  - Queue dequeue is immediate and independent: incoming hashes are dispatched fire-and-forget.
+  - Worker wait is bounded (short timeout polling) to avoid missed wake stalls while queue work is pending.
 
-- `DirCreateWorker` (in `workers/dir_create_worker.dart`)
-  - Creates `blobs/<shard1>/<shard2>/` directories when the agent's shard cache identifies missing dirs.
-  - Uses its own queue and does **not** apply backpressure.
-  - Caches created shards for the duration of a backup.
+- `ExistsWorker` (in `workers/exists_worker.dart`)
+  - Receives all hashes through a dedicated queue.
+  - Waits for shard-ready before deciding existing/missing.
+  - Existing blocks are counted and marked as physically handled without SFTP fetch.
+  - Missing hashes are grouped into contiguous runs and forwarded to `SftpWorker`.
 
 - `SftpWorker` (in `workers/sftp_worker.dart`)
   - Fetches missing blocks via range reads.
-  - Splits missing runs into ranges.
+  - Missing hashes are forwarded immediately (run size 1), then split into ranges.
   - Streams block data into the writer queue.
 
 - `WriterWorker` (in `workers/writer_worker.dart`)
   - De-queues blocks and writes blobs.
-  - Maintains concurrency for blob writes.
+  - Maintains continuous slot-based concurrency (no batch write loop).
   - Tracks backlog to apply backpressure.
 
 ### Backpressure Control
@@ -175,6 +183,7 @@ Backpressure is a combination of:
 - Hashblocks `LIMIT`: throttles how far the remote hash stream advances.
 - Writer backlog thresholds: throttles SFTP reads when queued/in-flight bytes plus driver-reported buffered bytes exceed limits.
 - LIMIT is based on progress plus a configured buffer (`hashblocksLimitBufferMb`).
+- LIMIT growth is paused only when writer backlog exceeds the configured backlog limit (default 4 GB).
 - Writer concurrency: each driver sets its own max concurrent writes, which affects how fast the backlog drains.
 
 ### Progress Tracking
@@ -262,6 +271,8 @@ The agent supports optional native SFTP via FFI:
 - Encrypted values are stored as `sshPasswordEnc` and decrypted into memory on load.
 - Ntfy me notifications are sent by the agent when backup/restore jobs finish (success or failure).
 - The agent posts JSON to `https://ntfyme.net/msg` with topic `virtbackup-job`.
+- `driver` is always included and contains the driver label.
+- `push_msg` is formatted as `<msg> on <driver label>`.
 - `size` is included for backup jobs as a human-readable size (KiB/MiB/GiB).
 - Set `ntfymeToken` in agent settings to enable notifications; when empty, notifications are skipped.
 - The GUI can store multiple agent addresses and switch between them.
@@ -271,6 +282,14 @@ The agent supports optional native SFTP via FFI:
 - SFTP password is stored in `agent.yaml` as an encrypted value under `backup.sftp` (`passwordEnc`) using the same AES-GCM key derivation as SSH passwords.
 - The Google Drive storage driver (`driverId: gdrive`) stores data as individual blob files using the same directory layout as the filesystem driver.
 - All Google Drive API calls retry up to 5 times with exponential backoff starting at 2 seconds; each retry recreates the HTTP client connection, and a persistent failure aborts the backup with a clean error.
+- Google Drive and SFTP driver debug calls are written to `VirtBackup/logs/debug.log` under the active backup base path; each backup run starts with a fresh (truncated) file.
+- Agent console output is also mirrored to `VirtBackup/logs/debug.log` as `action=console` records.
+- Debug log writes use a centralized writer with file locking to avoid interleaved/corrupted lines when multiple isolates write concurrently.
+- For `--fresh` runs, the debug log is prepared before cleanup so `Fresh cleanup` and SFTP rename timing lines are retained in the same job log.
+- SFTP debug logs include `action=sftp_timing` records with `leaseWaitMs`, `connectMs`, `opMs`, `leaseSource`, and `queued` to separate pool wait/connect time from operation time.
+- Google Drive HTTP calls are logged as operation records with timestamp, action (`mkdir`, `list`, `upload`, `download`, `move`, `trash`, `auth.refresh`), status, duration, and request details.
+- Google Drive upload HTTP clients are leased from a bounded pool so upload retries/concurrency cannot fan out into unbounded concurrent connections.
+- Google Drive folder creation is guarded by a local folder lock and checks for existing folders before creating; when duplicate folder names are detected, the driver performs a strict merge into a primary folder and fails the operation if duplicates cannot be fully resolved.
 - The filesystem backup path is configured via `backup.base_path` and the app creates and uses a `VirtBackup` folder inside that path.
 - The Google Drive root folder is configured via `backup.gdrive.rootPath` (default `/`), and the app creates a `VirtBackup` folder inside that path.
 - The SFTP base path is configured via `backup.sftp.basePath` (example `/Backup`), and the app creates and uses a `VirtBackup` folder inside that path.
