@@ -316,11 +316,7 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
         if (await tempFile.exists()) {
           await tempFile.delete();
         }
-      } catch (_) {
-        try {
-          await tempFile.delete();
-        } catch (_) {}
-      }
+      } catch (_) {}
     }
   }
 
@@ -365,6 +361,7 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
     if (hash.length < 4) {
       return false;
     }
+    // Existence is decided by the agent-side blob cache.
     return false;
   }
 

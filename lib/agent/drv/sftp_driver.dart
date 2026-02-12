@@ -7,7 +7,6 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:ffi/ffi.dart';
 
 import 'package:virtbackup/agent/drv/backup_storage.dart';
-import 'package:virtbackup/common/debug_log_writer.dart';
 import 'package:virtbackup/common/settings.dart';
 
 class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
@@ -16,7 +15,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   final AppSettings _settings;
   final Directory _cacheRoot;
   final _NativeSftpBindings? _nativeSftp = _NativeSftpBindings.tryLoad();
-  bool _debugLogPrepared = false;
 
   static const int _writeConcurrency = 8;
   static const int _blobCacheReservedSessions = 2;
@@ -71,10 +69,8 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   @override
   Future<void> ensureReady() async {
     await _cacheRoot.create(recursive: true);
-    await _prepareDebugLogFile();
     await manifestsDir('tmp', 'tmp').parent.create(recursive: true);
     await tmpDir().create(recursive: true);
-    await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=ready status=200 durationMs=0 target=sftp-cache method=INIT');
   }
 
   @override
@@ -221,25 +217,10 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     });
   }
 
-  File _debugLogFile() {
-    final basePath = _settings.backupPath.trim();
-    if (basePath.isNotEmpty) {
-      return File('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}logs${Platform.pathSeparator}debug.log');
-    }
-    return File('${_cacheRoot.path}${Platform.pathSeparator}logs${Platform.pathSeparator}debug.log');
-  }
-
-  Future<void> _prepareDebugLogFile() async {
-    final path = _debugLogFile().path;
-    if (_debugLogPrepared) {
-      await Directory(_debugLogFile().parent.path).create(recursive: true);
+  Future<void> _appendDebugLogLine(String line) async {
+    if (line.isEmpty) {
       return;
     }
-    await DebugLogWriter.truncate(path);
-    _debugLogPrepared = true;
-  }
-
-  Future<void> _appendDebugLogLine(String line) async {
     return;
   }
 
@@ -365,10 +346,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     if (!_remoteBlobUploadEnabled) {
       _remoteBlobNames.add(hash);
       _remoteBlobSizes[hash] = bytes.length;
-      final target = _blobTargetFromHash(hash);
-      await _appendDebugLogLine(
-        '${DateTime.now().toIso8601String()} action=upload status=disabled durationMs=0 target=$target method=WRITE detail=remote-upload-disabled hash=$hash bytes=${bytes.length}',
-      );
+      await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload status=disabled durationMs=0 method=WRITE detail=remote-upload-disabled hash=$hash bytes=${bytes.length}');
       return;
     }
     final remotePath = _remoteBlobPath(hash);
@@ -801,9 +779,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       }
       final elapsedMs = opStopwatch.elapsedMilliseconds;
       if (elapsedMs > 250) {
-        await _appendDebugLogLine(
-          '${DateTime.now().toIso8601String()} action=upload status=200 durationMs=$elapsedMs target=${_relativeBlobTarget(remotePath)} method=WRITE detail=native bytes=${data.length}',
-        );
+        await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload status=200 durationMs=$elapsedMs method=WRITE detail=native bytes=${data.length}');
       }
     }
   }
@@ -834,29 +810,27 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         writeStopwatch.stop();
         writeMs = writeStopwatch.elapsedMilliseconds;
 
-        final renameTarget = _blobTargetFromHash(hash);
-        final renameTempTarget = _relativeBlobTarget(remoteTemp);
-        await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload_rename status=start durationMs=0 target=$renameTarget method=RENAME detail=temp:$renameTempTarget');
+        await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload_rename status=start durationMs=0 method=RENAME');
         final renameStopwatch = Stopwatch()..start();
         try {
           await lease.sftp.rename(remoteTemp, remotePath);
         } catch (_) {
           renameStopwatch.stop();
           renameMs = renameStopwatch.elapsedMilliseconds;
-          await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload_rename status=error durationMs=$renameMs target=$renameTarget method=RENAME detail=temp:$renameTempTarget');
+          await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload_rename status=error durationMs=$renameMs method=RENAME');
           await _tryRemoveRemoteFile(lease.sftp, remoteTemp);
           rethrow;
         }
         renameStopwatch.stop();
         renameMs = renameStopwatch.elapsedMilliseconds;
-        await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload_rename status=200 durationMs=$renameMs target=$renameTarget method=RENAME detail=temp:$renameTempTarget');
+        await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload_rename status=200 durationMs=$renameMs method=RENAME');
 
         _remoteBlobNames.add(hash);
         _remoteBlobSizes[hash] = data.length;
 
         await _appendDebugLogLine(
           '${DateTime.now().toIso8601String()} action=upload status=200 durationMs=${operationStopwatch.elapsedMilliseconds} '
-          'target=${_blobTargetFromHash(hash)} method=WRITE '
+          'method=WRITE '
           'detail=leaseWaitMs:${leaseWaitStopwatch.elapsedMilliseconds} writeMs:$writeMs renameMs:$renameMs bytes:${data.length}',
         );
         lease.release();
@@ -864,7 +838,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       } catch (error) {
         await _appendDebugLogLine(
           '${DateTime.now().toIso8601String()} action=upload status=error durationMs=${operationStopwatch.elapsedMilliseconds} '
-          'target=${_blobTargetFromHash(hash)} method=WRITE '
+          'method=WRITE '
           'detail=leaseWaitMs:${leaseWaitStopwatch.elapsedMilliseconds} writeMs:$writeMs renameMs:$renameMs bytes:${data.length} error=$error',
         );
         lease.invalidate();
@@ -886,14 +860,12 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       var released = false;
       try {
         final result = await action(lease.sftp);
-        final opMs = opStopwatch.elapsedMilliseconds;
-        await _appendDebugActionLine(label: label, durationMs: opMs, success: true);
+        opStopwatch.stop();
         lease.release();
         released = true;
         return result;
-      } catch (error) {
-        final opMs = opStopwatch.elapsedMilliseconds;
-        await _appendDebugActionLine(label: label, durationMs: opMs, success: false, error: error.toString());
+      } catch (_) {
+        opStopwatch.stop();
         lease.invalidate();
         released = true;
         rethrow;
@@ -930,93 +902,11 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     }
   }
 
-  Future<void> _appendDebugActionLine({required String label, required int durationMs, required bool success, String? error}) async {
-    // Keep helper usage to avoid dead-code warnings while logging is disabled.
-    final action = _actionForLabel(label);
-    final target = _targetForLabel(label);
-    final method = _methodForAction(action);
-    if (success && durationMs >= 0 && error != null && target == method) {
-      return;
-    }
-    return;
-  }
-
   _SftpPool _poolForLabel(String label) {
     if (label == 'list blobs' || label.startsWith('list blobs/') || label.startsWith('ensure blob dir:')) {
       return _blobCachePool;
     }
     return _pool;
-  }
-
-  String _actionForLabel(String label) {
-    if (label.startsWith('list ')) return 'list';
-    if (label.startsWith('write blob') || label.startsWith('upload ')) return 'upload';
-    if (label.startsWith('read blob') || label.startsWith('download ')) return 'download';
-    if (label.startsWith('ensure ') || label.startsWith('mkdir ')) return 'mkdir';
-    if (label.startsWith('blob exists')) return 'exists';
-    if (label.startsWith('blob length') || label.startsWith('stat ')) return 'stat';
-    if (label.contains('rename')) return 'move';
-    return 'op';
-  }
-
-  String _methodForAction(String action) {
-    switch (action) {
-      case 'list':
-        return 'LIST';
-      case 'upload':
-        return 'WRITE';
-      case 'download':
-        return 'READ';
-      case 'mkdir':
-        return 'MKDIR';
-      case 'exists':
-      case 'stat':
-        return 'STAT';
-      case 'move':
-        return 'RENAME';
-      default:
-        return 'OP';
-    }
-  }
-
-  String? _targetForLabel(String label) {
-    if (label.startsWith('list ')) return label.substring('list '.length);
-    if (label.startsWith('ensure blob dir:')) {
-      return _relativeBlobTarget(label.substring('ensure blob dir:'.length));
-    }
-    if (label.startsWith('ensure disk manifest folder')) return 'manifests';
-    if (label.startsWith('upload small file')) return 'manifest';
-    if (label.startsWith('download manifest')) return 'manifest';
-    if (label.startsWith('write blob ')) {
-      final hash = label.substring('write blob '.length).trim();
-      return _blobTargetFromHash(hash);
-    }
-    if (label.startsWith('write blob')) return 'blob';
-    if (label.startsWith('read blob')) return 'blob';
-    if (label.startsWith('blob exists')) return 'blob';
-    if (label.startsWith('blob length')) return 'blob';
-    if (label.startsWith('fresh cleanup rename remote root')) return 'VirtBackup';
-    return null;
-  }
-
-  String _relativeBlobTarget(String remotePath) {
-    final prefix = _remoteBlobsRoot();
-    if (remotePath.startsWith('$prefix/')) {
-      return 'blobs/${remotePath.substring(prefix.length + 1)}';
-    }
-    if (remotePath == prefix) {
-      return 'blobs';
-    }
-    return remotePath;
-  }
-
-  String _blobTargetFromHash(String hash) {
-    if (hash.length < 4) {
-      return 'blob';
-    }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    return 'blobs/$shard1/$shard2/$hash';
   }
 
   // Keep remote structure scoped under a dedicated folder to avoid cluttering user-provided base paths.

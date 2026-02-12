@@ -49,3 +49,6 @@ app.*.map.json
 # Native build outputs
 *.so
 *.dylib
+
+# test tool
+tools/loop.sh

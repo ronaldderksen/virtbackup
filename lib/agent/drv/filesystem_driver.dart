@@ -378,7 +378,6 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
       return;
     }
     final blob = blobFile(hash);
-    await blob.parent.create(recursive: true);
     final tempPath = '${blob.path}.inprogress.${DateTime.now().microsecondsSinceEpoch}';
     final tempFile = File(tempPath);
     await tempFile.writeAsBytes(bytes);
@@ -393,6 +392,7 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
 
   @override
   Future<bool> blobExists(String hash) async {
+    // Existence is decided by the agent-side blob cache.
     return false;
   }
 

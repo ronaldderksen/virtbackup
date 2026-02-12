@@ -48,8 +48,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   final Map<String, Set<String>> _blobShard2Names = {};
   final Map<String, _DriveFileRef> _blobFiles = {};
   final Set<String> _blobNames = {};
-  final Set<String> _duplicateFolderWarned = <String>{};
-  final Map<String, Future<void>> _duplicateFolderMergeInFlight = <String, Future<void>>{};
   final _NamedAsyncLock _folderLocks = _NamedAsyncLock();
   bool _debugLogPrepared = false;
   http.Client _client = IOClient(_createHttpClient());
@@ -292,13 +290,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   @override
   Future<void> freshCleanup() async {
-    final rootId = await _resolveDriveRootId();
-    if (rootId == null || rootId.isEmpty) {
-      _logInfo('gdrive: fresh cleanup skipped (missing root)');
-    } else {
-      _logInfo('gdrive: fresh cleanup trashing VirtBackup root (id=$rootId)');
-      await _trashFile(rootId);
-    }
+    _logInfo('gdrive: fresh cleanup clearing local cache and in-memory state');
     _folderCache.clear();
     _folderChildrenLoaded.clear();
     _blobsRootId = null;
@@ -347,11 +339,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       return;
     }
     final shardKey = hash.substring(0, 4);
-    var parentId = _blobShardFolderIds[shardKey];
-    if (parentId == null) {
-      await ensureBlobDir(hash);
-      parentId = _blobShardFolderIds[shardKey];
-    }
+    final parentId = _blobShardFolderIds[shardKey];
     if (parentId == null || parentId.isEmpty) {
       throw 'Blob shard folder not ready for $shardKey';
     }
@@ -870,101 +858,13 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   Future<List<_DriveFileRef>> _findChildFolders(String parentId, String name) async {
     final query = "mimeType='$_driveFolderMime' and name='${_escapeQuery(name)}' and '$parentId' in parents and trashed=false";
-    var files = await _listFilesRaw(query, fields: 'nextPageToken,files(id,name,parents,mimeType,createdTime)');
+    final files = await _listFilesRaw(query, fields: 'nextPageToken,files(id,name,parents,mimeType,createdTime)');
     if (files.length > 1) {
-      final warnKey = '$parentId/$name';
       final warnPath = _folderDisplayPath(parentId, name);
-      if (_duplicateFolderWarned.add(warnKey)) {
-        _logInfo('gdrive: duplicate folders detected for $warnPath (count=${files.length}); attempting strict merge');
-      }
-      await _mergeDuplicateFolders(parentId, name, files);
-      files = await _listFilesRaw(query, fields: 'nextPageToken,files(id,name,parents,mimeType,createdTime)');
-      if (files.length > 1) {
-        throw 'gdrive duplicate folder merge failed for $warnPath: still ${files.length} folders present';
-      }
+      _logInfo('gdrive: duplicate folders detected for $warnPath (count=${files.length}); using deterministic first folder');
     }
     files.sort((a, b) => a.id.compareTo(b.id));
     return files;
-  }
-
-  Future<void> _mergeDuplicateFolders(String parentId, String name, List<_DriveFileRef> folders) async {
-    final key = '$parentId/$name';
-    final existing = _duplicateFolderMergeInFlight[key];
-    if (existing != null) {
-      await existing;
-      return;
-    }
-    final future = _withFolderCreateLock(parentId, name, () async {
-      final folderPath = _folderDisplayPath(parentId, name);
-      final current = List<_DriveFileRef>.from(folders)..sort((a, b) => a.id.compareTo(b.id));
-      if (current.length < 2) {
-        return;
-      }
-      final primary = current.first;
-      for (final duplicate in current.skip(1)) {
-        await _mergeFolderContents(primary.id, duplicate.id);
-        final remaining = await _listFilesRaw("'${duplicate.id}' in parents and trashed=false", fields: 'nextPageToken,files(id,name,parents,mimeType)');
-        if (remaining.isEmpty) {
-          await _trashFile(duplicate.id);
-          _logInfo('gdrive: duplicate folder merged for $folderPath (removed duplicate id=${duplicate.id}, primary id=${primary.id})');
-        } else {
-          throw 'gdrive duplicate folder merge incomplete for $folderPath: duplicate=${duplicate.id} primary=${primary.id} remaining=${remaining.length}';
-        }
-      }
-    });
-    _duplicateFolderMergeInFlight[key] = future;
-    try {
-      await future;
-    } finally {
-      _duplicateFolderMergeInFlight.remove(key);
-    }
-  }
-
-  Future<void> _mergeFolderContents(String targetFolderId, String sourceFolderId) async {
-    final targetChildren = await _listFilesRaw("'$targetFolderId' in parents and trashed=false", fields: 'nextPageToken,files(id,name,parents,mimeType)');
-    final sourceChildren = await _listFilesRaw("'$sourceFolderId' in parents and trashed=false", fields: 'nextPageToken,files(id,name,parents,mimeType)');
-    final existing = <String, _DriveFileRef>{};
-    for (final child in targetChildren) {
-      existing['${child.mimeType ?? ''}::${child.name}'] = child;
-    }
-    for (final child in sourceChildren) {
-      final signature = '${child.mimeType ?? ''}::${child.name}';
-      final targetChild = existing[signature];
-      if (targetChild != null) {
-        final isFolderDuplicate = child.mimeType == _driveFolderMime && targetChild.mimeType == _driveFolderMime;
-        if (isFolderDuplicate) {
-          await _mergeFolderContents(targetChild.id, child.id);
-          final remaining = await _listFilesRaw("'${child.id}' in parents and trashed=false", fields: 'nextPageToken,files(id)');
-          if (remaining.isEmpty) {
-            await _trashFile(child.id);
-            continue;
-          }
-          throw 'gdrive duplicate folder merge incomplete source=$sourceFolderId target=$targetFolderId name=${child.name}';
-        }
-        await _trashFile(child.id);
-        _logInfo('gdrive: duplicate file dropped during merge name=${child.name} source=$sourceFolderId target=$targetFolderId');
-        continue;
-      }
-      await _moveFileToFolder(fileId: child.id, fromParentId: sourceFolderId, toParentId: targetFolderId);
-      existing[signature] = child;
-    }
-  }
-
-  Future<void> _moveFileToFolder({required String fileId, required String fromParentId, required String toParentId}) async {
-    await _withRetry('move file $fileId', () async {
-      final token = await _ensureAccessToken();
-      final uri = Uri.https('www.googleapis.com', '/drive/v3/files/$fileId', {'addParents': toParentId, 'removeParents': fromParentId, 'fields': 'id,parents'});
-      final response = await _requestWithApiLog(
-        action: 'move',
-        target: '${_displayPathForId(fromParentId)}/${_displayPathForId(toParentId)}',
-        method: 'PATCH',
-        uri: uri,
-        send: () => _client.patch(uri, headers: _authHeaders(token)..['Content-Type'] = 'application/json', body: '{}'),
-      );
-      if (response.statusCode >= 300) {
-        throw 'Drive move failed: ${response.statusCode} ${response.body}';
-      }
-    });
   }
 
   String _folderDisplayPath(String parentId, String name) {
@@ -1122,23 +1022,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       return 'VirtBackup';
     }
     return path;
-  }
-
-  Future<void> _trashFile(String fileId) async {
-    await _withRetry('trash file', () async {
-      final token = await _ensureAccessToken();
-      final uri = Uri.parse('https://www.googleapis.com/drive/v3/files/$fileId');
-      final response = await _requestWithApiLog(
-        action: 'trash',
-        target: _displayPathForId(fileId),
-        method: 'PATCH',
-        uri: uri,
-        send: () => _client.patch(uri, headers: _authHeaders(token)..['Content-Type'] = 'application/json', body: jsonEncode({'trashed': true})),
-      );
-      if (response.statusCode >= 300) {
-        throw 'Drive trash failed: ${response.statusCode} ${response.body}';
-      }
-    });
   }
 
   Future<void> _deleteDirIfExists(Directory dir) async {
