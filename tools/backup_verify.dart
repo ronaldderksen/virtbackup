@@ -26,7 +26,7 @@ class _Args {
     required this.cancelAfterRandom,
     required this.fresh,
     required this.driverParams,
-    this.driverOverride,
+    this.destinationId,
     this.agentTokenFile,
     this.sshKeyPath,
   });
@@ -48,7 +48,7 @@ class _Args {
   final bool cancelAfterRandom;
   final bool fresh;
   final Map<String, dynamic> driverParams;
-  final String? driverOverride;
+  final String? destinationId;
   final String? agentTokenFile;
   final String? sshKeyPath;
 
@@ -70,7 +70,7 @@ class _Args {
     bool? cancelAfterRandom,
     bool? fresh,
     Map<String, dynamic>? driverParams,
-    String? driverOverride,
+    String? destinationId,
     String? agentTokenFile,
     String? sshKeyPath,
   }) {
@@ -92,7 +92,7 @@ class _Args {
       cancelAfterRandom: cancelAfterRandom ?? this.cancelAfterRandom,
       fresh: fresh ?? this.fresh,
       driverParams: driverParams ?? this.driverParams,
-      driverOverride: driverOverride ?? this.driverOverride,
+      destinationId: destinationId ?? this.destinationId,
       agentTokenFile: agentTokenFile ?? this.agentTokenFile,
       sshKeyPath: sshKeyPath ?? this.sshKeyPath,
     );
@@ -183,7 +183,7 @@ void main(List<String> args) async {
   List<StreamSubscription<ProcessSignal>> signalSubs = const [];
   try {
     final config = await _fetchConfig(client, resolvedArgs);
-    final backupPath = _extractBackupPath(config);
+    final backupPath = _extractBackupPath(config, resolvedArgs);
     final resolvedSourceId = _resolveServerId(config, resolvedArgs.sourceServerId);
     final resolvedTargetId = _resolveServerId(config, resolvedArgs.targetServerId);
     final sourceHost = _resolveHost(config, resolvedSourceId, resolvedArgs.sourceHost, resolvedArgs.sourceHostExplicit);
@@ -397,7 +397,7 @@ _Args? _parseArgs(List<String> args) {
   var cancelAfterRandom = false;
   var fresh = false;
   final driverParams = <String, dynamic>{};
-  String? driverOverride;
+  String? destinationId;
   String? agentToken;
   String? agentTokenFile;
 
@@ -448,8 +448,8 @@ _Args? _parseArgs(List<String> args) {
       case '--fresh':
         fresh = true;
         break;
-      case '--driver':
-        driverOverride = _readValue(args, ++i, arg);
+      case '--dest':
+        destinationId = _readValue(args, ++i, arg);
         break;
       case '--driver-param':
         _applyDriverParam(driverParams, _readValue(args, ++i, arg));
@@ -492,7 +492,7 @@ _Args? _parseArgs(List<String> args) {
     cancelAfterRandom: cancelAfterRandom,
     fresh: fresh,
     driverParams: driverParams,
-    driverOverride: driverOverride,
+    destinationId: destinationId,
     agentTokenFile: agentTokenFile,
   );
 }
@@ -582,7 +582,36 @@ Future<Map<String, dynamic>> _fetchConfig(http.Client client, _Args args) async 
   return jsonDecode(response.body) as Map<String, dynamic>;
 }
 
-String _extractBackupPath(Map<String, dynamic> payload) {
+String _extractBackupPath(Map<String, dynamic> payload, _Args args) {
+  final requestedDestinationId = args.destinationId?.trim() ?? '';
+  if (requestedDestinationId.isNotEmpty) {
+    final destination = _findDestinationById(payload, requestedDestinationId);
+    if (destination == null) {
+      throw StateError('Destination not found: $requestedDestinationId');
+    }
+    final destinationPath = _pathFromDestination(destination);
+    if (destinationPath != null && destinationPath.isNotEmpty) {
+      return destinationPath;
+    }
+    final driverId = destination['driverId']?.toString().trim();
+    final name = destination['name']?.toString().trim();
+    return 'destination=$requestedDestinationId${name == null || name.isEmpty ? '' : ' ($name)'}${driverId == null || driverId.isEmpty ? '' : ' driver=$driverId'}';
+  }
+
+  final selectedDestinationId = payload['backupDestinationId']?.toString().trim() ?? '';
+  if (selectedDestinationId.isNotEmpty) {
+    final destination = _findDestinationById(payload, selectedDestinationId);
+    if (destination != null) {
+      final destinationPath = _pathFromDestination(destination);
+      if (destinationPath != null && destinationPath.isNotEmpty) {
+        return destinationPath;
+      }
+      final driverId = destination['driverId']?.toString().trim();
+      final name = destination['name']?.toString().trim();
+      return 'destination=$selectedDestinationId${name == null || name.isEmpty ? '' : ' ($name)'}${driverId == null || driverId.isEmpty ? '' : ' driver=$driverId'}';
+    }
+  }
+
   final backup = payload['backup'];
   if (backup is Map) {
     final path = backup['base_path']?.toString().trim();
@@ -592,6 +621,36 @@ String _extractBackupPath(Map<String, dynamic> payload) {
   }
 
   throw StateError('Config missing backup path (expected backup.base_path).');
+}
+
+Map<String, dynamic>? _findDestinationById(Map<String, dynamic> payload, String destinationId) {
+  final destinations = payload['destinations'];
+  if (destinations is! List) {
+    return null;
+  }
+  for (final entry in destinations) {
+    if (entry is! Map) {
+      continue;
+    }
+    final map = Map<String, dynamic>.from(entry);
+    if (map['id']?.toString() == destinationId) {
+      return map;
+    }
+  }
+  return null;
+}
+
+String? _pathFromDestination(Map<String, dynamic> destination) {
+  final paramsRaw = destination['params'];
+  if (paramsRaw is! Map) {
+    return null;
+  }
+  final params = Map<String, dynamic>.from(paramsRaw);
+  final path = params['path']?.toString().trim();
+  if (path == null || path.isEmpty) {
+    return null;
+  }
+  return path;
 }
 
 String _resolveServerId(Map<String, dynamic> payload, String value) {
@@ -646,9 +705,9 @@ Future<String> _startBackup(http.Client client, _Args args) async {
   if (args.fresh) {
     payload['fresh'] = true;
   }
-  final driverOverride = args.driverOverride;
-  if (driverOverride != null && driverOverride.trim().isNotEmpty) {
-    payload['driverId'] = driverOverride.trim();
+  final destinationId = args.destinationId;
+  if (destinationId != null && destinationId.trim().isNotEmpty) {
+    payload['destinationId'] = destinationId.trim();
   }
   if (args.driverParams.isNotEmpty) {
     payload['driverParams'] = args.driverParams;
@@ -777,8 +836,8 @@ String _formatEta(int? seconds) {
 }
 
 Future<String> _pickLatestRestoreXml(http.Client client, _Args args) async {
-  final driverOverride = args.driverOverride;
-  final query = (driverOverride != null && driverOverride.trim().isNotEmpty) ? {'driverId': driverOverride.trim()} : null;
+  final destinationId = args.destinationId;
+  final query = (destinationId != null && destinationId.trim().isNotEmpty) ? {'destinationId': destinationId.trim()} : null;
   final uri = args.agentUrl.replace(path: '/restore/entries', queryParameters: query);
   final response = await client.get(uri, headers: _authHeaders(args));
   if (response.statusCode != 200) {
@@ -824,9 +883,9 @@ Future<void> _restorePrecheck(http.Client client, _Args args, String xmlPath) as
 Future<String> _startRestore(http.Client client, _Args args, String xmlPath) async {
   final uri = args.agentUrl.replace(path: '/servers/${args.targetServerId}/restore/start');
   final payload = {'xmlPath': xmlPath, 'decision': 'overwrite'};
-  final driverOverride = args.driverOverride;
-  if (driverOverride != null && driverOverride.trim().isNotEmpty) {
-    payload['driverId'] = driverOverride.trim();
+  final destinationId = args.destinationId;
+  if (destinationId != null && destinationId.trim().isNotEmpty) {
+    payload['destinationId'] = destinationId.trim();
   }
   final response = await client.post(uri, headers: {..._authHeaders(args), 'content-type': 'application/json'}, body: jsonEncode(payload));
   if (response.statusCode != 200) {
@@ -960,7 +1019,7 @@ void _printUsage() {
   stdout.writeln('  --target-host <host>      Default nuc02');
   stdout.writeln('  --ssh-user <user>         Default root');
   stdout.writeln('  --ssh-key <path>          Optional private key');
-  stdout.writeln('  --driver <id>             Override agent backup driver for this run');
+  stdout.writeln('  --dest <id>               Use destination id for backup + restore');
   stdout.writeln('  --driver-param <k=v>      Driver parameter (repeatable)');
   stdout.writeln('  --token <value>           Agent bearer token (overrides token file)');
   stdout.writeln('  --token-file <path>       Agent token file path');

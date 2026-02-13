@@ -31,6 +31,16 @@ class _DriverDescriptor {
   final drv.BackupDriver Function(Map<String, dynamic> params) create;
 }
 
+class _ResolvedDestination {
+  const _ResolvedDestination({required this.destination, required this.settings, required this.driverId, required this.backupPath, required this.driverParams});
+
+  final BackupDestination destination;
+  final AppSettings settings;
+  final String driverId;
+  final String backupPath;
+  final Map<String, dynamic> driverParams;
+}
+
 class AgentHttpServer {
   AgentHttpServer({required BackupAgentHost host, AppSettingsStore? settingsStore}) : _host = host, _agentSettingsStore = settingsStore ?? AppSettingsStore();
 
@@ -134,7 +144,7 @@ class AgentHttpServer {
     return context;
   }
 
-  Future<void> _applyAgentSettings(AppSettings agentSettings, {required String reason, bool forceRestartSshListeners = false}) async {
+  Future<void> _applyAgentSettings(AppSettings agentSettings, {required String reason, bool forceRestartSshListeners = false, bool runServerRefreshInBackground = false}) async {
     final previousById = {for (final server in _agentSettings.servers) server.id: server};
     final nextById = {for (final server in agentSettings.servers) server.id: server};
     final previousIds = previousById.keys.toSet();
@@ -154,59 +164,87 @@ class AgentHttpServer {
       }
     }
 
-    for (final id in removed) {
-      await _stopEventListener(id);
-      _vmStatusByServerId.remove(id);
-    }
-
     final resolvedDriverId = _driverCatalog.containsKey(agentSettings.backupDriverId.trim()) ? agentSettings.backupDriverId.trim() : 'filesystem';
     final normalized = agentSettings.copyWith(backupDriverId: resolvedDriverId);
     _agentSettings = normalized;
     _cachedGdriveDriver = null;
     await _agentSettingsStore.save(normalized);
 
-    if (forceRestartSshListeners) {
-      for (final server in nextById.values) {
+    Future<void> syncServers() async {
+      for (final id in removed) {
+        await _safeStopEventListener(id);
+        _vmStatusByServerId.remove(id);
+      }
+
+      if (forceRestartSshListeners) {
+        for (final server in nextById.values) {
+          if (server.connectionType == ConnectionType.ssh) {
+            await _safeStopEventListener(server.id);
+            await _refreshServer(server, reason: 'settings/changed');
+            await _safeStartEventListener(server);
+          } else {
+            _vmStatusByServerId.remove(server.id);
+          }
+        }
+        return;
+      }
+
+      for (final id in added) {
+        final server = nextById[id];
+        if (server == null) {
+          continue;
+        }
         if (server.connectionType == ConnectionType.ssh) {
-          await _stopEventListener(server.id);
-          await _refreshServer(server, reason: 'settings/changed');
-          await _startEventListener(server);
+          await _refreshServer(server, reason: 'settings/added');
+          await _safeStartEventListener(server);
         } else {
-          _vmStatusByServerId.remove(server.id);
+          _vmStatusByServerId.remove(id);
         }
       }
-      _hostLog('Settings updated (reason: $reason).');
+
+      for (final id in changed) {
+        final server = nextById[id];
+        if (server == null) {
+          continue;
+        }
+        await _safeStopEventListener(id);
+        if (server.connectionType == ConnectionType.ssh) {
+          await _refreshServer(server, reason: 'settings/changed');
+          await _safeStartEventListener(server);
+        } else {
+          _vmStatusByServerId.remove(id);
+        }
+      }
+    }
+
+    if (runServerRefreshInBackground) {
+      _hostLog('Settings updated (reason: $reason). Server refresh scheduled in background.');
+      unawaited(
+        syncServers().catchError((error, stackTrace) {
+          _hostLogError('Background server refresh failed.', error, stackTrace is StackTrace ? stackTrace : StackTrace.current);
+        }),
+      );
       return;
     }
 
-    for (final id in added) {
-      final server = nextById[id];
-      if (server == null) {
-        continue;
-      }
-      if (server.connectionType == ConnectionType.ssh) {
-        await _refreshServer(server, reason: 'settings/added');
-        await _startEventListener(server);
-      } else {
-        _vmStatusByServerId.remove(id);
-      }
-    }
-
-    for (final id in changed) {
-      final server = nextById[id];
-      if (server == null) {
-        continue;
-      }
-      await _stopEventListener(id);
-      if (server.connectionType == ConnectionType.ssh) {
-        await _refreshServer(server, reason: 'settings/changed');
-        await _startEventListener(server);
-      } else {
-        _vmStatusByServerId.remove(id);
-      }
-    }
-
+    await syncServers();
     _hostLog('Settings updated (reason: $reason).');
+  }
+
+  Future<void> _safeStartEventListener(ServerConfig server) async {
+    try {
+      await _startEventListener(server);
+    } catch (error, stackTrace) {
+      _hostLogError('Failed to start event listener for ${server.name}.', error, stackTrace);
+    }
+  }
+
+  Future<void> _safeStopEventListener(String serverId) async {
+    try {
+      await _stopEventListener(serverId);
+    } catch (error, stackTrace) {
+      _hostLogError('Failed to stop event listener for $serverId.', error, stackTrace);
+    }
   }
 
   Future<void> _refreshAllServers() async {
@@ -416,7 +454,7 @@ class AgentHttpServer {
       if (request.method == 'POST' && path == '/config') {
         final body = await _readJson(request);
         final agentSettings = AppSettings.fromMap(body);
-        await _applyAgentSettings(agentSettings, reason: 'api', forceRestartSshListeners: true);
+        await _applyAgentSettings(agentSettings, reason: 'api', forceRestartSshListeners: true, runServerRefreshInBackground: true);
         _json(request, 200, {'success': true});
         return;
       }
@@ -542,6 +580,7 @@ class AgentHttpServer {
         }
         final body = await _readJson(request);
         final vmName = (body['vmName'] ?? '').toString();
+        final requestedDestinationId = (body['destinationId'] ?? '').toString().trim();
         final requestedDriver = (body['driverId'] ?? '').toString().trim();
         final driverParams = body['driverParams'] is Map ? Map<String, dynamic>.from(body['driverParams'] as Map) : <String, dynamic>{};
         final freshRequested = body['fresh'] == true;
@@ -553,14 +592,19 @@ class AgentHttpServer {
           _json(request, 400, {'error': 'unknown driverId', 'known': _driverCatalog.keys.toList()});
           return;
         }
-        final resolvedDriverId = requestedDriver.isNotEmpty ? requestedDriver : (_agentSettings.backupDriverId.trim().isEmpty ? 'filesystem' : _agentSettings.backupDriverId.trim());
-        final backupPath = _agentSettings.backupPath.trim();
-        if (backupPath.isEmpty) {
+        final resolvedDestination = _resolveBackupDestination(requestedDestinationId);
+        if (resolvedDestination == null) {
+          _json(request, 400, {'error': 'destination not found or unavailable'});
+          return;
+        }
+        final resolvedDriverId = requestedDriver.isNotEmpty ? requestedDriver : resolvedDestination.driverId;
+        final backupPath = resolvedDestination.backupPath;
+        final registry = _buildDriverRegistry(backupPath: backupPath, settings: resolvedDestination.settings);
+        final descriptor = registry[resolvedDriverId] ?? registry['filesystem']!;
+        if (descriptor.usesPath && backupPath.isEmpty) {
           _json(request, 400, {'error': 'missing backup.base_path'});
           return;
         }
-        final registry = _buildDriverRegistry(backupPath: backupPath);
-        final descriptor = registry[resolvedDriverId] ?? registry['filesystem']!;
         final validationError = descriptor.validateStart();
         if (validationError != null && validationError.isNotEmpty) {
           _json(request, 400, {'error': validationError});
@@ -574,7 +618,8 @@ class AgentHttpServer {
           VmEntry(id: vmName, name: vmName, powerState: VmPowerState.stopped),
           backupPath,
           driverIdOverride: resolvedDriverId,
-          driverParams: driverParams,
+          driverParams: driverParams.isNotEmpty ? driverParams : resolvedDestination.driverParams,
+          destination: resolvedDestination,
           freshRequested: freshRequested,
         );
         return;
@@ -606,6 +651,7 @@ class AgentHttpServer {
         final body = await _readJson(request);
         final xmlPath = (body['xmlPath'] ?? '').toString();
         final decision = (body['decision'] ?? '').toString();
+        final requestedDestinationId = (body['destinationId'] ?? '').toString().trim();
         final requestedDriver = (body['driverId'] ?? '').toString().trim();
         if (xmlPath.isEmpty || decision.isEmpty) {
           _json(request, 400, {'error': 'missing params'});
@@ -615,10 +661,17 @@ class AgentHttpServer {
           _json(request, 400, {'error': 'unknown driverId', 'known': _driverCatalog.keys.toList()});
           return;
         }
-        final resolvedDriverId = requestedDriver.isNotEmpty ? requestedDriver : (_agentSettings.backupDriverId.trim().isEmpty ? 'filesystem' : _agentSettings.backupDriverId.trim());
+        final resolvedDestination = _resolveBackupDestination(requestedDestinationId);
+        if (requestedDestinationId.isNotEmpty && resolvedDestination == null) {
+          _json(request, 400, {'error': 'destination not found or unavailable'});
+          return;
+        }
+        final resolvedDriverId = requestedDriver.isNotEmpty
+            ? requestedDriver
+            : (resolvedDestination?.driverId ?? (_agentSettings.backupDriverId.trim().isEmpty ? 'filesystem' : _agentSettings.backupDriverId.trim()));
         final jobId = _createJob(AgentJobType.restore);
         _json(request, 200, AgentJobStart(jobId: jobId).toMap());
-        _startRestoreJob(jobId, server, xmlPath, decision, driverIdOverride: resolvedDriverId);
+        _startRestoreJob(jobId, server, xmlPath, decision, driverIdOverride: resolvedDriverId, destination: resolvedDestination);
         return;
       }
       if (request.method == 'POST' && path == '/restore/sanity') {
@@ -664,8 +717,9 @@ class AgentHttpServer {
         return;
       }
       if (request.method == 'GET' && path == '/restore/entries') {
+        final destinationIdOverride = request.uri.queryParameters['destinationId'];
         final driverIdOverride = request.uri.queryParameters['driverId'];
-        final entries = await _loadRestoreEntries(driverIdOverride: driverIdOverride);
+        final entries = await _loadRestoreEntries(driverIdOverride: driverIdOverride, destinationIdOverride: destinationIdOverride);
         _json(request, 200, entries.map((entry) => entry.toMap()).toList());
         return;
       }
@@ -800,14 +854,25 @@ class AgentHttpServer {
     return DateTime.tryParse(text);
   }
 
-  Future<List<RestoreEntry>> _loadRestoreEntries({String? driverIdOverride}) async {
-    final resolvedDriverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : _agentSettings.backupDriverId.trim();
+  Future<List<RestoreEntry>> _loadRestoreEntries({String? driverIdOverride, String? destinationIdOverride}) async {
+    _ResolvedDestination? resolvedDestination;
+    final requestedDestinationId = destinationIdOverride?.trim() ?? '';
+    if (requestedDestinationId.isNotEmpty) {
+      resolvedDestination = _resolveBackupDestination(requestedDestinationId);
+      if (resolvedDestination == null) {
+        return [];
+      }
+    } else if (driverIdOverride == null || driverIdOverride.trim().isEmpty) {
+      resolvedDestination = _resolveBackupDestination(null);
+    }
+    final resolvedDriverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : (resolvedDestination?.driverId ?? _agentSettings.backupDriverId.trim());
     final driverInfo = _driverCatalog[resolvedDriverId] ?? _driverCatalog['filesystem']!;
-    final backupPath = _agentSettings.backupPath.trim();
+    final backupPath = resolvedDestination?.backupPath ?? _agentSettings.backupPath.trim();
     if (driverInfo.usesPath && backupPath.isEmpty) {
       return [];
     }
-    final driver = _driverForSettings(driverInfo.id, backupPath);
+    final settings = resolvedDestination?.settings ?? _agentSettings;
+    final driver = _driverForSettings(driverInfo.id, backupPath, settings: settings);
     final xmlFiles = await _findXmlFiles(driver);
     final entries = <RestoreEntry>[];
     for (final xmlFile in xmlFiles) {
@@ -1047,33 +1112,133 @@ class AgentHttpServer {
   }
 
   drv.BackupDriver _driverForBackupPath(String backupPath) {
-    return _driverForSettings(_agentSettings.backupDriverId, backupPath);
+    return _driverForSettings(_agentSettings.backupDriverId, backupPath, settings: _agentSettings);
   }
 
-  drv.BackupDriver _driverForSettings(String driverId, String backupPath) {
-    final registry = _buildDriverRegistry(backupPath: backupPath);
+  drv.BackupDriver _driverForSettings(String driverId, String backupPath, {required AppSettings settings}) {
+    final registry = _buildDriverRegistry(backupPath: backupPath, settings: settings);
     final descriptor = registry[driverId] ?? registry['filesystem']!;
     return descriptor.create(const <String, dynamic>{});
   }
 
+  _ResolvedDestination? _resolveBackupDestination(String? requestedDestinationId) {
+    final candidates = _agentSettings.destinations.where((destination) => destination.enabled).toList();
+    if (candidates.isEmpty) {
+      return null;
+    }
+    final requestedId = requestedDestinationId?.trim() ?? '';
+    BackupDestination? destination;
+    if (requestedId.isNotEmpty) {
+      for (final entry in candidates) {
+        if (entry.id == requestedId) {
+          destination = entry;
+          break;
+        }
+      }
+      if (destination == null) {
+        return null;
+      }
+    }
+    destination ??= _resolveDefaultBackupDestination(candidates);
+    final driverId = destination.driverId.trim();
+    if (driverId.isEmpty) {
+      return null;
+    }
+    final settings = _settingsForDestination(destination);
+    final backupPath = _backupPathForDestination(destination);
+    final driverParams = Map<String, dynamic>.from(destination.params);
+    return _ResolvedDestination(destination: destination, settings: settings, driverId: driverId, backupPath: backupPath, driverParams: driverParams);
+  }
+
+  BackupDestination _resolveDefaultBackupDestination(List<BackupDestination> candidates) {
+    final preferredId = _agentSettings.backupDestinationId?.trim() ?? '';
+    if (preferredId.isNotEmpty) {
+      for (final destination in candidates) {
+        if (destination.id == preferredId) {
+          return destination;
+        }
+      }
+    }
+    return candidates.first;
+  }
+
+  String _backupPathForDestination(BackupDestination destination) {
+    if (destination.driverId == 'filesystem') {
+      final path = destination.params['path']?.toString().trim() ?? '';
+      return path;
+    }
+    return _filesystemBackupPath();
+  }
+
+  String _filesystemBackupPath() {
+    for (final destination in _agentSettings.destinations) {
+      if (destination.id != AppSettings.filesystemDestinationId) {
+        continue;
+      }
+      return destination.params['path']?.toString().trim() ?? '';
+    }
+    return '';
+  }
+
+  AppSettings _settingsForDestination(BackupDestination destination) {
+    final params = destination.params;
+    final driverId = destination.driverId.trim();
+    if (driverId == 'sftp') {
+      return _agentSettings.copyWith(
+        backupDriverId: 'sftp',
+        sftpHost: (params['host'] ?? '').toString(),
+        sftpPort: params['port'] is num ? (params['port'] as num).toInt() : int.tryParse((params['port'] ?? '').toString()) ?? 22,
+        sftpUsername: (params['username'] ?? '').toString(),
+        sftpPassword: (params['password'] ?? '').toString(),
+        sftpBasePath: (params['basePath'] ?? '').toString(),
+      );
+    }
+    if (driverId == 'gdrive') {
+      return _agentSettings.copyWith(
+        backupDriverId: 'gdrive',
+        gdriveScope: (params['scope'] ?? '').toString(),
+        gdriveRootPath: (params['rootPath'] ?? '').toString(),
+        gdriveAccessToken: (params['accessToken'] ?? '').toString(),
+        gdriveRefreshToken: (params['refreshToken'] ?? '').toString(),
+        gdriveAccountEmail: (params['accountEmail'] ?? '').toString(),
+        gdriveExpiresAt: AppSettings.parseDateTimeOrNull(params['expiresAt']),
+      );
+    }
+    if (driverId == 'filesystem') {
+      return _agentSettings.copyWith(backupDriverId: 'filesystem');
+    }
+    if (driverId == 'dummy') {
+      return _agentSettings.copyWith(backupDriverId: 'dummy');
+    }
+    return _agentSettings.copyWith(backupDriverId: driverId);
+  }
+
   Map<String, BackupDriverInfo> _buildDriverCatalog() {
-    final registry = _buildDriverRegistry(backupPath: '');
+    final registry = _buildDriverRegistry(backupPath: _filesystemBackupPath(), settings: _agentSettings);
     return registry.map((key, descriptor) {
       return MapEntry(key, BackupDriverInfo(id: descriptor.id, label: descriptor.label, usesPath: descriptor.usesPath, capabilities: _mapCapabilities(descriptor.capabilities)));
     });
   }
 
-  Map<String, _DriverDescriptor> _buildDriverRegistry({required String backupPath}) {
+  Map<String, _DriverDescriptor> _buildDriverRegistry({required String backupPath, required AppSettings settings}) {
     final trimmedPath = backupPath.trim();
+    final sourceSettings = settings;
     final filesystem = FilesystemBackupDriver(trimmedPath);
-    final dummy = DummyBackupDriver(trimmedPath, tmpWritesEnabled: _agentSettings.dummyDriverTmpWrites);
-    final gdrive = _cachedGdriveDriver ??= GdriveBackupDriver(
-      settings: _agentSettings,
-      persistSettings: (settings) => _applyAgentSettings(settings, reason: 'gdrive', forceRestartSshListeners: false),
-      settingsDir: _agentSettingsStore.file.parent,
-      logInfo: _hostLog,
-    );
-    final sftp = SftpBackupDriver(settings: _agentSettings);
+    final dummy = DummyBackupDriver(trimmedPath, tmpWritesEnabled: sourceSettings.dummyDriverTmpWrites);
+    final gdrive = identical(sourceSettings, _agentSettings)
+        ? (_cachedGdriveDriver ??= GdriveBackupDriver(
+            settings: sourceSettings,
+            persistSettings: (updated) => _applyAgentSettings(updated, reason: 'gdrive', forceRestartSshListeners: false),
+            settingsDir: _agentSettingsStore.file.parent,
+            logInfo: _hostLog,
+          ))
+        : GdriveBackupDriver(
+            settings: sourceSettings,
+            persistSettings: (updated) => _applyAgentSettings(updated, reason: 'gdrive', forceRestartSshListeners: false),
+            settingsDir: _agentSettingsStore.file.parent,
+            logInfo: _hostLog,
+          );
+    final sftp = SftpBackupDriver(settings: sourceSettings);
 
     return {
       'filesystem': _DriverDescriptor(
@@ -1090,20 +1255,27 @@ class AgentHttpServer {
         usesPath: false,
         capabilities: dummy.capabilities,
         validateStart: () => null,
-        create: (params) => DummyBackupDriver(trimmedPath, tmpWritesEnabled: _agentSettings.dummyDriverTmpWrites, driverParams: params),
+        create: (params) => DummyBackupDriver(trimmedPath, tmpWritesEnabled: sourceSettings.dummyDriverTmpWrites, driverParams: params),
       ),
       'gdrive': _DriverDescriptor(
         id: 'gdrive',
         label: 'Google Drive (Preview)',
         usesPath: false,
         capabilities: gdrive.capabilities,
-        validateStart: () => _agentSettings.gdriveRefreshToken.trim().isEmpty ? 'google drive is not connected' : null,
-        create: (_) => _cachedGdriveDriver ??= GdriveBackupDriver(
-          settings: _agentSettings,
-          persistSettings: (settings) => _applyAgentSettings(settings, reason: 'gdrive', forceRestartSshListeners: false),
-          settingsDir: _agentSettingsStore.file.parent,
-          logInfo: _hostLog,
-        ),
+        validateStart: () => sourceSettings.gdriveRefreshToken.trim().isEmpty ? 'google drive is not connected' : null,
+        create: (_) => identical(sourceSettings, _agentSettings)
+            ? (_cachedGdriveDriver ??= GdriveBackupDriver(
+                settings: sourceSettings,
+                persistSettings: (updated) => _applyAgentSettings(updated, reason: 'gdrive', forceRestartSshListeners: false),
+                settingsDir: _agentSettingsStore.file.parent,
+                logInfo: _hostLog,
+              ))
+            : GdriveBackupDriver(
+                settings: sourceSettings,
+                persistSettings: (updated) => _applyAgentSettings(updated, reason: 'gdrive', forceRestartSshListeners: false),
+                settingsDir: _agentSettingsStore.file.parent,
+                logInfo: _hostLog,
+              ),
       ),
       'sftp': _DriverDescriptor(
         id: 'sftp',
@@ -1111,16 +1283,16 @@ class AgentHttpServer {
         usesPath: false,
         capabilities: sftp.capabilities,
         validateStart: () {
-          final host = _agentSettings.sftpHost.trim();
-          final user = _agentSettings.sftpUsername.trim();
-          final password = _agentSettings.sftpPassword;
-          final basePath = _agentSettings.sftpBasePath.trim();
+          final host = sourceSettings.sftpHost.trim();
+          final user = sourceSettings.sftpUsername.trim();
+          final password = sourceSettings.sftpPassword;
+          final basePath = sourceSettings.sftpBasePath.trim();
           if (host.isEmpty || user.isEmpty || password.isEmpty || basePath.isEmpty) {
             return 'sftp is not configured';
           }
           return null;
         },
-        create: (_) => SftpBackupDriver(settings: _agentSettings),
+        create: (_) => SftpBackupDriver(settings: sourceSettings),
       ),
     };
   }
@@ -1226,11 +1398,25 @@ class AgentHttpServer {
     }
   }
 
-  void _startBackupJob(String jobId, ServerConfig server, VmEntry vm, String backupPath, {String? driverIdOverride, Map<String, dynamic>? driverParams, bool freshRequested = false}) {
-    final defaultDriverId = _agentSettings.backupDriverId.trim().isEmpty ? 'filesystem' : _agentSettings.backupDriverId.trim();
+  void _startBackupJob(
+    String jobId,
+    ServerConfig server,
+    VmEntry vm,
+    String backupPath, {
+    String? driverIdOverride,
+    Map<String, dynamic>? driverParams,
+    _ResolvedDestination? destination,
+    bool freshRequested = false,
+  }) {
+    final defaultDriverId = destination?.driverId ?? (_agentSettings.backupDriverId.trim().isEmpty ? 'filesystem' : _agentSettings.backupDriverId.trim());
     final driverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : defaultDriverId;
     final driverInfo = _driverCatalog[driverId] ?? _driverCatalog['filesystem']!;
-    _setJobContext(jobId, source: _formatJobSource(server, vm.name), target: _formatBackupTarget(driverInfo, backupPath, driverId), driverLabel: driverInfo.label);
+    _setJobContext(
+      jobId,
+      source: _formatJobSource(server, vm.name),
+      target: _formatBackupTarget(driverInfo, backupPath, driverId, destinationName: destination?.destination.name),
+      driverLabel: driverInfo.label,
+    );
     _hostLog('Backup job $jobId using driver: $driverId');
     final control = _jobControls[jobId];
     if (control == null) {
@@ -1255,7 +1441,7 @@ class AgentHttpServer {
           'backupPath': backupPath,
           'driverParams': driverParams ?? const <String, dynamic>{},
           'fresh': freshRequested,
-          'settings': _agentSettings.toMap(),
+          'settings': (destination?.settings ?? _agentSettings).toMap(),
           'server': server.toMap(),
           'vm': vm.toMap(),
         });
@@ -1591,12 +1777,12 @@ class AgentHttpServer {
     return RestorePrecheckResult(vmExists: true, canDefineOnly: canDefineOnly);
   }
 
-  void _startRestoreJob(String jobId, ServerConfig server, String xmlPath, String decision, {String? driverIdOverride}) {
-    final defaultDriverId = _agentSettings.backupDriverId.trim().isEmpty ? 'filesystem' : _agentSettings.backupDriverId.trim();
+  void _startRestoreJob(String jobId, ServerConfig server, String xmlPath, String decision, {_ResolvedDestination? destination, String? driverIdOverride}) {
+    final defaultDriverId = destination?.driverId ?? (_agentSettings.backupDriverId.trim().isEmpty ? 'filesystem' : _agentSettings.backupDriverId.trim());
     final driverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : defaultDriverId;
     final driverInfo = _driverCatalog[driverId] ?? _driverCatalog['filesystem']!;
     _setJobContext(jobId, source: xmlPath, driverLabel: driverInfo.label);
-    final backupPath = _agentSettings.backupPath.trim();
+    final backupPath = destination?.backupPath ?? _agentSettings.backupPath.trim();
     if (driverInfo.usesPath && backupPath.isEmpty) {
       final current = _jobs[jobId];
       if (current != null) {
@@ -1629,7 +1815,7 @@ class AgentHttpServer {
           'backupPath': backupPath,
           'decision': decision,
           'xmlPath': xmlPath,
-          'settings': _agentSettings.toMap(),
+          'settings': (destination?.settings ?? _agentSettings).toMap(),
           'server': server.toMap(),
         });
         return;
@@ -1717,7 +1903,11 @@ class AgentHttpServer {
     return '$serverName:$vm';
   }
 
-  String _formatBackupTarget(BackupDriverInfo driverInfo, String backupPath, String driverId) {
+  String _formatBackupTarget(BackupDriverInfo driverInfo, String backupPath, String driverId, {String? destinationName}) {
+    final destinationLabel = destinationName?.trim() ?? '';
+    if (destinationLabel.isNotEmpty) {
+      return destinationLabel;
+    }
     if (driverInfo.usesPath) {
       final trimmedPath = backupPath.trim();
       if (trimmedPath.isNotEmpty) {
@@ -1739,10 +1929,10 @@ class AgentHttpServer {
     final control = _jobControls[jobId];
     final duration = control?.startedAt == null ? null : DateTime.now().difference(control!.startedAt).inSeconds;
     final status = state == AgentJobState.success ? 'success' : 'failed';
-    final driverLabel = _resolveDriverLabel(control?.driverLabel);
+    final destinationLabel = _resolveDestinationLabel(target: control?.target, driverLabel: control?.driverLabel);
     final messageText = _buildNtfymeMessage(type, status, control?.source, control?.target);
-    final pushMessage = _buildNtfymePushMessage(messageText, driverLabel);
-    final payload = <String, dynamic>{'topic': _ntfymeTopic, 'msg': messageText, 'push_msg': pushMessage, 'type': type.name, 'status': status, 'driver': driverLabel};
+    final pushMessage = _buildNtfymePushMessage(messageText, destinationLabel);
+    final payload = <String, dynamic>{'topic': _ntfymeTopic, 'msg': messageText, 'push_msg': pushMessage, 'type': type.name, 'status': status, 'destination': destinationLabel};
     if (duration != null) {
       payload['duration_sec'] = duration;
     }
@@ -1768,17 +1958,21 @@ class AgentHttpServer {
     return '$label $statusText';
   }
 
-  String _buildNtfymePushMessage(String message, String? driverLabel) {
-    final label = driverLabel?.trim() ?? '';
+  String _buildNtfymePushMessage(String message, String? destinationLabel) {
+    final label = destinationLabel?.trim() ?? '';
     if (label.isEmpty) {
       return message;
     }
     return '$message on $label';
   }
 
-  String _resolveDriverLabel(String? driverLabel) {
-    final label = driverLabel?.trim() ?? '';
-    return label.isEmpty ? 'Unknown driver' : label;
+  String _resolveDestinationLabel({String? target, String? driverLabel}) {
+    final targetLabel = target?.trim() ?? '';
+    if (targetLabel.isNotEmpty) {
+      return targetLabel;
+    }
+    final fallback = driverLabel?.trim() ?? '';
+    return fallback.isEmpty ? 'Unknown destination' : fallback;
   }
 
   String _formatBytes(int bytes) {

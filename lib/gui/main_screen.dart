@@ -1,20 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:virtbackup/agent/settings_store.dart';
 import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/models.dart';
-import 'package:virtbackup/common/google_oauth_client.dart';
 import 'package:virtbackup/common/settings.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:virtbackup/gui/agent_api_client.dart';
@@ -52,14 +49,6 @@ class _AgentEndpoint {
   }
 }
 
-class _OAuthCallbackResult {
-  _OAuthCallbackResult({required this.code, required this.state, required this.error});
-
-  final String? code;
-  final String? state;
-  final String? error;
-}
-
 class BackupServerSetupScreen extends StatefulWidget {
   const BackupServerSetupScreen({super.key});
 
@@ -73,20 +62,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   static const double _contentTitleSpacing = 8;
   static const double _contentSectionSpacing = 32;
   static const String _gdriveScopeFile = 'https://www.googleapis.com/auth/drive.file';
-  static const String _gdriveScopeFull = 'https://www.googleapis.com/auth/drive';
   final GlobalKey<FormState> _connectionFormKey = GlobalKey<FormState>();
   final GlobalKey<FormState> _localFormKey = GlobalKey<FormState>();
   final TextEditingController _serverNameController = TextEditingController();
   final TextEditingController _backupPathController = TextEditingController();
-  final Map<String, TextEditingController> _driverParamControllers = {};
-  final Map<String, bool> _driverParamBoolValues = {};
   final TextEditingController _ntfymeTokenController = TextEditingController();
-  final TextEditingController _gdriveRootPathController = TextEditingController();
-  final TextEditingController _sftpHostController = TextEditingController();
-  final TextEditingController _sftpPortController = TextEditingController(text: '22');
-  final TextEditingController _sftpUserController = TextEditingController();
-  final TextEditingController _sftpPasswordController = TextEditingController();
-  final TextEditingController _sftpBasePathController = TextEditingController();
   final TextEditingController _sshHostController = TextEditingController();
   final TextEditingController _sshPortController = TextEditingController(text: '22');
   final TextEditingController _sshUserController = TextEditingController();
@@ -101,16 +81,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String? _selectedAgentId;
   String? _editingServerId;
   String _savedBackupPath = '';
-  String _savedBackupDriverId = 'filesystem';
   String _savedNtfymeToken = '';
-  String _savedGdriveScope = _gdriveScopeFile;
-  String _savedGdriveRootPath = '/';
-  String _savedSftpHost = '';
-  String _savedSftpPort = '22';
-  String _savedSftpUser = '';
-  String _savedSftpPassword = '';
-  String _savedSftpBasePath = '';
-  String _backupDriverId = 'filesystem';
+  String? _selectedBackupDestinationId;
   final Map<String, List<VmEntry>> _vmCacheByServerId = {};
   bool _connectionVerified = false;
   int _selectedMenuIndex = 2;
@@ -124,11 +96,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _isRestoring = false;
   bool _isSanityChecking = false;
   bool _isSendingNtfymeTest = false;
-  bool _isTestingSftp = false;
-  bool _isGdriveConnecting = false;
-  String _gdriveScope = _gdriveScopeFile;
-  String _gdriveClientId = '';
-  String _gdriveClientSecret = '';
   final Map<String, bool> _vmHasOverlayByName = {};
   final Map<String, Map<String, bool>> _overlayByServerId = {};
   final Map<String, DateTime> _lastRefreshByServerId = {};
@@ -190,7 +157,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _attachFieldListeners();
     unawaited(_configureGuiLogWriter());
     _loadAgentEndpointsAndSettings();
-    _loadGdriveClientConfig();
   }
 
   @override
@@ -203,16 +169,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _agentReconnectTimer?.cancel();
     _serverNameController.dispose();
     _backupPathController.dispose();
-    for (final controller in _driverParamControllers.values) {
-      controller.dispose();
-    }
     _ntfymeTokenController.dispose();
-    _gdriveRootPathController.dispose();
-    _sftpHostController.dispose();
-    _sftpPortController.dispose();
-    _sftpUserController.dispose();
-    _sftpPasswordController.dispose();
-    _sftpBasePathController.dispose();
     _sshHostController.dispose();
     _sshPortController.dispose();
     _sshUserController.dispose();
@@ -227,33 +184,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     await _loadAgentEndpoints();
     await _applySelectedAgent();
     await _loadAgentSettings();
-  }
-
-  Future<void> _loadGdriveClientConfig() async {
-    // On macOS (and other desktop platforms), the current working directory is not stable
-    // when launching the built .app. Prefer a file next to `agent.yaml` so both the GUI and
-    // the embedded agent can load the same OAuth client config reliably.
-    final store = await AppSettingsStore.fromAgentDefaultPath();
-    final settingsDir = store.file.parent;
-    final sep = Platform.pathSeparator;
-    final overrideFile = File('${settingsDir.path}${sep}etc${sep}google_oauth_client.json');
-
-    final locator = GoogleOAuthClientLocator(overrideFile: overrideFile);
-    try {
-      final config = await locator.load(requireSecret: false);
-      if (config.clientId.trim().isNotEmpty) {
-        _gdriveClientId = config.clientId.trim();
-      }
-      if (config.clientSecret.trim().isNotEmpty) {
-        _gdriveClientSecret = config.clientSecret.trim();
-      }
-    } catch (error) {
-      // This info is crucial when running the desktop app from an IDE or by launching the built .app, because the working directory and executable dir can differ.
-      final candidates = locator.candidateFiles().map((file) => file.path).toList();
-      _logInfo('Google Drive OAuth client config load failed: $error');
-      _logInfo('Google Drive OAuth candidates: ${candidates.join(' | ')}');
-      _logInfo('Google Drive OAuth preferred path: ${overrideFile.path}');
-    }
   }
 
   Future<void> _loadAgentEndpoints() async {
@@ -369,28 +299,13 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     } finally {
       _isLoadingAgentSettings = false;
     }
-    _backupDriverId = _agentSettings.backupDriverId;
-    _savedBackupDriverId = _backupDriverId;
-    _ensureBackupDriverSelection();
+    _selectedBackupDestinationId = _agentSettings.backupDestinationId;
+    _ensureBackupDestinationSelection();
     _backupPathController.text = _agentSettings.backupPath;
     _savedBackupPath = _backupPathController.text.trim();
     unawaited(_configureGuiLogWriter(backupPath: _savedBackupPath, rotateOnStartup: true));
     _ntfymeTokenController.text = _agentSettings.ntfymeToken;
     _savedNtfymeToken = _ntfymeTokenController.text.trim();
-    _gdriveScope = _agentSettings.gdriveScope.isNotEmpty ? _agentSettings.gdriveScope : _gdriveScopeFile;
-    _savedGdriveScope = _gdriveScope;
-    _gdriveRootPathController.text = _agentSettings.gdriveRootPath.isNotEmpty ? _agentSettings.gdriveRootPath : '/';
-    _savedGdriveRootPath = _gdriveRootPathController.text.trim();
-    _sftpHostController.text = _agentSettings.sftpHost;
-    _savedSftpHost = _sftpHostController.text.trim();
-    _sftpPortController.text = _agentSettings.sftpPort.toString();
-    _savedSftpPort = _sftpPortController.text.trim();
-    _sftpUserController.text = _agentSettings.sftpUsername;
-    _savedSftpUser = _sftpUserController.text.trim();
-    _sftpPasswordController.text = _agentSettings.sftpPassword;
-    _savedSftpPassword = _sftpPasswordController.text;
-    _sftpBasePathController.text = _agentSettings.sftpBasePath;
-    _savedSftpBasePath = _sftpBasePathController.text.trim();
     _servers
       ..clear()
       ..addAll(_agentSettings.servers);
@@ -762,60 +677,47 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     ];
   }
 
-  void _ensureBackupDriverSelection() {
-    if (_backupDrivers.isEmpty) {
+  List<BackupDestination> _enabledDestinations() {
+    final result = <BackupDestination>[];
+    final seenIds = <String>{};
+    for (final destination in _agentSettings.destinations) {
+      if (!destination.enabled) {
+        continue;
+      }
+      final id = destination.id.trim();
+      if (id.isEmpty || seenIds.contains(id)) {
+        continue;
+      }
+      seenIds.add(id);
+      result.add(destination);
+    }
+    return result;
+  }
+
+  void _ensureBackupDestinationSelection() {
+    final enabled = _enabledDestinations();
+    if (enabled.isEmpty) {
+      _selectedBackupDestinationId = null;
       return;
     }
-    if (_backupDrivers.any((driver) => driver.id == _backupDriverId)) {
-      return;
+    final currentId = _selectedBackupDestinationId?.trim() ?? '';
+    if (currentId.isNotEmpty) {
+      for (final destination in enabled) {
+        if (destination.id == currentId) {
+          return;
+        }
+      }
     }
-    _backupDriverId = _backupDrivers.first.id;
-  }
-
-  BackupDriverInfo? _selectedBackupDriver() {
-    if (_backupDrivers.isEmpty) {
-      return null;
+    final preferredId = _agentSettings.backupDestinationId?.trim() ?? '';
+    if (preferredId.isNotEmpty) {
+      for (final destination in enabled) {
+        if (destination.id == preferredId) {
+          _selectedBackupDestinationId = destination.id;
+          return;
+        }
+      }
     }
-    return _backupDrivers.firstWhere((driver) => driver.id == _backupDriverId, orElse: () => _backupDrivers.first);
-  }
-
-  List<DriverParamDefinition> _selectedDriverParams() {
-    final driver = _selectedBackupDriver();
-    return driver?.capabilities.params ?? const <DriverParamDefinition>[];
-  }
-
-  String _driverParamKey(String driverId, String paramKey) => '$driverId::$paramKey';
-
-  TextEditingController _driverParamController(String driverId, DriverParamDefinition definition) {
-    final key = _driverParamKey(driverId, definition.key);
-    final existing = _driverParamControllers[key];
-    if (existing != null) {
-      return existing;
-    }
-    final controller = TextEditingController();
-    final defaultValue = definition.defaultValue;
-    if (defaultValue != null && defaultValue.toString().trim().isNotEmpty) {
-      controller.text = defaultValue.toString();
-    }
-    _driverParamControllers[key] = controller;
-    return controller;
-  }
-
-  bool _driverParamBoolValue(String driverId, DriverParamDefinition definition) {
-    final key = _driverParamKey(driverId, definition.key);
-    final cached = _driverParamBoolValues[key];
-    if (cached != null) {
-      return cached;
-    }
-    final defaultValue = definition.defaultValue;
-    final resolved = defaultValue is bool ? defaultValue : defaultValue?.toString().toLowerCase() == 'true';
-    _driverParamBoolValues[key] = resolved;
-    return resolved;
-  }
-
-  void _setDriverParamBoolValue(String driverId, DriverParamDefinition definition, bool value) {
-    final key = _driverParamKey(driverId, definition.key);
-    _driverParamBoolValues[key] = value;
+    _selectedBackupDestinationId = enabled.first.id;
   }
 
   void _scheduleAgentReconnect() {
@@ -1463,12 +1365,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _apiBaseUrlController.addListener(_handleFieldChanged);
     _backupPathController.addListener(_handleFieldChanged);
     _ntfymeTokenController.addListener(_handleFieldChanged);
-    _gdriveRootPathController.addListener(_handleFieldChanged);
-    _sftpHostController.addListener(_handleFieldChanged);
-    _sftpPortController.addListener(_handleFieldChanged);
-    _sftpUserController.addListener(_handleFieldChanged);
-    _sftpPasswordController.addListener(_handleFieldChanged);
-    _sftpBasePathController.addListener(_handleFieldChanged);
   }
 
   void _handleFieldChanged() {
@@ -1683,16 +1579,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   }
 
   bool _localHasChanges() {
-    return _backupPathController.text.trim() != _savedBackupPath ||
-        _backupDriverId != _savedBackupDriverId ||
-        _ntfymeTokenController.text.trim() != _savedNtfymeToken ||
-        _gdriveScope != _savedGdriveScope ||
-        _gdriveRootPathController.text.trim() != _savedGdriveRootPath ||
-        _sftpHostController.text.trim() != _savedSftpHost ||
-        _sftpPortController.text.trim() != _savedSftpPort ||
-        _sftpUserController.text.trim() != _savedSftpUser ||
-        _sftpPasswordController.text != _savedSftpPassword ||
-        _sftpBasePathController.text.trim() != _savedSftpBasePath;
+    return _backupPathController.text.trim() != _savedBackupPath || _ntfymeTokenController.text.trim() != _savedNtfymeToken;
   }
 
   bool _hasAnyChanges() {
@@ -1767,36 +1654,26 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     try {
       final trimmedPath = _backupPathController.text.trim();
       final trimmedToken = _ntfymeTokenController.text.trim();
-      final trimmedGdriveRoot = _gdriveRootPathController.text.trim().isEmpty ? '/' : _gdriveRootPathController.text.trim();
-      final sftpHost = _sftpHostController.text.trim();
-      final sftpPort = int.tryParse(_sftpPortController.text.trim()) ?? 22;
-      final sftpUser = _sftpUserController.text.trim();
-      final sftpPassword = _sftpPasswordController.text;
-      final sftpBasePath = _sftpBasePathController.text.trim();
-      _agentSettings = _agentSettings.copyWith(
-        backupPath: trimmedPath,
-        backupDriverId: _backupDriverId,
-        ntfymeToken: trimmedToken,
-        gdriveScope: _gdriveScope,
-        gdriveRootPath: trimmedGdriveRoot,
-        sftpHost: sftpHost,
-        sftpPort: sftpPort,
-        sftpUsername: sftpUser,
-        sftpPassword: sftpPassword,
-        sftpBasePath: sftpBasePath,
-      );
+      final updatedDestinations = List<BackupDestination>.from(_agentSettings.destinations);
+      final filesystemIndex = updatedDestinations.indexWhere((destination) => destination.id == AppSettings.filesystemDestinationId);
+      if (filesystemIndex >= 0) {
+        final current = updatedDestinations[filesystemIndex];
+        updatedDestinations[filesystemIndex] = BackupDestination(
+          id: AppSettings.filesystemDestinationId,
+          name: AppSettings.filesystemDestinationName,
+          driverId: 'filesystem',
+          enabled: true,
+          params: <String, dynamic>{'path': trimmedPath},
+        );
+        if (current.params['path']?.toString().trim() != trimmedPath) {
+          _selectedBackupDestinationId ??= AppSettings.filesystemDestinationId;
+        }
+      }
+      _agentSettings = _agentSettings.copyWith(backupPath: trimmedPath, ntfymeToken: trimmedToken, backupDestinationId: _selectedBackupDestinationId, destinations: updatedDestinations);
       await _pushAgentSettings();
       _savedBackupPath = trimmedPath;
       unawaited(_configureGuiLogWriter(backupPath: trimmedPath));
-      _savedBackupDriverId = _backupDriverId;
       _savedNtfymeToken = trimmedToken;
-      _savedGdriveScope = _gdriveScope;
-      _savedGdriveRootPath = trimmedGdriveRoot;
-      _savedSftpHost = sftpHost;
-      _savedSftpPort = _sftpPortController.text.trim();
-      _savedSftpUser = sftpUser;
-      _savedSftpPassword = sftpPassword;
-      _savedSftpBasePath = sftpBasePath;
       if (mounted && showSnackBar) {
         _showSnackBarInfo('Local settings saved');
       }
@@ -1834,44 +1711,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
-  Future<void> _testSftpConnection() async {
-    final host = _sftpHostController.text.trim();
-    final port = int.tryParse(_sftpPortController.text.trim()) ?? 22;
-    final username = _sftpUserController.text.trim();
-    final password = _sftpPasswordController.text;
-    final basePath = _sftpBasePathController.text.trim();
-    if (host.isEmpty || username.isEmpty || password.isEmpty || basePath.isEmpty) {
-      _showSnackBarError('Enter SFTP settings first.');
-      return;
-    }
-    if (!_agentReachable || _agentAuthFailed || _agentTokenMissing) {
-      _showSnackBarError('Agent is not reachable.');
-      return;
-    }
-    if (_isTestingSftp) {
-      return;
-    }
-    setState(() {
-      _isTestingSftp = true;
-    });
-    try {
-      final result = await _agentApiClient.testSftpConnection(host: host, port: port, username: username, password: password, basePath: basePath);
-      if (result.success) {
-        _showSnackBarInfo(result.message);
-      } else {
-        _showSnackBarError('SFTP test failed: ${result.message}');
-      }
-    } catch (error) {
-      _showSnackBarError('SFTP test failed: $error');
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isTestingSftp = false;
-        });
-      }
-    }
-  }
-
   Future<void> _openNtfymeDocs() async {
     final uri = Uri.parse('https://ntfyme.net/');
     try {
@@ -1884,248 +1723,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         _showSnackBarError('Unable to open Ntfy me docs.');
       }
     }
-  }
-
-  bool _isGdriveConnected() {
-    return _agentSettings.gdriveRefreshToken.trim().isNotEmpty;
-  }
-
-  Future<void> _startGdriveOAuth({bool forceConsent = false}) async {
-    if (_isGdriveConnecting) {
-      return;
-    }
-    if (!_agentReachable || _agentAuthFailed || _agentTokenMissing) {
-      _showSnackBarError('Agent is not reachable.');
-      return;
-    }
-    final clientId = _gdriveClientId;
-    if (clientId.isEmpty) {
-      _showSnackBarError('Google Drive client ID is not configured.');
-      return;
-    }
-    _logInfo('Google Drive OAuth client_id: $clientId');
-    setState(() {
-      _isGdriveConnecting = true;
-    });
-
-    HttpServer? server;
-    try {
-      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      final redirectUri = 'http://127.0.0.1:${server.port}/oauth/callback';
-      final codeVerifier = _generateOAuthVerifier();
-      final codeChallenge = _generateOAuthChallenge(codeVerifier);
-      final state = _generateOAuthState();
-      final scope = _buildGdriveScope();
-      final shouldPrompt = forceConsent || !_isGdriveConnected();
-      final query = <String, String>{
-        'client_id': clientId,
-        'redirect_uri': redirectUri,
-        'response_type': 'code',
-        'scope': scope,
-        'access_type': 'offline',
-        'include_granted_scopes': 'true',
-        'state': state,
-        'code_challenge': codeChallenge,
-        'code_challenge_method': 'S256',
-      };
-      if (shouldPrompt) {
-        query['prompt'] = 'consent';
-      }
-      final authUri = Uri.https('accounts.google.com', '/o/oauth2/v2/auth', query);
-
-      final callback = _waitForOAuthCallback(server);
-      final launched = await launchUrl(authUri, mode: LaunchMode.externalApplication);
-      if (!launched) {
-        throw 'Unable to open the browser for Google Drive sign-in.';
-      }
-
-      final result = await callback.timeout(
-        const Duration(minutes: 5),
-        onTimeout: () {
-          throw 'Google Drive sign-in timed out.';
-        },
-      );
-
-      if (result.error != null && result.error!.isNotEmpty) {
-        throw 'Google Drive sign-in failed: ${result.error}';
-      }
-      if (result.state != state) {
-        throw 'Google Drive sign-in state mismatch.';
-      }
-      final code = result.code;
-      if (code == null || code.isEmpty) {
-        throw 'Google Drive sign-in did not return a code.';
-      }
-
-      final tokenResponse = await http.post(
-        Uri.parse('https://oauth2.googleapis.com/token'),
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: {
-          'client_id': clientId,
-          if (_gdriveClientSecret.trim().isNotEmpty) 'client_secret': _gdriveClientSecret.trim(),
-          'code': code,
-          'code_verifier': codeVerifier,
-          'redirect_uri': redirectUri,
-          'grant_type': 'authorization_code',
-        },
-      );
-      if (tokenResponse.statusCode != 200) {
-        throw 'Token exchange failed: ${tokenResponse.body}';
-      }
-      final decoded = jsonDecode(tokenResponse.body);
-      if (decoded is! Map) {
-        throw 'Token exchange failed: invalid response.';
-      }
-      final accessToken = decoded['access_token']?.toString() ?? '';
-      final returnedRefreshToken = decoded['refresh_token']?.toString() ?? '';
-      final refreshToken = returnedRefreshToken.isNotEmpty ? returnedRefreshToken : _agentSettings.gdriveRefreshToken;
-      if (refreshToken.isEmpty) {
-        throw 'No refresh token received. Please retry with consent.';
-      }
-      final expiresIn = decoded['expires_in'];
-      final expiresAt = _calculateExpiresAt(expiresIn);
-      final scopeToStore = _gdriveScope.isNotEmpty ? _gdriveScope : _gdriveScopeFile;
-
-      String accountEmail = '';
-      if (accessToken.isNotEmpty) {
-        try {
-          final userinfo = await http.get(Uri.parse('https://openidconnect.googleapis.com/v1/userinfo'), headers: {'Authorization': 'Bearer $accessToken'});
-          if (userinfo.statusCode == 200) {
-            final userJson = jsonDecode(userinfo.body);
-            if (userJson is Map) {
-              accountEmail = userJson['email']?.toString() ?? '';
-            }
-          }
-        } catch (_) {}
-      }
-
-      await _agentApiClient.storeGoogleOAuth(accessToken: accessToken, refreshToken: refreshToken, scope: scopeToStore, accountEmail: accountEmail, expiresAt: expiresAt);
-      await _loadAgentSettings();
-      if (mounted) {
-        _showSnackBarInfo('Google Drive connected.');
-      }
-    } catch (error, stackTrace) {
-      _logError('Google Drive OAuth failed.', error, stackTrace);
-      if (mounted) {
-        _showSnackBarError('Google Drive sign-in failed: $error');
-      }
-    } finally {
-      try {
-        await server?.close(force: true);
-      } catch (_) {}
-      if (mounted) {
-        setState(() {
-          _isGdriveConnecting = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _disconnectGdrive() async {
-    if (_isGdriveConnecting) {
-      return;
-    }
-    if (!_agentReachable || _agentAuthFailed || _agentTokenMissing) {
-      _showSnackBarError('Agent is not reachable.');
-      return;
-    }
-    setState(() {
-      _isGdriveConnecting = true;
-    });
-    try {
-      await _agentApiClient.clearGoogleOAuth();
-      await _loadAgentSettings();
-      if (mounted) {
-        _showSnackBarInfo('Google Drive disconnected.');
-      }
-    } catch (error, stackTrace) {
-      _logError('Google Drive disconnect failed.', error, stackTrace);
-      if (mounted) {
-        _showSnackBarError('Google Drive disconnect failed: $error');
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isGdriveConnecting = false;
-        });
-      }
-    }
-  }
-
-  String _buildGdriveScope() {
-    final driveScope = _gdriveScope.isEmpty ? _gdriveScopeFile : _gdriveScope;
-    return '$driveScope openid email';
-  }
-
-  Future<_OAuthCallbackResult> _waitForOAuthCallback(HttpServer server) {
-    final completer = Completer<_OAuthCallbackResult>();
-    server.listen((request) async {
-      if (request.uri.path != '/oauth/callback') {
-        request.response.statusCode = 404;
-        await request.response.close();
-        return;
-      }
-      final params = request.uri.queryParameters;
-      final code = params['code'];
-      final state = params['state'];
-      final error = params['error'];
-      request.response.statusCode = 200;
-      request.response.headers.contentType = ContentType.html;
-      request.response.write('<html><body><h3>You can close this window and return to VirtBackup.</h3></body></html>');
-      await request.response.close();
-      if (!completer.isCompleted) {
-        completer.complete(_OAuthCallbackResult(code: code, state: state, error: error));
-      }
-      await server.close(force: true);
-    });
-    return completer.future;
-  }
-
-  String _generateOAuthVerifier() {
-    final bytes = _randomBytes(32);
-    return base64Url.encode(bytes).replaceAll('=', '');
-  }
-
-  String _generateOAuthChallenge(String verifier) {
-    final digest = sha256.convert(utf8.encode(verifier)).bytes;
-    return base64Url.encode(digest).replaceAll('=', '');
-  }
-
-  String _generateOAuthState() {
-    final bytes = _randomBytes(16);
-    return base64Url.encode(bytes).replaceAll('=', '');
-  }
-
-  Uint8List _randomBytes(int length) {
-    final random = Random.secure();
-    final bytes = Uint8List(length);
-    for (var i = 0; i < length; i++) {
-      bytes[i] = random.nextInt(256);
-    }
-    return bytes;
-  }
-
-  DateTime? _calculateExpiresAt(Object? expiresIn) {
-    if (expiresIn is num) {
-      return DateTime.now().toUtc().add(Duration(seconds: expiresIn.toInt()));
-    }
-    final parsed = int.tryParse(expiresIn?.toString() ?? '');
-    if (parsed == null || parsed <= 0) {
-      return null;
-    }
-    return DateTime.now().toUtc().add(Duration(seconds: parsed));
-  }
-
-  String _formatGdriveExpiry(DateTime? expiresAt) {
-    if (expiresAt == null) {
-      return 'Unknown';
-    }
-    final local = expiresAt.toLocal();
-    final paddedMonth = local.month.toString().padLeft(2, '0');
-    final paddedDay = local.day.toString().padLeft(2, '0');
-    final paddedHour = local.hour.toString().padLeft(2, '0');
-    final paddedMinute = local.minute.toString().padLeft(2, '0');
-    return '${local.year}-$paddedMonth-$paddedDay $paddedHour:$paddedMinute';
   }
 
   Future<void> _saveAllAgentSettings() async {
@@ -2169,20 +1766,309 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
-  void _setBackupDriverId(String? value) {
-    if (value == null || value.isEmpty) {
-      return;
-    }
-    if (_backupDriverId == value) {
-      return;
-    }
-    setState(() {
-      _backupDriverId = value;
-    });
-    _localFormKey.currentState?.validate();
-    if (value == 'gdrive' && !_isGdriveConnected()) {
-      unawaited(_startGdriveOAuth());
-    }
+  String _generateDestinationId(String driverId) {
+    final normalized = driverId.trim().isEmpty ? 'driver' : driverId.trim();
+    final stamp = DateTime.now().microsecondsSinceEpoch;
+    return 'dest_${normalized}_$stamp';
+  }
+
+  Future<void> _openDestinationEditor() async {
+    var working = List<BackupDestination>.from(_agentSettings.destinations);
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            Future<void> editDestination({BackupDestination? existing}) async {
+              final nameController = TextEditingController(text: existing?.name ?? '');
+              var driverId = existing?.driverId ?? (_backupDrivers.isNotEmpty ? _backupDrivers.first.id : 'filesystem');
+              var enabled = existing?.enabled ?? true;
+              final params = Map<String, dynamic>.from(existing?.params ?? const <String, dynamic>{});
+              final pathController = TextEditingController(text: params['path']?.toString() ?? '');
+              final sftpHostController = TextEditingController(text: params['host']?.toString() ?? '');
+              final sftpPortController = TextEditingController(text: (params['port'] ?? 22).toString());
+              final sftpUserController = TextEditingController(text: params['username']?.toString() ?? '');
+              final sftpPasswordController = TextEditingController(text: params['password']?.toString() ?? '');
+              final sftpBasePathController = TextEditingController(text: params['basePath']?.toString() ?? '');
+              final gdriveRootController = TextEditingController(text: params['rootPath']?.toString() ?? '/');
+              final gdriveScopeController = TextEditingController(text: params['scope']?.toString() ?? _gdriveScopeFile);
+              final gdriveAccessController = TextEditingController(text: params['accessToken']?.toString() ?? '');
+              final gdriveRefreshController = TextEditingController(text: params['refreshToken']?.toString() ?? '');
+              final gdriveEmailController = TextEditingController(text: params['accountEmail']?.toString() ?? '');
+              final formKey = GlobalKey<FormState>();
+              final result = await showDialog<BackupDestination>(
+                context: context,
+                builder: (context) {
+                  return StatefulBuilder(
+                    builder: (context, setStateDestination) {
+                      return AlertDialog(
+                        title: Text(existing == null ? 'New destination' : 'Edit destination'),
+                        content: SizedBox(
+                          width: 520,
+                          child: Form(
+                            key: formKey,
+                            child: SingleChildScrollView(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  TextFormField(
+                                    controller: nameController,
+                                    decoration: const InputDecoration(labelText: 'Name'),
+                                    validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a name' : null,
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Builder(
+                                    builder: (context) {
+                                      final items = <DropdownMenuItem<String>>[];
+                                      final seenDriverIds = <String>{};
+                                      for (final driver in _backupDrivers) {
+                                        final id = driver.id.trim();
+                                        if (id.isEmpty || seenDriverIds.contains(id)) {
+                                          continue;
+                                        }
+                                        seenDriverIds.add(id);
+                                        items.add(DropdownMenuItem<String>(value: id, child: Text(driver.label)));
+                                      }
+                                      final normalizedDriverId = driverId.trim();
+                                      if (normalizedDriverId.isNotEmpty && !seenDriverIds.contains(normalizedDriverId)) {
+                                        items.add(DropdownMenuItem<String>(value: normalizedDriverId, child: Text(normalizedDriverId)));
+                                      }
+                                      return DropdownButtonFormField<String>(
+                                        initialValue: normalizedDriverId.isEmpty ? null : normalizedDriverId,
+                                        items: items,
+                                        onChanged: existing != null
+                                            ? null
+                                            : (value) {
+                                                if (value == null || value.isEmpty) {
+                                                  return;
+                                                }
+                                                setStateDestination(() {
+                                                  driverId = value;
+                                                });
+                                              },
+                                        decoration: const InputDecoration(labelText: 'Driver'),
+                                      );
+                                    },
+                                  ),
+                                  const SizedBox(height: 12),
+                                  SwitchListTile(value: enabled, onChanged: (value) => setStateDestination(() => enabled = value), title: const Text('Enabled')),
+                                  if (driverId == 'filesystem') ...[
+                                    const SizedBox(height: 12),
+                                    TextFormField(
+                                      controller: pathController,
+                                      decoration: const InputDecoration(labelText: 'Path'),
+                                      validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a path' : null,
+                                    ),
+                                  ],
+                                  if (driverId == 'sftp') ...[
+                                    const SizedBox(height: 12),
+                                    TextFormField(
+                                      controller: sftpHostController,
+                                      decoration: const InputDecoration(labelText: 'Host'),
+                                      validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a host' : null,
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextFormField(
+                                      controller: sftpPortController,
+                                      decoration: const InputDecoration(labelText: 'Port'),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextFormField(
+                                      controller: sftpUserController,
+                                      decoration: const InputDecoration(labelText: 'Username'),
+                                      validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a username' : null,
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextFormField(
+                                      controller: sftpPasswordController,
+                                      decoration: const InputDecoration(labelText: 'Password'),
+                                      obscureText: true,
+                                      validator: (value) => (value == null || value.isEmpty) ? 'Enter a password' : null,
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextFormField(
+                                      controller: sftpBasePathController,
+                                      decoration: const InputDecoration(labelText: 'Base path'),
+                                      validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a base path' : null,
+                                    ),
+                                  ],
+                                  if (driverId == 'gdrive') ...[
+                                    const SizedBox(height: 12),
+                                    TextFormField(
+                                      controller: gdriveRootController,
+                                      decoration: const InputDecoration(labelText: 'Root path'),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextFormField(
+                                      controller: gdriveScopeController,
+                                      decoration: const InputDecoration(labelText: 'Scope'),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextFormField(
+                                      controller: gdriveAccessController,
+                                      decoration: const InputDecoration(labelText: 'Access token'),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextFormField(
+                                      controller: gdriveRefreshController,
+                                      decoration: const InputDecoration(labelText: 'Refresh token'),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextFormField(
+                                      controller: gdriveEmailController,
+                                      decoration: const InputDecoration(labelText: 'Account email'),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
+                          FilledButton(
+                            onPressed: () {
+                              if (!formKey.currentState!.validate()) {
+                                return;
+                              }
+                              final destinationParams = <String, dynamic>{};
+                              if (driverId == 'filesystem') {
+                                destinationParams['path'] = pathController.text.trim();
+                              } else if (driverId == 'sftp') {
+                                destinationParams['host'] = sftpHostController.text.trim();
+                                destinationParams['port'] = int.tryParse(sftpPortController.text.trim()) ?? 22;
+                                destinationParams['username'] = sftpUserController.text.trim();
+                                destinationParams['password'] = sftpPasswordController.text;
+                                destinationParams['basePath'] = sftpBasePathController.text.trim();
+                              } else if (driverId == 'gdrive') {
+                                destinationParams['rootPath'] = gdriveRootController.text.trim();
+                                destinationParams['scope'] = gdriveScopeController.text.trim();
+                                destinationParams['accessToken'] = gdriveAccessController.text.trim();
+                                destinationParams['refreshToken'] = gdriveRefreshController.text.trim();
+                                destinationParams['accountEmail'] = gdriveEmailController.text.trim();
+                              }
+                              Navigator.of(context).pop(
+                                BackupDestination(
+                                  id: existing?.id ?? _generateDestinationId(driverId),
+                                  name: nameController.text.trim(),
+                                  driverId: driverId,
+                                  enabled: enabled,
+                                  params: destinationParams,
+                                ),
+                              );
+                            },
+                            child: const Text('Save'),
+                          ),
+                        ],
+                      );
+                    },
+                  );
+                },
+              );
+              if (result == null) {
+                return;
+              }
+              setStateDialog(() {
+                final index = working.indexWhere((item) => item.id == result.id);
+                if (index >= 0) {
+                  working[index] = result;
+                } else {
+                  working.add(result);
+                }
+              });
+            }
+
+            return AlertDialog(
+              title: const Text('Destinations'),
+              content: SizedBox(
+                width: 640,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (working.isEmpty)
+                      const Padding(padding: EdgeInsets.symmetric(vertical: 16), child: Text('No destinations configured.'))
+                    else
+                      Flexible(
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: working.length,
+                          separatorBuilder: (_, _) => const Divider(height: 1),
+                          itemBuilder: (context, index) {
+                            final destination = working[index];
+                            final isMandatoryFilesystem = destination.id == AppSettings.filesystemDestinationId;
+                            return ListTile(
+                              title: Text(destination.name),
+                              subtitle: Text('${destination.driverId} · ${destination.enabled ? 'enabled' : 'disabled'}'),
+                              trailing: Wrap(
+                                spacing: 8,
+                                children: [
+                                  IconButton(
+                                    onPressed: () => editDestination(existing: destination),
+                                    icon: const Icon(Icons.edit_outlined),
+                                  ),
+                                  IconButton(
+                                    onPressed: isMandatoryFilesystem
+                                        ? null
+                                        : () {
+                                            setStateDialog(() {
+                                              working.removeAt(index);
+                                            });
+                                          },
+                                    icon: const Icon(Icons.delete_outline),
+                                    tooltip: isMandatoryFilesystem ? 'Filesystem destination is required' : null,
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: OutlinedButton.icon(onPressed: () => editDestination(), icon: const Icon(Icons.add), label: const Text('New destination')),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
+                FilledButton(
+                  onPressed: () async {
+                    try {
+                      final nextBackupId = _selectedBackupDestinationId != null && working.any((item) => item.id == _selectedBackupDestinationId)
+                          ? _selectedBackupDestinationId
+                          : (working.isEmpty ? null : working.first.id);
+                      final updated = _agentSettings.copyWith(destinations: working, backupDestinationId: nextBackupId);
+                      await _agentApiClient.updateConfig(updated);
+                      if (!mounted) {
+                        return;
+                      }
+                      setState(() {
+                        _agentSettings = updated;
+                        _selectedBackupDestinationId = nextBackupId;
+                        _ensureBackupDestinationSelection();
+                      });
+                      _showSnackBarInfo('Destinations saved');
+                      if (!context.mounted) {
+                        return;
+                      }
+                      Navigator.of(context).pop();
+                    } catch (error, stackTrace) {
+                      _logError('Saving destinations failed.', error, stackTrace);
+                      if (mounted) {
+                        _showSnackBarError('Saving destinations failed: $error');
+                      }
+                    }
+                  },
+                  child: const Text('Save'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<void> _refreshSelectedServer() async {

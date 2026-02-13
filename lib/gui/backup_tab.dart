@@ -28,46 +28,27 @@ extension _BackupServerSetupBackupSection on _BackupServerSetupScreenState {
                         },
                 ),
                 const SizedBox(height: 16),
-                ...() {
-                  final params = _selectedDriverParams();
-                  if (params.isEmpty) {
-                    return const <Widget>[];
-                  }
-                  final widgets = <Widget>[];
-                  for (final param in params) {
-                    if (param.type == DriverParamType.boolean) {
-                      widgets.add(
-                        SwitchListTile(
-                          value: _driverParamBoolValue(_backupDriverId, param),
-                          onChanged: _isBackupRunning
-                              ? null
-                              : (value) {
-                                  _updateUi(() {
-                                    _setDriverParamBoolValue(_backupDriverId, param, value);
-                                  });
-                                },
-                          title: Text(param.label),
-                          subtitle: param.help == null ? null : Text(param.help!),
-                        ),
-                      );
-                    } else {
-                      final controller = _driverParamController(_backupDriverId, param);
-                      final keyboardType = param.type == DriverParamType.number ? const TextInputType.numberWithOptions(decimal: true, signed: false) : TextInputType.text;
-                      final helperText = param.help?.trim().isNotEmpty == true ? param.help : (param.defaultValue == null ? 'Leave empty for default' : 'Default: ${param.defaultValue}');
-                      final labelSuffix = param.unit == null || param.unit!.isEmpty ? '' : ' (${param.unit})';
-                      widgets.add(
-                        TextFormField(
-                          controller: controller,
-                          enabled: !_isBackupRunning,
-                          keyboardType: keyboardType,
-                          decoration: InputDecoration(labelText: '${param.label}$labelSuffix', helperText: helperText, prefixIcon: const Icon(Icons.tune_outlined), border: const OutlineInputBorder()),
-                        ),
-                      );
-                    }
-                    widgets.add(const SizedBox(height: 16));
-                  }
-                  return widgets;
-                }(),
+                Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        initialValue: _selectedBackupDestinationId,
+                        decoration: const InputDecoration(labelText: 'Destination', prefixIcon: Icon(Icons.cloud_queue_outlined), border: OutlineInputBorder()),
+                        items: _enabledDestinations().map((destination) => DropdownMenuItem<String>(value: destination.id, child: Text('${destination.name} (${destination.driverId})'))).toList(),
+                        onChanged: _isBackupRunning
+                            ? null
+                            : (value) {
+                                _updateUi(() {
+                                  _selectedBackupDestinationId = value;
+                                });
+                              },
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    OutlinedButton(onPressed: _isBackupRunning ? null : _openDestinationEditor, child: const Text('Manage')),
+                  ],
+                ),
+                const SizedBox(height: 16),
                 if (_servers.isEmpty)
                   Text('Add a server first to view its VMs.', style: Theme.of(context).textTheme.bodyMedium)
                 else ...[

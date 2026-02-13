@@ -28,7 +28,7 @@ Key modules under `lib/agent`:
 
 ### Backup
 
-1. API call: `POST /servers/{id}/backup` (optional `driverId` in body to override the driver for this job only, plus optional `driverParams` map for driver-specific parameters).
+1. API call: `POST /servers/{id}/backup` (preferred: `destinationId` in body to select one configured destination; legacy `driverId` + `driverParams` are still accepted for compatibility).
 2. `AgentHttpServer` creates a job and calls `_startBackupJob`.
 3. `BackupAgent.runVmBackup` orchestrates the flow:
    - Validate state and start timers.
@@ -207,15 +207,16 @@ Endpoints include:
 - `GET /health`: liveness and native SFTP availability.
 - `GET /drivers`: driver capabilities.
 - `GET /config`, `POST /config`: settings.
+- `POST /config` persists settings immediately and performs server refresh/listener restart in the background.
 - `POST /ntfyme/test`: send a test Ntfy me notification using the configured token.
 - `GET /servers/{id}/vms`: VM inventory.
-- `POST /servers/{id}/backup`: start backup job (supports optional `driverId` in the request body).
-- `POST /servers/{id}/restore/start`: start restore job (supports optional `driverId` in the request body).
+- `POST /servers/{id}/backup`: start backup job (supports `destinationId`; legacy `driverId` is still accepted).
+- `POST /servers/{id}/restore/start`: start restore job (supports `destinationId`; legacy `driverId` is still accepted).
 - `POST /restore/sanity`: validate manifests/blobs.
 - `GET /jobs`, `GET /jobs/{id}`: job status.
 - `POST /jobs/{id}/cancel`: cancel jobs.
 - `GET /events`: SSE stream.
-- `GET /restore/entries`: list restore candidates. Optional query `driverId` selects a specific storage driver.
+- `GET /restore/entries`: list restore candidates. Optional query `destinationId` selects a specific destination (or `driverId` for legacy driver-based filtering).
 
 ## Drivers
 
@@ -223,7 +224,7 @@ Three drivers are present:
 
 - `FilesystemBackupDriver`: stores manifests and blobs on disk.
 - `GdriveBackupDriver`: stores manifests and blobs in Google Drive (with a local cache).
-- `SftpBackupDriver`: stores manifests and blobs on an SFTP server (configured via `backup.sftp` in `agent.yaml`).
+- `SftpBackupDriver`: stores manifests and blobs on an SFTP server (configured per destination in `destinations[*].params`).
 - `DummyBackupDriver`: discards writes and simulates ~20 MB/s write throughput (useful for testing backpressure).
 
 Both implement the same `BackupDriver` interface.
@@ -271,15 +272,14 @@ The agent supports optional native SFTP via FFI:
 - Encrypted values are stored as `sshPasswordEnc` and decrypted into memory on load.
 - Ntfy me notifications are sent by the agent when backup/restore jobs finish (success or failure).
 - The agent posts JSON to `https://ntfyme.net/msg` with topic `virtbackup-job`.
-- `driver` is always included and contains the driver label.
-- `push_msg` is formatted as `<msg> on <driver label>`.
+- `destination` is always included and contains the destination label.
+- `push_msg` is formatted as `<msg> on <destination label>`.
 - `size` is included for backup jobs as a human-readable size (KiB/MiB/GiB).
 - Set `ntfymeToken` in agent settings to enable notifications; when empty, notifications are skipped.
 - The GUI can store multiple agent addresses and switch between them.
 - For `127.0.0.1`, the GUI always uses the local `agent.token` file; other agents require a token entered in the GUI (token is mandatory).
-- Google Drive OAuth client config is loaded from `etc/google_oauth_client.json` next to the executable or from `etc/google_oauth_client.json` under the current working directory (installed app client; the agent requires `client_secret` for the Drive driver).
-- Google Drive OAuth refresh/access tokens are stored in `agent.yaml` as encrypted values under `backup.gdrive` (`accessTokenEnc`, `refreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.
-- SFTP password is stored in `agent.yaml` as an encrypted value under `backup.sftp` (`passwordEnc`) using the same AES-GCM key derivation as SSH passwords.
+- Google Drive OAuth refresh/access tokens are stored encrypted in destination params (`destinations[*].params.accessTokenEnc`, `destinations[*].params.refreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.
+- SFTP password is stored encrypted in destination params (`destinations[*].params.passwordEnc`) using the same AES-GCM key derivation as SSH passwords.
 - The Google Drive storage driver (`driverId: gdrive`) stores data as individual blob files using the same directory layout as the filesystem driver.
 - All Google Drive API calls retry up to 5 times with exponential backoff starting at 2 seconds; each retry recreates the HTTP client connection, and a persistent failure aborts the backup with a clean error.
 - Log records are routed by source: `agent` writes to `VirtBackup/logs/agent.log` and `gui` writes to `VirtBackup/logs/gui.log` under the configured backup base path.
@@ -293,6 +293,8 @@ The agent supports optional native SFTP via FFI:
 - Google Drive HTTP calls are logged as operation records with timestamp, action (`mkdir`, `list`, `upload`, `download`, `move`, `trash`, `auth.refresh`), status, duration, and request details.
 - Google Drive upload HTTP clients are leased from a bounded pool so upload retries/concurrency cannot fan out into unbounded concurrent connections.
 - Google Drive folder creation is guarded by a local folder lock and checks for existing folders before creating; when duplicate folder names are detected, the driver performs a strict merge into a primary folder and fails the operation if duplicates cannot be fully resolved.
-- The filesystem backup path is configured via `backup.base_path` and the app creates and uses a `VirtBackup` folder inside that path.
-- The Google Drive root folder is configured via `backup.gdrive.rootPath` (default `/`), and the app creates a `VirtBackup` folder inside that path.
-- The SFTP base path is configured via `backup.sftp.basePath` (example `/Backup`), and the app creates and uses a `VirtBackup` folder inside that path.
+- Storage destinations are configured at root-level `destinations` in `agent.yaml` (not under `backup`), each with its own `id`, `driverId`, and `params`.
+- Destination `id: filesystem` is mandatory, always enabled, and cannot be removed.
+- `backup.base_path` is deprecated; `destinations[id=filesystem].params.path` is the source of truth and is what gets persisted.
+- Backup uses `backupDestinationId` to pick the active destination.
+- `restoreDestinationId` is reserved for restore destination selection; legacy restore paths can still use driver-based selection.

@@ -279,6 +279,7 @@ class AppSettingsStore {
   }
 
   void _encryptGdriveTokensInMap(Map<String, dynamic> data, String token) {
+    _encryptDestinationGdriveTokens(data, token);
     final backup = data['backup'];
     if (backup is! Map) {
       return;
@@ -305,6 +306,7 @@ class AppSettingsStore {
   }
 
   void _decryptGdriveTokensInMap(Map<String, dynamic> data, String? token) {
+    _decryptDestinationGdriveTokens(data, token);
     final backup = data['backup'];
     if (backup is! Map) {
       return;
@@ -329,6 +331,7 @@ class AppSettingsStore {
   }
 
   void _encryptSftpPasswordInMap(Map<String, dynamic> data, String token) {
+    _encryptDestinationSftpPasswords(data, token);
     final backup = data['backup'];
     if (backup is! Map) {
       return;
@@ -347,6 +350,7 @@ class AppSettingsStore {
   }
 
   void _decryptSftpPasswordInMap(Map<String, dynamic> data, String? token) {
+    _decryptDestinationSftpPasswords(data, token);
     final backup = data['backup'];
     if (backup is! Map) {
       return;
@@ -362,6 +366,121 @@ class AppSettingsStore {
     }
     if (sftp['password'] == null) {
       sftp['password'] = '';
+    }
+  }
+
+  void _encryptDestinationGdriveTokens(Map<String, dynamic> data, String token) {
+    final destinations = data['destinations'];
+    if (destinations is! List) {
+      return;
+    }
+    for (final entry in destinations) {
+      if (entry is! Map) {
+        continue;
+      }
+      if ((entry['driverId'] ?? '').toString().trim() != 'gdrive') {
+        continue;
+      }
+      final params = entry['params'];
+      if (params is! Map) {
+        continue;
+      }
+      final accessToken = params['accessToken']?.toString() ?? '';
+      if (accessToken.isNotEmpty) {
+        params['accessTokenEnc'] = _encryptPassword(accessToken, token);
+        params['accessToken'] = '';
+      } else {
+        params.remove('accessTokenEnc');
+      }
+      final refreshToken = params['refreshToken']?.toString() ?? '';
+      if (refreshToken.isNotEmpty) {
+        params['refreshTokenEnc'] = _encryptPassword(refreshToken, token);
+        params['refreshToken'] = '';
+      } else {
+        params.remove('refreshTokenEnc');
+      }
+    }
+  }
+
+  void _decryptDestinationGdriveTokens(Map<String, dynamic> data, String? token) {
+    final destinations = data['destinations'];
+    if (destinations is! List) {
+      return;
+    }
+    for (final entry in destinations) {
+      if (entry is! Map) {
+        continue;
+      }
+      if ((entry['driverId'] ?? '').toString().trim() != 'gdrive') {
+        continue;
+      }
+      final params = entry['params'];
+      if (params is! Map) {
+        continue;
+      }
+      final accessEnc = params['accessTokenEnc']?.toString();
+      if (accessEnc != null && accessEnc.isNotEmpty) {
+        params['accessToken'] = (token == null || token.isEmpty) ? '' : _decryptPassword(accessEnc, token);
+      } else if (params['accessToken'] == null) {
+        params['accessToken'] = '';
+      }
+      final refreshEnc = params['refreshTokenEnc']?.toString();
+      if (refreshEnc != null && refreshEnc.isNotEmpty) {
+        params['refreshToken'] = (token == null || token.isEmpty) ? '' : _decryptPassword(refreshEnc, token);
+      } else if (params['refreshToken'] == null) {
+        params['refreshToken'] = '';
+      }
+    }
+  }
+
+  void _encryptDestinationSftpPasswords(Map<String, dynamic> data, String token) {
+    final destinations = data['destinations'];
+    if (destinations is! List) {
+      return;
+    }
+    for (final entry in destinations) {
+      if (entry is! Map) {
+        continue;
+      }
+      if ((entry['driverId'] ?? '').toString().trim() != 'sftp') {
+        continue;
+      }
+      final params = entry['params'];
+      if (params is! Map) {
+        continue;
+      }
+      final password = params['password']?.toString() ?? '';
+      if (password.isEmpty) {
+        params.remove('passwordEnc');
+      } else {
+        params['passwordEnc'] = _encryptPassword(password, token);
+        params['password'] = '';
+      }
+    }
+  }
+
+  void _decryptDestinationSftpPasswords(Map<String, dynamic> data, String? token) {
+    final destinations = data['destinations'];
+    if (destinations is! List) {
+      return;
+    }
+    for (final entry in destinations) {
+      if (entry is! Map) {
+        continue;
+      }
+      if ((entry['driverId'] ?? '').toString().trim() != 'sftp') {
+        continue;
+      }
+      final params = entry['params'];
+      if (params is! Map) {
+        continue;
+      }
+      final enc = params['passwordEnc']?.toString();
+      if (enc != null && enc.isNotEmpty) {
+        params['password'] = (token == null || token.isEmpty) ? '' : _decryptPassword(enc, token);
+      } else if (params['password'] == null) {
+        params['password'] = '';
+      }
     }
   }
 

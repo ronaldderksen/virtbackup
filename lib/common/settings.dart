@@ -1,9 +1,15 @@
 import 'models.dart';
 
 class AppSettings {
+  static const String filesystemDestinationId = 'filesystem';
+  static const String filesystemDestinationName = 'Filesystem';
+
   AppSettings({
     required this.backupPath,
     required this.logLevel,
+    required this.destinations,
+    required this.backupDestinationId,
+    required this.restoreDestinationId,
     required this.backupDriverId,
     required this.sftpHost,
     required this.sftpPort,
@@ -27,6 +33,9 @@ class AppSettings {
 
   final String backupPath;
   final String logLevel;
+  final List<BackupDestination> destinations;
+  final String? backupDestinationId;
+  final String? restoreDestinationId;
   final String backupDriverId;
   final String sftpHost;
   final int sftpPort;
@@ -50,6 +59,9 @@ class AppSettings {
   AppSettings copyWith({
     String? backupPath,
     String? logLevel,
+    List<BackupDestination>? destinations,
+    String? backupDestinationId,
+    String? restoreDestinationId,
     String? backupDriverId,
     String? sftpHost,
     int? sftpPort,
@@ -73,6 +85,9 @@ class AppSettings {
     return AppSettings(
       backupPath: backupPath ?? this.backupPath,
       logLevel: logLevel ?? this.logLevel,
+      destinations: destinations ?? this.destinations,
+      backupDestinationId: backupDestinationId ?? this.backupDestinationId,
+      restoreDestinationId: restoreDestinationId ?? this.restoreDestinationId,
       backupDriverId: backupDriverId ?? this.backupDriverId,
       sftpHost: sftpHost ?? this.sftpHost,
       sftpPort: sftpPort ?? this.sftpPort,
@@ -97,20 +112,10 @@ class AppSettings {
 
   Map<String, dynamic> toMap() {
     return {
-      'backup': {
-        'driverId': backupDriverId,
-        'base_path': backupPath,
-        'gdrive': {
-          'scope': gdriveScope,
-          'rootPath': gdriveRootPath,
-          'accessToken': gdriveAccessToken,
-          'refreshToken': gdriveRefreshToken,
-          'accountEmail': gdriveAccountEmail,
-          'expiresAt': _encodeDateTime(gdriveExpiresAt),
-        },
-        'sftp': {'host': sftpHost, 'port': sftpPort, 'username': sftpUsername, 'password': sftpPassword, 'basePath': sftpBasePath},
-      },
       'log_level': logLevel,
+      'destinations': destinations.map((destination) => destination.toMap()).toList(),
+      'backupDestinationId': backupDestinationId,
+      'restoreDestinationId': restoreDestinationId,
       'connectionVerified': connectionVerified,
       'hashblocksLimitBufferMb': hashblocksLimitBufferMb,
       'dummyDriverTmpWrites': dummyDriverTmpWrites,
@@ -122,9 +127,13 @@ class AppSettings {
   }
 
   factory AppSettings.fromMap(Map<String, dynamic> json) {
-    final backup = json['backup'] is Map ? Map<String, dynamic>.from(json['backup'] as Map) : const <String, dynamic>{};
-    final gdrive = backup['gdrive'] is Map ? Map<String, dynamic>.from(backup['gdrive'] as Map) : const <String, dynamic>{};
-    final sftp = backup['sftp'] is Map ? Map<String, dynamic>.from(backup['sftp'] as Map) : const <String, dynamic>{};
+    final destinations = _ensureFilesystemDestination(_parseDestinations(json));
+    final resolvedBackupPath = _filesystemPathFromDestinations(destinations);
+    final backupDestinationId = json['backupDestinationId']?.toString().trim();
+    final restoreDestinationId = json['restoreDestinationId']?.toString().trim();
+    final selectedBackupDestination = _resolveDestination(destinations: destinations, requestedId: backupDestinationId);
+    final selectedSftp = _resolveDestinationByDriver(destinations, 'sftp');
+    final selectedGdrive = _resolveDestinationByDriver(destinations, 'gdrive');
 
     final serversJson = json['servers'];
     final servers = <ServerConfig>[];
@@ -136,24 +145,27 @@ class AppSettings {
       }
     }
     return AppSettings(
-      backupPath: (backup['base_path'] ?? '').toString(),
+      backupPath: resolvedBackupPath,
       logLevel: ((json['log_level'] ?? '').toString().trim().isEmpty ? 'console' : json['log_level'].toString().trim()),
-      backupDriverId: (backup['driverId'] ?? 'filesystem').toString(),
+      destinations: destinations,
+      backupDestinationId: backupDestinationId == null || backupDestinationId.isEmpty ? selectedBackupDestination?.id : backupDestinationId,
+      restoreDestinationId: restoreDestinationId == null || restoreDestinationId.isEmpty ? null : restoreDestinationId,
+      backupDriverId: selectedBackupDestination?.driverId.isNotEmpty == true ? selectedBackupDestination!.driverId : 'filesystem',
       connectionVerified: json['connectionVerified'] == true,
       hashblocksLimitBufferMb: _parseHashblocksLimitBufferMb(json['hashblocksLimitBufferMb']),
       dummyDriverTmpWrites: json['dummyDriverTmpWrites'] == true,
       ntfymeToken: (json['ntfymeToken'] ?? '').toString(),
-      gdriveScope: (gdrive['scope'] ?? 'https://www.googleapis.com/auth/drive.file').toString(),
-      gdriveRootPath: (gdrive['rootPath'] ?? '/').toString(),
-      gdriveAccessToken: (gdrive['accessToken'] ?? '').toString(),
-      gdriveRefreshToken: (gdrive['refreshToken'] ?? '').toString(),
-      gdriveAccountEmail: (gdrive['accountEmail'] ?? '').toString(),
-      gdriveExpiresAt: _parseDateTime(gdrive['expiresAt']),
-      sftpHost: (sftp['host'] ?? '').toString(),
-      sftpPort: _parsePort(sftp['port']),
-      sftpUsername: (sftp['username'] ?? '').toString(),
-      sftpPassword: (sftp['password'] ?? '').toString(),
-      sftpBasePath: (sftp['basePath'] ?? '').toString(),
+      gdriveScope: (selectedGdrive?.params['scope'] ?? 'https://www.googleapis.com/auth/drive.file').toString(),
+      gdriveRootPath: (selectedGdrive?.params['rootPath'] ?? '/').toString(),
+      gdriveAccessToken: (selectedGdrive?.params['accessToken'] ?? '').toString(),
+      gdriveRefreshToken: (selectedGdrive?.params['refreshToken'] ?? '').toString(),
+      gdriveAccountEmail: (selectedGdrive?.params['accountEmail'] ?? '').toString(),
+      gdriveExpiresAt: _parseDateTime(selectedGdrive?.params['expiresAt']),
+      sftpHost: (selectedSftp?.params['host'] ?? '').toString(),
+      sftpPort: _parsePort(selectedSftp?.params['port']),
+      sftpUsername: (selectedSftp?.params['username'] ?? '').toString(),
+      sftpPassword: (selectedSftp?.params['password'] ?? '').toString(),
+      sftpBasePath: (selectedSftp?.params['basePath'] ?? '').toString(),
       selectedServerId: json['selectedServerId']?.toString(),
       listenAll: json['listenAll'] == true,
       servers: servers,
@@ -163,6 +175,9 @@ class AppSettings {
   factory AppSettings.empty() => AppSettings(
     backupPath: '',
     logLevel: 'console',
+    destinations: const <BackupDestination>[],
+    backupDestinationId: null,
+    restoreDestinationId: null,
     backupDriverId: 'filesystem',
     sftpHost: '',
     sftpPort: 22,
@@ -184,6 +199,98 @@ class AppSettings {
     listenAll: true,
   );
 
+  static List<BackupDestination> _parseDestinations(Map<String, dynamic> json) {
+    final raw = json['destinations'];
+    final destinations = <BackupDestination>[];
+    if (raw is List) {
+      for (final entry in raw) {
+        if (entry is! Map) {
+          continue;
+        }
+        final parsed = BackupDestination.fromMap(Map<String, dynamic>.from(entry));
+        if (parsed.id.trim().isEmpty || parsed.driverId.trim().isEmpty) {
+          continue;
+        }
+        destinations.add(parsed);
+      }
+    }
+    return destinations;
+  }
+
+  static BackupDestination? _resolveDestination({required List<BackupDestination> destinations, required String? requestedId}) {
+    if (destinations.isEmpty) {
+      return null;
+    }
+    final requested = requestedId?.trim() ?? '';
+    if (requested.isNotEmpty) {
+      for (final destination in destinations) {
+        if (destination.id == requested) {
+          return destination;
+        }
+      }
+    }
+    for (final destination in destinations) {
+      if (destination.enabled) {
+        return destination;
+      }
+    }
+    return destinations.first;
+  }
+
+  static BackupDestination? _resolveDestinationByDriver(List<BackupDestination> destinations, String driverId) {
+    for (final destination in destinations) {
+      if (destination.driverId == driverId) {
+        return destination;
+      }
+    }
+    return null;
+  }
+
+  static List<BackupDestination> _ensureFilesystemDestination(List<BackupDestination> input) {
+    final destinations = List<BackupDestination>.from(input);
+    var filesystemIndex = -1;
+    String? existingPath;
+    for (var index = 0; index < destinations.length; index++) {
+      final entry = destinations[index];
+      if (entry.id == filesystemDestinationId) {
+        filesystemIndex = index;
+        final value = entry.params['path']?.toString().trim();
+        if (value != null && value.isNotEmpty) {
+          existingPath = value;
+        }
+        break;
+      }
+    }
+    final normalizedPath = existingPath ?? '';
+    final filesystemDestination = BackupDestination(
+      id: filesystemDestinationId,
+      name: filesystemDestinationName,
+      driverId: 'filesystem',
+      enabled: true,
+      params: <String, dynamic>{'path': normalizedPath},
+    );
+    if (filesystemIndex >= 0) {
+      destinations[filesystemIndex] = filesystemDestination;
+    } else {
+      destinations.insert(0, filesystemDestination);
+    }
+    return destinations;
+  }
+
+  static String _filesystemPathFromDestinations(List<BackupDestination> destinations) {
+    for (final destination in destinations) {
+      if (destination.id != filesystemDestinationId) {
+        continue;
+      }
+      final path = destination.params['path']?.toString().trim();
+      if (path != null) {
+        return path;
+      }
+      return '';
+    }
+    return '';
+  }
+
   static int _parseHashblocksLimitBufferMb(Object? value) {
     final parsed = value is num ? value.toInt() : int.tryParse(value?.toString() ?? '');
     if (parsed == null || parsed <= 0) {
@@ -198,13 +305,6 @@ class AppSettings {
       return 22;
     }
     return parsed;
-  }
-
-  static String? _encodeDateTime(DateTime? value) {
-    if (value == null) {
-      return null;
-    }
-    return value.toUtc().toIso8601String();
   }
 
   static DateTime? _parseDateTime(Object? value) {
@@ -224,5 +324,9 @@ class AppSettings {
       return null;
     }
     return DateTime.tryParse(text);
+  }
+
+  static DateTime? parseDateTimeOrNull(Object? value) {
+    return _parseDateTime(value);
   }
 }

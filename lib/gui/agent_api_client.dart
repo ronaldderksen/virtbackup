@@ -194,8 +194,8 @@ class AgentApiClient {
     return decoded is Map && decoded['success'] == true;
   }
 
-  Future<AgentJobStart> startBackup(String serverId, String vmName, {Map<String, dynamic>? driverParams}) async {
-    final payload = <String, dynamic>{'vmName': vmName};
+  Future<AgentJobStart> startBackup(String serverId, String vmName, {required String destinationId, Map<String, dynamic>? driverParams}) async {
+    final payload = <String, dynamic>{'vmName': vmName, 'destinationId': destinationId};
     if (driverParams != null && driverParams.isNotEmpty) {
       payload['driverParams'] = driverParams;
     }

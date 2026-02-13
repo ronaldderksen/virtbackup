@@ -106,6 +106,32 @@ class BackupDriverInfo {
   }
 }
 
+class BackupDestination {
+  BackupDestination({required this.id, required this.name, required this.driverId, required this.enabled, required this.params});
+
+  final String id;
+  final String name;
+  final String driverId;
+  final bool enabled;
+  final Map<String, dynamic> params;
+
+  Map<String, dynamic> toMap() {
+    return {'id': id, 'name': name, 'driverId': driverId, 'enabled': enabled, 'params': params};
+  }
+
+  factory BackupDestination.fromMap(Map<String, dynamic> json) {
+    final paramsRaw = json['params'];
+    final params = paramsRaw is Map ? Map<String, dynamic>.from(paramsRaw) : <String, dynamic>{};
+    return BackupDestination(
+      id: (json['id'] ?? '').toString(),
+      name: (json['name'] ?? '').toString(),
+      driverId: (json['driverId'] ?? '').toString(),
+      enabled: json['enabled'] != false,
+      params: params,
+    );
+  }
+}
+
 class ServerConfig {
   ServerConfig({
     required this.id,

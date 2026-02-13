@@ -41,33 +41,13 @@ extension _BackupServerSetupBackupService on _BackupServerSetupScreenState {
       _showSnackBarInfo('Set a Backup base path in Settings first.');
       return;
     }
-    final driverParams = <String, dynamic>{};
-    for (final param in _selectedDriverParams()) {
-      if (param.type == DriverParamType.boolean) {
-        driverParams[param.key] = _driverParamBoolValue(_backupDriverId, param);
-        continue;
-      }
-      final controller = _driverParamController(_backupDriverId, param);
-      final rawText = controller.text.trim();
-      if (rawText.isEmpty) {
-        if (param.defaultValue != null) {
-          driverParams[param.key] = param.defaultValue;
-        }
-        continue;
-      }
-      if (param.type == DriverParamType.number) {
-        final parsed = double.tryParse(rawText);
-        if (parsed == null) {
-          _showSnackBarError('Enter a valid value for ${param.label}.');
-          return;
-        }
-        driverParams[param.key] = parsed;
-        continue;
-      }
-      driverParams[param.key] = rawText;
+    final destinationId = _selectedBackupDestinationId?.trim() ?? '';
+    if (destinationId.isEmpty) {
+      _showSnackBarError('Select a destination first.');
+      return;
     }
     try {
-      final start = await _agentApiClient.startBackup(server.id, vm.name, driverParams: driverParams.isEmpty ? null : driverParams);
+      final start = await _agentApiClient.startBackup(server.id, vm.name, destinationId: destinationId);
       _startBackupJobPolling(start.jobId);
     } catch (error) {
       _showSnackBarError('Backup failed: $error');

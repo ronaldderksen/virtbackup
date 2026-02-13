@@ -62,6 +62,30 @@ Response: array of available storage drivers and their capabilities/params.
 Response:
 ```json
 {
+  "destinations":[
+    {
+      "id":"dest_filesystem_1739440000000000",
+      "name":"Local filesystem",
+      "driverId":"filesystem",
+      "enabled":true,
+      "params":{"path":"/var"}
+    },
+    {
+      "id":"dest_sftp_1739440000000001",
+      "name":"Remote SFTP",
+      "driverId":"sftp",
+      "enabled":true,
+      "params":{
+        "host":"my-sftp.example.com",
+        "port":22,
+        "username":"backup",
+        "password":"",
+        "basePath":"/Backup"
+      }
+    }
+  ],
+  "backupDestinationId":"dest_filesystem_1739440000000000",
+  "restoreDestinationId":null,
   "backup":{
     "driverId":"filesystem",
     "base_path":"/path/to/backups",
@@ -265,16 +289,15 @@ Body:
 ```json
 {
   "vmName":"my-vm",
-  "driverId":"filesystem",
-  "driverParams":{},
+  "destinationId":"dest_filesystem_1739440000000000",
   "fresh":false
 }
 ```
 
 Notes:
-- The agent uses `backup.base_path` from config and will create and use a `VirtBackup` folder inside that path.
-- `driverId` overrides the configured default for this job only.
-- `driverParams` are driver-specific parameters defined by `GET /drivers`.
+- `destinationId` selects one configured destination from root-level `destinations`.
+- For backward compatibility, `driverId` and `driverParams` are still accepted when present.
+- The filesystem destination path is resolved from `destinations[id=filesystem].params.path`.
 - `fresh: true` triggers a driver "fresh cleanup" (driver-specific behavior). This is only executed when the agent runs in debug mode.
 
 Response:
@@ -330,6 +353,7 @@ Response:
 
 Optional query:
 - `driverId=<id>`: list entries for a specific driver (otherwise uses the configured default driver).
+- `destinationId=<id>`: list entries for a specific destination (takes precedence over `driverId`).
 
 Response (array):
 ```json
@@ -366,8 +390,12 @@ Response:
 
 Body:
 ```json
-{"xmlPath":"/path/to/backup.xml","decision":"overwrite|define","driverId":"filesystem"}
+{"xmlPath":"/path/to/backup.xml","decision":"overwrite|define","destinationId":"dest_filesystem_1739440000000000"}
 ```
+
+Notes:
+- `destinationId` selects one configured destination for restore reads.
+- For backward compatibility, `driverId` is still accepted.
 
 Response:
 ```json

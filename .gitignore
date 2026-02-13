@@ -51,4 +51,5 @@ app.*.map.json
 *.dylib
 
 # test tool
-tools/loop.sh
+/tools/loop.sh
+/TODO/
