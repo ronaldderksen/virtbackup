@@ -100,7 +100,7 @@ There are two paths:
 
 1. **Backup start**
    - Agent selects the driver and prepares the destination.
-   - The agent initializes an in-memory blob cache and performs an upfront scan (`shard1` -> `shard2` -> blob names) before hash checks start.
+   - The agent initializes an in-memory blob cache and performs an upfront scan (`shard` -> blob names) before hash checks start.
    - Manifests and folders are created as needed.
 
 2. **Hashblocks starts**
@@ -132,7 +132,7 @@ There are two paths:
    - LIMIT updates at half-buffer intervals to avoid excessive commands.
 
 7. **Driver writes**
-   - GDrive: blobs are uploaded as individual files under `blobs/<shard1>/<shard2>/`.
+   - GDrive: blobs are uploaded as individual files under `blobs/<shard>/`.
    - SFTP: operations use retry with exponential backoff (2s, 4s, 8s, ...) on transient failures.
    - Filesystem: blobs are written directly.
    - Dummy: blob existence is simulated per driver rules.

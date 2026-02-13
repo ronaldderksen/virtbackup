@@ -1348,10 +1348,8 @@ class _BlobDirectoryCache {
   final BlobDirectoryLister _driver;
   final Future<void> Function(String hash) createShard;
 
-  Set<String>? _shard1Names;
-  Future<Set<String>>? _shard1InFlight;
-  final Map<String, Set<String>> _shard2NamesByShard1 = {};
-  final Map<String, Future<Set<String>>> _shard2InFlight = {};
+  Set<String>? _shardNames;
+  Future<Set<String>>? _shardsInFlight;
   final Map<String, Set<String>> _blobNamesByShardKey = {};
   final Map<String, Future<Set<String>>> _blobNamesInFlight = {};
   final Map<String, Future<void>> _shardCreateInFlight = {};
@@ -1359,7 +1357,7 @@ class _BlobDirectoryCache {
   final List<Completer<void>> _readyWaiters = <Completer<void>>[];
 
   Future<void> initialize() async {
-    await _loadShard1();
+    await _loadShards();
   }
 
   bool isShardReady(String shardKey) {
@@ -1373,26 +1371,16 @@ class _BlobDirectoryCache {
   }
 
   Future<bool> blobExists(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return false;
     }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    final shardKey = '$shard1$shard2';
-    final shard1Names = _shard1Names;
-    if (shard1Names == null) {
+    final shardKey = hash.substring(0, 2);
+    final shardNames = _shardNames;
+    if (shardNames == null) {
       unawaited(prefetchHash(hash));
       return false;
     }
-    if (!shard1Names.contains(shard1)) {
-      return false;
-    }
-    final shard2Names = _shard2NamesByShard1[shard1];
-    if (shard2Names == null) {
-      unawaited(prefetchHash(hash));
-      return false;
-    }
-    if (!shard2Names.contains(shard2)) {
+    if (!shardNames.contains(shardKey)) {
       return false;
     }
     final blobNames = _blobNamesByShardKey[shardKey];
@@ -1405,105 +1393,71 @@ class _BlobDirectoryCache {
   }
 
   Future<void> prefetchHash(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return;
     }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    final shardKey = '$shard1$shard2';
-    final shard1Names = await _loadShard1();
-    if (!shard1Names.contains(shard1)) {
-      await _ensureShardCreated(hash: hash, shard1: shard1, shard2: shard2, shardKey: shardKey);
+    final shardKey = hash.substring(0, 2);
+    final shardNames = await _loadShards();
+    if (!shardNames.contains(shardKey)) {
+      await _ensureShardCreated(hash: hash, shardKey: shardKey);
       return;
     }
-    final shard2Names = await _loadShard2(shard1);
-    if (!shard2Names.contains(shard2)) {
-      await _ensureShardCreated(hash: hash, shard1: shard1, shard2: shard2, shardKey: shardKey);
-      return;
-    }
-    await _loadBlobNames(shard1, shard2);
+    await _loadBlobNames(shardKey);
     _markShardReady(shardKey);
   }
 
   void markHashKnown(String hash) {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return;
     }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    final shardKey = '$shard1$shard2';
-    (_shard1Names ??= <String>{}).add(shard1);
-    _shard2NamesByShard1.putIfAbsent(shard1, () => <String>{}).add(shard2);
+    final shardKey = hash.substring(0, 2);
+    (_shardNames ??= <String>{}).add(shardKey);
     _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{}).add(hash);
     _markShardReady(shardKey);
   }
 
-  Future<Set<String>> _loadShard1() async {
-    final cached = _shard1Names;
+  Future<Set<String>> _loadShards() async {
+    final cached = _shardNames;
     if (cached != null) {
       return cached;
     }
-    final inFlight = _shard1InFlight;
+    final inFlight = _shardsInFlight;
     if (inFlight != null) {
       return inFlight;
     }
-    final future = _driver.listBlobShard1();
-    _shard1InFlight = future;
+    final future = _driver.listBlobShards();
+    _shardsInFlight = future;
     try {
       final names = await future;
-      _shard1Names = names;
+      _shardNames = names;
       return names;
     } finally {
-      _shard1InFlight = null;
+      _shardsInFlight = null;
     }
   }
 
-  Future<Set<String>> _loadShard2(String shard1) async {
-    final cached = _shard2NamesByShard1[shard1];
+  Future<Set<String>> _loadBlobNames(String shardKey) async {
+    final cached = _blobNamesByShardKey[shardKey];
     if (cached != null) {
       return cached;
     }
-    final inFlight = _shard2InFlight[shard1];
+    final inFlight = _blobNamesInFlight[shardKey];
     if (inFlight != null) {
       return inFlight;
     }
-    final future = _driver.listBlobShard2(shard1);
-    _shard2InFlight[shard1] = future;
+    final future = _driver.listBlobNames(shardKey);
+    _blobNamesInFlight[shardKey] = future;
     try {
       final names = await future;
-      _shard2NamesByShard1[shard1] = names;
-      for (final shard2 in names) {
-        final shardKey = '$shard1$shard2';
-        _markShardReady(shardKey);
-      }
+      _blobNamesByShardKey[shardKey] = names;
+      _markShardReady(shardKey);
       return names;
     } finally {
-      _shard2InFlight.remove(shard1);
+      _blobNamesInFlight.remove(shardKey);
     }
   }
 
-  Future<Set<String>> _loadBlobNames(String shard1, String shard2) async {
-    final key = '$shard1$shard2';
-    final cached = _blobNamesByShardKey[key];
-    if (cached != null) {
-      return cached;
-    }
-    final inFlight = _blobNamesInFlight[key];
-    if (inFlight != null) {
-      return inFlight;
-    }
-    final future = _driver.listBlobNames(shard1, shard2);
-    _blobNamesInFlight[key] = future;
-    try {
-      final names = await future;
-      _blobNamesByShardKey[key] = names;
-      return names;
-    } finally {
-      _blobNamesInFlight.remove(key);
-    }
-  }
-
-  Future<void> _ensureShardCreated({required String hash, required String shard1, required String shard2, required String shardKey}) async {
+  Future<void> _ensureShardCreated({required String hash, required String shardKey}) async {
     final existing = _shardCreateInFlight[shardKey];
     if (existing != null) {
       await existing;
@@ -1511,8 +1465,7 @@ class _BlobDirectoryCache {
     }
     final createFuture = () async {
       await createShard(hash);
-      (_shard1Names ??= <String>{}).add(shard1);
-      _shard2NamesByShard1.putIfAbsent(shard1, () => <String>{}).add(shard2);
+      (_shardNames ??= <String>{}).add(shardKey);
       _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{});
       _markShardReady(shardKey);
     }();

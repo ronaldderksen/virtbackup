@@ -12,7 +12,7 @@ Status: implemented. This document describes the dedup storage and manifest form
 - Block size: **1 MiB** (`1024 * 1024` bytes).
 - Hash: SHA-256 over the raw block bytes.
 - Blob filename: hex SHA-256.
-- Directory sharding: `blobs/ab/cd/<hash>` where `ab=hash[0..1]` and `cd=hash[2..3]`.
+- Directory sharding: `blobs/ab/<hash>` where `ab=hash[0..1]`.
 - Zero blocks are not stored as blobs; they are recorded as `ZERO` runs in the manifest.
 
 ## Storage layout (filesystem driver)
@@ -21,7 +21,7 @@ The filesystem driver uses `backup.base_path` as its base path and creates and u
 backup.base_path/
   VirtBackup/
     blobs/
-      ab/cd/<sha256>
+      ab/<sha256>
     manifests/
       <serverId>/
         <vmName>/
@@ -32,7 +32,7 @@ backup.base_path/
     tmp/
 ```
 
-The Google Drive driver uses the same logical layout (manifests + `blobs/ab/cd/<hash>`), but syncs to Drive and keeps a local cache.
+The Google Drive driver uses the same logical layout (manifests + `blobs/ab/<hash>`), but syncs to Drive and keeps a local cache.
 
 ## Manifest format (text, gzipped)
 One manifest is written per disk and stored as `.manifest.gz`.
@@ -75,7 +75,7 @@ There are two paths:
 1. The agent resolves the correct `*.manifest.gz` per disk.
 2. The manifest is read; for each block:
    - `ZERO` means "write zero bytes" for the block range.
-   - A hash means "read blob `blobs/ab/cd/<hash>` and write it to the output".
+   - A hash means "read blob `blobs/ab/<hash>` and write it to the output".
 3. The last (tail) block length can be smaller than 1 MiB based on `file_size`.
 
 ## Chain metadata (optional)

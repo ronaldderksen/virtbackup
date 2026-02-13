@@ -287,8 +287,8 @@ class _WriterWorker {
   }
 
   String _shardKeyForHash(String hash) {
-    if (hash.length >= 4) {
-      return hash.substring(0, 4);
+    if (hash.length >= 2) {
+      return hash.substring(0, 2);
     }
     return hash;
   }

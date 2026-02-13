@@ -15,7 +15,7 @@ class _BlobCacheWorker {
   var _inFlightTasks = 0;
 
   void enqueue(String hash) {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return;
     }
     _queue.add(hash);

@@ -149,16 +149,15 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   File blobFile(String hash) {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return File('${blobsDir().path}${Platform.pathSeparator}$hash');
     }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    return File('${blobsDir().path}${Platform.pathSeparator}$shard1${Platform.pathSeparator}$shard2${Platform.pathSeparator}$hash');
+    final shard = hash.substring(0, 2);
+    return File('${blobsDir().path}${Platform.pathSeparator}$shard${Platform.pathSeparator}$hash');
   }
 
   @override
-  Future<Set<String>> listBlobShard1() async {
+  Future<Set<String>> listBlobShards() async {
     return _withSftp('list blobs', (sftp) async {
       final entries = await sftp.listdir(_remoteBlobsRoot());
       final names = <String>{};
@@ -177,28 +176,9 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   }
 
   @override
-  Future<Set<String>> listBlobShard2(String shard1) async {
-    return _withSftp('list blobs/$shard1', (sftp) async {
-      final entries = await sftp.listdir(_remoteJoin(_remoteBlobsRoot(), shard1));
-      final names = <String>{};
-      for (final entry in entries) {
-        final name = entry.filename;
-        if (name == '.' || name == '..') {
-          continue;
-        }
-        if (!entry.attr.isDirectory) {
-          continue;
-        }
-        names.add(name);
-      }
-      return names;
-    });
-  }
-
-  @override
-  Future<Set<String>> listBlobNames(String shard1, String shard2) async {
-    return _withSftp('list blobs/$shard1/$shard2', (sftp) async {
-      final entries = await sftp.listdir(_remoteJoin(_remoteBlobsRoot(), shard1, shard2));
+  Future<Set<String>> listBlobNames(String shard) async {
+    return _withSftp('list blobs/$shard', (sftp) async {
+      final entries = await sftp.listdir(_remoteJoin(_remoteBlobsRoot(), shard));
       final names = <String>{};
       for (final entry in entries) {
         final name = entry.filename;
@@ -322,16 +302,14 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Future<void> ensureBlobDir(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return;
     }
-    final shardKey = hash.substring(0, 4);
+    final shardKey = hash.substring(0, 2);
     if (_knownRemoteShardKeys.contains(shardKey)) {
       return;
     }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    final remoteDir = _remoteJoin(_remoteBlobsRoot(), shard1, shard2);
+    final remoteDir = _remoteJoin(_remoteBlobsRoot(), shardKey);
     await _withSftp('ensure blob dir:$remoteDir', (sftp) async {
       await _ensureRemoteDirBlind(sftp, remoteDir);
     });
@@ -340,7 +318,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Future<void> writeBlob(String hash, List<int> bytes) async {
-    if (hash.length < 4 || bytes.isEmpty) {
+    if (hash.length < 2 || bytes.isEmpty) {
       return;
     }
     if (!_remoteBlobUploadEnabled) {
@@ -357,7 +335,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Future<bool> blobExists(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return false;
     }
     return _remoteBlobNames.contains(hash);
@@ -370,7 +348,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Future<int?> blobLength(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return null;
     }
     final local = blobFile(hash);
@@ -398,7 +376,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Stream<List<int>> openBlobStream(String hash, {int? length}) async* {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return;
     }
     final local = blobFile(hash);
@@ -422,7 +400,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Future<List<int>?> readBlobBytes(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return null;
     }
     final local = blobFile(hash);
@@ -918,7 +896,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   String _remoteManifestFolder(String serverId, String vmName) => _remoteJoin(_remoteManifestsRoot(), serverId, vmName);
   String _remoteDiskManifestFolder(String serverId, String vmName, String diskId) => _remoteJoin(_remoteManifestsRoot(), serverId, vmName, diskId);
 
-  String _remoteBlobDir(String hash) => _remoteJoin(_remoteBlobsRoot(), hash.substring(0, 2), hash.substring(2, 4));
+  String _remoteBlobDir(String hash) => _remoteJoin(_remoteBlobsRoot(), hash.substring(0, 2));
   String _remoteBlobPath(String hash) => _remoteJoin(_remoteBlobDir(hash), hash);
 
   Future<void> _commitSmallRemoteFile({required File localFile, required String remotePath}) async {

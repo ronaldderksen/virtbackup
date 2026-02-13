@@ -91,9 +91,8 @@ abstract class RemoteBlobDriver {
 }
 
 abstract class BlobDirectoryLister {
-  Future<Set<String>> listBlobShard1();
-  Future<Set<String>> listBlobShard2(String shard1);
-  Future<Set<String>> listBlobNames(String shard1, String shard2);
+  Future<Set<String>> listBlobShards();
+  Future<Set<String>> listBlobNames(String shard);
 }
 
 class DriverFileWrite {

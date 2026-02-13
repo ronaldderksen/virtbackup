@@ -103,10 +103,10 @@ class _ExistsWorker {
   }
 
   Future<void> _waitForShardReady(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return;
     }
-    final shardKey = hash.substring(0, 4);
+    final shardKey = hash.substring(0, 2);
     while (!isShardReady(shardKey)) {
       ensureNotCanceled();
       if (waitForAnyShardReady != null) {
