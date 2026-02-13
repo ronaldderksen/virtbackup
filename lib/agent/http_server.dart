@@ -597,6 +597,10 @@ class AgentHttpServer {
           _json(request, 400, {'error': 'destination not found or unavailable'});
           return;
         }
+        final effectiveFreshRequested = freshRequested && !resolvedDestination.destination.disableFresh;
+        if (freshRequested && !effectiveFreshRequested) {
+          _hostLog('backup: fresh requested but disabled for destination "${resolvedDestination.destination.name}" (id=${resolvedDestination.destination.id}); continuing without fresh');
+        }
         final resolvedDriverId = requestedDriver.isNotEmpty ? requestedDriver : resolvedDestination.driverId;
         final backupPath = resolvedDestination.backupPath;
         final registry = _buildDriverRegistry(backupPath: backupPath, settings: resolvedDestination.settings);
@@ -620,7 +624,7 @@ class AgentHttpServer {
           driverIdOverride: resolvedDriverId,
           driverParams: driverParams.isNotEmpty ? driverParams : resolvedDestination.driverParams,
           destination: resolvedDestination,
-          freshRequested: freshRequested,
+          freshRequested: effectiveFreshRequested,
         );
         return;
       }
@@ -1487,16 +1491,6 @@ class AgentHttpServer {
         unawaited(_applyAgentSettings(updated, reason: 'worker', forceRestartSshListeners: false));
         return;
       }
-      if (type == 'log') {
-        final level = payload['level']?.toString() ?? 'info';
-        final messageText = payload['message']?.toString() ?? '';
-        if (level == 'error') {
-          _hostLogError('Worker error', messageText, StackTrace.current);
-        } else {
-          _hostLog(messageText);
-        }
-        return;
-      }
       if (type == 'result') {
         final result = BackupAgentResult.fromMap(Map<String, dynamic>.from(payload['result'] as Map));
         final state = result.canceled ? AgentJobState.canceled : (result.success ? AgentJobState.success : AgentJobState.failure);
@@ -1832,16 +1826,6 @@ class AgentHttpServer {
       if (type == 'settings') {
         final updated = AppSettings.fromMap(Map<String, dynamic>.from(payload['settings'] as Map));
         unawaited(_applyAgentSettings(updated, reason: 'worker', forceRestartSshListeners: false));
-        return;
-      }
-      if (type == 'log') {
-        final level = payload['level']?.toString() ?? 'info';
-        final messageText = payload['message']?.toString() ?? '';
-        if (level == 'error') {
-          _hostLogError('Worker error', messageText, StackTrace.current);
-        } else {
-          _hostLog(messageText);
-        }
         return;
       }
       if (type == 'result') {

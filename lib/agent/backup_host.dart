@@ -12,16 +12,11 @@ import 'package:virtbackup/agent/logging_config.dart';
 import 'package:virtbackup/common/models.dart';
 
 class BackupAgentHost {
-  BackupAgentHost({LogInfo? onInfo, LogError? onError, bool logSshOutput = false, bool includeTimestamp = true})
-    : _onInfo = onInfo,
-      _onError = onError,
-      _logSshOutput = logSshOutput,
-      _includeTimestamp = includeTimestamp;
+  BackupAgentHost({LogInfo? onInfo, LogError? onError, bool logSshOutput = false}) : _onInfo = onInfo, _onError = onError, _logSshOutput = logSshOutput;
 
   final LogInfo? _onInfo;
   final LogError? _onError;
   final bool _logSshOutput;
-  final bool _includeTimestamp;
   int _sftpRangeBytesSinceLog = 0;
   DateTime _sftpRangeLastLog = DateTime.now();
   int _sftpDownloadBytesSinceLog = 0;
@@ -292,12 +287,7 @@ class BackupAgentHost {
   }
 
   void _logInfo(String message) {
-    if (_includeTimestamp) {
-      final timestamp = DateTime.now().toIso8601String();
-      _onInfo?.call('$timestamp $message');
-    } else {
-      _onInfo?.call(message);
-    }
+    _onInfo?.call(message);
   }
 
   void _logError(String message, Object error, StackTrace stackTrace) {

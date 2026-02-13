@@ -56,7 +56,6 @@ abstract class BackupDriver {
   // No exists/list/stat/mkdir checks are allowed in this write path.
   // Existence/dir decisions are owned by agent-side cache/workers.
   Future<void> writeBlob(String hash, List<int> bytes);
-  Future<bool> blobExists(String hash);
   String backupCompletedMessage(String manifestsPath);
 
   Directory manifestsDir(String serverId, String vmName);
@@ -91,9 +90,8 @@ abstract class RemoteBlobDriver {
 }
 
 abstract class BlobDirectoryLister {
-  Future<Set<String>> listBlobShard1();
-  Future<Set<String>> listBlobShard2(String shard1);
-  Future<Set<String>> listBlobNames(String shard1, String shard2);
+  Future<Set<String>> listBlobShards();
+  Future<Set<String>> listBlobNames(String shard);
 }
 
 class DriverFileWrite {

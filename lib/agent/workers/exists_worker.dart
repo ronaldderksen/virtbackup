@@ -4,8 +4,6 @@ class _ExistsWorker {
   _ExistsWorker({
     required this.maxMissingRun,
     required this.blobExists,
-    required this.isShardReady,
-    this.waitForAnyShardReady,
     required this.enqueueMissingRun,
     required this.handleBytes,
     required this.registerProgressBlocks,
@@ -17,8 +15,6 @@ class _ExistsWorker {
 
   final int maxMissingRun;
   final Future<bool> Function(String hash) blobExists;
-  final bool Function(String shardKey) isShardReady;
-  final Future<void> Function()? waitForAnyShardReady;
   final void Function(int startIndex, List<String> hashes) enqueueMissingRun;
   final void Function(int bytes) handleBytes;
   final void Function(int blocks) registerProgressBlocks;
@@ -65,7 +61,6 @@ class _ExistsWorker {
         while (_queue.isNotEmpty) {
           ensureNotCanceled();
           final entry = _queue.removeAt(0);
-          await _waitForShardReady(entry.hash);
           final exists = await blobExists(entry.hash);
           if (exists) {
             onExisting();
@@ -99,21 +94,6 @@ class _ExistsWorker {
       _error = error;
       _errorStack = stackTrace;
       logInfo('exists worker failed: $error');
-    }
-  }
-
-  Future<void> _waitForShardReady(String hash) async {
-    if (hash.length < 4) {
-      return;
-    }
-    final shardKey = hash.substring(0, 4);
-    while (!isShardReady(shardKey)) {
-      ensureNotCanceled();
-      if (waitForAnyShardReady != null) {
-        await Future.any<void>(<Future<void>>[waitForAnyShardReady!(), Future<void>.delayed(const Duration(milliseconds: 100))]);
-      } else {
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-      }
     }
   }
 

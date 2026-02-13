@@ -75,6 +75,7 @@ Response:
       "name":"Remote SFTP",
       "driverId":"sftp",
       "enabled":true,
+      "disableFresh":true,
       "params":{
         "host":"my-sftp.example.com",
         "port":22,
@@ -299,6 +300,7 @@ Notes:
 - For backward compatibility, `driverId` and `driverParams` are still accepted when present.
 - The filesystem destination path is resolved from `destinations[id=filesystem].params.path`.
 - `fresh: true` triggers a driver "fresh cleanup" (driver-specific behavior). This is only executed when the agent runs in debug mode.
+- `disableFresh: true` on a destination forces `fresh` off for that destination; the backup still starts and the agent logs that `fresh` was ignored.
 
 Response:
 ```json

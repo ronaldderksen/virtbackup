@@ -82,12 +82,11 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
 
   @override
   File blobFile(String hash) {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return File('${blobsDir().path}${Platform.pathSeparator}$hash');
     }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    return File('${blobsDir().path}${Platform.pathSeparator}$shard1${Platform.pathSeparator}$shard2${Platform.pathSeparator}$hash');
+    final shard = hash.substring(0, 2);
+    return File('${blobsDir().path}${Platform.pathSeparator}$shard${Platform.pathSeparator}$hash');
   }
 
   @override
@@ -165,12 +164,6 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
     final vmChainFile = File('${vmDir.path}${Platform.pathSeparator}${timestamp}__$diskId.chain');
     if (vmChainFile.existsSync()) {
       return vmChainFile;
-    }
-    if (diskDir != null) {
-      final legacy = File('${diskDir.path}${Platform.pathSeparator}$timestamp.chain');
-      if (legacy.existsSync()) {
-        return legacy;
-      }
     }
     return null;
   }
@@ -304,7 +297,7 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
 
   @override
   Future<void> writeBlob(String hash, List<int> bytes) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return;
     }
     await _simulateWriteDelay(bytes.length);
@@ -357,26 +350,12 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
   }
 
   @override
-  Future<bool> blobExists(String hash) async {
-    if (hash.length < 4) {
-      return false;
-    }
-    // Existence is decided by the agent-side blob cache.
-    return false;
-  }
-
-  @override
-  Future<Set<String>> listBlobShard1() async {
+  Future<Set<String>> listBlobShards() async {
     return <String>{};
   }
 
   @override
-  Future<Set<String>> listBlobShard2(String shard1) async {
-    return <String>{};
-  }
-
-  @override
-  Future<Set<String>> listBlobNames(String shard1, String shard2) async {
+  Future<Set<String>> listBlobNames(String shard) async {
     return <String>{};
   }
 

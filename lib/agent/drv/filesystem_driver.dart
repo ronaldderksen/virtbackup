@@ -76,16 +76,15 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
 
   @override
   File blobFile(String hash) {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return File('${blobsDir().path}${Platform.pathSeparator}$hash');
     }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    return File('${blobsDir().path}${Platform.pathSeparator}$shard1${Platform.pathSeparator}$shard2${Platform.pathSeparator}$hash');
+    final shard = hash.substring(0, 2);
+    return File('${blobsDir().path}${Platform.pathSeparator}$shard${Platform.pathSeparator}$hash');
   }
 
   @override
-  Future<Set<String>> listBlobShard1() async {
+  Future<Set<String>> listBlobShards() async {
     final root = blobsDir();
     if (!await root.exists()) {
       return <String>{};
@@ -100,24 +99,8 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
   }
 
   @override
-  Future<Set<String>> listBlobShard2(String shard1) async {
-    final path = '${blobsDir().path}${Platform.pathSeparator}$shard1';
-    final dir = Directory(path);
-    if (!await dir.exists()) {
-      return <String>{};
-    }
-    final names = <String>{};
-    await for (final entity in dir.list(followLinks: false)) {
-      if (entity is Directory) {
-        names.add(baseName(entity.path));
-      }
-    }
-    return names;
-  }
-
-  @override
-  Future<Set<String>> listBlobNames(String shard1, String shard2) async {
-    final path = '${blobsDir().path}${Platform.pathSeparator}$shard1${Platform.pathSeparator}$shard2';
+  Future<Set<String>> listBlobNames(String shard) async {
+    final path = '${blobsDir().path}${Platform.pathSeparator}$shard';
     final dir = Directory(path);
     if (!await dir.exists()) {
       return <String>{};
@@ -211,12 +194,6 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
     final vmChainFile = File('${vmDir.path}${Platform.pathSeparator}${timestamp}__$diskId.chain');
     if (vmChainFile.existsSync()) {
       return vmChainFile;
-    }
-    if (diskDir != null) {
-      final legacy = File('${diskDir.path}${Platform.pathSeparator}$timestamp.chain');
-      if (legacy.existsSync()) {
-        return legacy;
-      }
     }
     return null;
   }
@@ -365,16 +342,17 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
 
   @override
   Future<void> ensureBlobDir(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return;
     }
-    final dir = blobFile(hash).parent;
+    final shardKey = hash.substring(0, 2);
+    final dir = Directory('${blobsDir().path}${Platform.pathSeparator}$shardKey');
     await dir.create(recursive: true);
   }
 
   @override
   Future<void> writeBlob(String hash, List<int> bytes) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return;
     }
     final blob = blobFile(hash);
@@ -388,12 +366,6 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
         await tempFile.delete();
       } catch (_) {}
     }
-  }
-
-  @override
-  Future<bool> blobExists(String hash) async {
-    // Existence is decided by the agent-side blob cache.
-    return false;
   }
 
   @override

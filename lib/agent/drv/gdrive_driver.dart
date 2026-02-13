@@ -12,10 +12,9 @@ import 'package:virtbackup/common/google_oauth_client.dart';
 import 'package:virtbackup/common/settings.dart';
 
 class GdrivePrefillStats {
-  const GdrivePrefillStats({required this.shard1Count, required this.shard2Count, required this.blobCount, required this.durationMs});
+  const GdrivePrefillStats({required this.shardCount, required this.blobCount, required this.durationMs});
 
-  final int shard1Count;
-  final int shard2Count;
+  final int shardCount;
   final int blobCount;
   final int durationMs;
 }
@@ -42,12 +41,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   final Map<String, String> _folderPathById = {};
   final Map<String, Future<String>> _folderInFlight = {};
   final Set<String> _folderChildrenLoaded = {};
-  final Map<String, String> _blobShardFolderIds = {};
-  final Map<String, String> _blobShard1FolderIds = {};
-  final Set<String> _blobShard1Names = {};
-  final Map<String, Set<String>> _blobShard2Names = {};
-  final Map<String, _DriveFileRef> _blobFiles = {};
-  final Set<String> _blobNames = {};
   final _NamedAsyncLock _folderLocks = _NamedAsyncLock();
   bool _agentLogConfigured = false;
   http.Client _client = IOClient(_createHttpClient());
@@ -87,10 +80,8 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   @override
   int get bufferedBytes => 0;
 
-  static const bool _cacheBlobsEnabled = true;
-  GdrivePrefillStats _prefillStats = const GdrivePrefillStats(shard1Count: 0, shard2Count: 0, blobCount: 0, durationMs: 0);
+  GdrivePrefillStats _prefillStats = const GdrivePrefillStats(shardCount: 0, blobCount: 0, durationMs: 0);
 
-  bool get cacheBlobsEnabled => _cacheBlobsEnabled;
   GdrivePrefillStats get prefillStats => _prefillStats;
 
   Future<GoogleOAuthInstalledClient> _ensureOAuthClient() async {
@@ -159,7 +150,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }
 
   @override
-  Future<Set<String>> listBlobShard1() async {
+  Future<Set<String>> listBlobShards() async {
     await _ensureBlobsRoot();
     final rootId = _blobsRootId;
     if (rootId == null || rootId.isEmpty) {
@@ -169,35 +160,17 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     final names = <String>{};
     for (final folder in folders) {
       names.add(folder.name);
-      _blobShard1FolderIds[folder.name] = folder.id;
     }
     return names;
   }
 
   @override
-  Future<Set<String>> listBlobShard2(String shard1) async {
-    final shard1Id = await _findFolderByPath(['blobs', shard1]);
-    if (shard1Id == null || shard1Id.isEmpty) {
+  Future<Set<String>> listBlobNames(String shard) async {
+    final shardId = await _findFolderByPath(['blobs', shard]);
+    if (shardId == null || shardId.isEmpty) {
       return <String>{};
     }
-    _blobShard1FolderIds[shard1] = shard1Id;
-    final folders = await _listChildFolders(shard1Id);
-    final names = <String>{};
-    for (final folder in folders) {
-      names.add(folder.name);
-      _blobShardFolderIds['$shard1${folder.name}'] = folder.id;
-    }
-    return names;
-  }
-
-  @override
-  Future<Set<String>> listBlobNames(String shard1, String shard2) async {
-    final shard2Id = await _findFolderByPath(['blobs', shard1, shard2]);
-    if (shard2Id == null || shard2Id.isEmpty) {
-      return <String>{};
-    }
-    _blobShardFolderIds['$shard1$shard2'] = shard2Id;
-    final files = await _listFilesRaw("mimeType!='$_driveFolderMime' and '$shard2Id' in parents and trashed=false", fields: 'nextPageToken,files(id,name,parents)');
+    final files = await _listFilesRaw("mimeType!='$_driveFolderMime' and '$shardId' in parents and trashed=false", fields: 'nextPageToken,files(id,name,parents)');
     final names = <String>{};
     for (final file in files) {
       if (file.name.endsWith('.inprogress')) {
@@ -295,93 +268,50 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     _folderChildrenLoaded.clear();
     _blobsRootId = null;
     _resolvedDriveRootId = null;
-    _blobShardFolderIds.clear();
-    _blobShard1FolderIds.clear();
-    _blobShard1Names.clear();
-    _blobShard2Names.clear();
-    _blobNames.clear();
-    _blobFiles.clear();
-    _prefillStats = const GdrivePrefillStats(shard1Count: 0, shard2Count: 0, blobCount: 0, durationMs: 0);
+    _prefillStats = const GdrivePrefillStats(shardCount: 0, blobCount: 0, durationMs: 0);
     await _deleteDirIfExists(Directory('${_cacheRoot.path}${Platform.pathSeparator}manifests'));
     await _deleteDirIfExists(Directory('${_cacheRoot.path}${Platform.pathSeparator}blobs'));
   }
 
   @override
   Future<void> ensureBlobDir(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return;
     }
-    final shardKey = hash.substring(0, 4);
-    if (_blobShardFolderIds.containsKey(shardKey)) {
-      return;
-    }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    await _ensureBlobsRoot();
-    final rootId = _blobsRootId;
-    if (rootId == null || rootId.isEmpty) {
-      throw 'Missing blobs root for shard $shardKey';
-    }
-    final shard1Ref = _blobShard1FolderIds[shard1] ?? (await _createFolderBlind(rootId, shard1)).id;
-    _blobShard1FolderIds[shard1] = shard1Ref;
-    final shard1Path = _folderPathById[rootId] == null || _folderPathById[rootId]!.isEmpty ? shard1 : '${_folderPathById[rootId]}/$shard1';
-    _folderPathById[shard1Ref] = shard1Path;
-    final folderRef = await _createFolderBlind(shard1Ref, shard2);
-    _blobShardFolderIds[shardKey] = folderRef.id;
-    _folderPathById[folderRef.id] = '$shard1Path/$shard2';
-    _blobShard1Names.add(shard1);
-    _blobShard2Names.putIfAbsent(shard1, () => <String>{}).add(shard2);
+    final shardKey = hash.substring(0, 2);
+    await _ensureFolderByPath(['blobs', shardKey]);
   }
 
   @override
   Future<void> writeBlob(String hash, List<int> bytes) async {
-    if (hash.length < 4 || bytes.isEmpty) {
+    if (hash.length < 2 || bytes.isEmpty) {
       return;
     }
-    final shardKey = hash.substring(0, 4);
-    final parentId = _blobShardFolderIds[shardKey];
+    final shardKey = hash.substring(0, 2);
+    final parentId = await _findFolderByPath(['blobs', shardKey]);
     if (parentId == null || parentId.isEmpty) {
       throw 'Blob shard folder not ready for $shardKey';
     }
-    final ref = await _uploadSimple(name: hash, parentId: parentId, bytes: bytes, contentType: 'application/octet-stream');
-    if (_cacheBlobsEnabled) {
-      _blobNames.add(hash);
-      _blobFiles[hash] = ref;
-    }
-  }
-
-  @override
-  Future<bool> blobExists(String hash) async {
-    if (hash.length < 4) {
-      return false;
-    }
-    return _blobNames.contains(hash);
+    await _uploadSimple(name: hash, parentId: parentId, bytes: bytes, contentType: 'application/octet-stream');
   }
 
   @override
   Future<bool> blobExistsRemote(String hash) async {
-    return blobExists(hash);
+    if (hash.length < 2) {
+      return false;
+    }
+    return (await _findBlobByHash(hash, includeSize: false)) != null;
   }
 
   @override
   Future<int?> blobLength(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return null;
-    }
-    final local = blobFile(hash);
-    if (await local.exists()) {
-      return local.length();
-    }
-    final cached = _blobFiles[hash];
-    if (cached != null) {
-      return cached.size;
     }
     final found = await _findBlobByHash(hash, includeSize: true);
     if (found == null) {
       return null;
     }
-    _blobNames.add(hash);
-    _blobFiles[hash] = found;
     return found.size;
   }
 
@@ -396,42 +326,25 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   @override
   Future<List<int>?> readBlobBytes(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return null;
     }
-    final cacheFile = blobFile(hash);
-    if (await cacheFile.exists()) {
-      return cacheFile.readAsBytes();
-    }
-    _DriveFileRef? fileRef = _blobFiles[hash];
-    fileRef ??= await _findBlobByHash(hash, includeSize: true);
+    final fileRef = await _findBlobByHash(hash, includeSize: true);
     if (fileRef == null) {
       return null;
     }
-    _blobNames.add(hash);
-    _blobFiles[hash] = fileRef;
-    final bytes = await _downloadFile(fileRef.id);
-    if (!await cacheFile.exists()) {
-      await cacheFile.parent.create(recursive: true);
-      await cacheFile.writeAsBytes(bytes, flush: true);
-    }
-    return bytes;
+    return _downloadFile(fileRef.id);
   }
 
   Future<_DriveFileRef?> _findBlobByHash(String hash, {bool includeSize = false}) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return null;
     }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    final shardKey = '$shard1$shard2';
-    final folderId = _blobShardFolderIds[shardKey] ?? await _findFolderByPath(['blobs', shard1, shard2]);
+    final shardKey = hash.substring(0, 2);
+    final folderId = await _findFolderByPath(['blobs', shardKey]);
     if (folderId == null || folderId.isEmpty) {
       return null;
     }
-    _blobShardFolderIds[shardKey] = folderId;
-    _blobShard1Names.add(shard1);
-    _blobShard2Names.putIfAbsent(shard1, () => <String>{}).add(shard2);
     return _findFileByName(folderId, hash, includeSize: includeSize);
   }
 
@@ -557,12 +470,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     final vmChainFile = File('${vmDir.path}${Platform.pathSeparator}${timestamp}__$diskId.chain');
     if (vmChainFile.existsSync()) {
       return vmChainFile;
-    }
-    if (diskDir != null) {
-      final legacy = File('${diskDir.path}${Platform.pathSeparator}$timestamp.chain');
-      if (legacy.existsSync()) {
-        return legacy;
-      }
     }
     return null;
   }
@@ -902,31 +809,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       final created = _DriveFileRef(id: decoded['id'].toString(), name: name, parentId: parentId);
       final reconciled = await _findChildFolder(parentId, name);
       return reconciled ?? created;
-    });
-  }
-
-  Future<_DriveFileRef> _createFolderBlind(String parentId, String name) async {
-    return _withRetry('create folder blind "$name"', () async {
-      final token = await _ensureAccessToken();
-      final uri = Uri.parse('https://www.googleapis.com/drive/v3/files');
-      final body = jsonEncode({
-        'name': name,
-        'mimeType': _driveFolderMime,
-        'parents': [parentId],
-      });
-      final response = await _requestWithApiLog(
-        action: 'mkdir',
-        target: _folderDisplayPath(parentId, name),
-        detail: 'blind',
-        method: 'POST',
-        uri: uri,
-        send: () => _client.post(uri, headers: _authHeaders(token)..['Content-Type'] = 'application/json', body: body),
-      );
-      if (response.statusCode >= 300) {
-        throw 'Drive folder create failed: ${response.statusCode} ${response.body}';
-      }
-      final decoded = jsonDecode(response.body);
-      return _DriveFileRef(id: decoded['id'].toString(), name: name, parentId: parentId);
     });
   }
 
@@ -1282,12 +1164,11 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }
 
   String _blobCachePath(String hash) {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return '${blobsDir().path}${Platform.pathSeparator}$hash';
     }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    return '${blobsDir().path}${Platform.pathSeparator}$shard1${Platform.pathSeparator}$shard2${Platform.pathSeparator}$hash';
+    final shard = hash.substring(0, 2);
+    return '${blobsDir().path}${Platform.pathSeparator}$shard${Platform.pathSeparator}$hash';
   }
 
   _ServerVmLocation? _resolveServerVm(Directory vmDir) {

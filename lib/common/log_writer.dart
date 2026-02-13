@@ -31,7 +31,6 @@ class LogWriter {
       return;
     }
     _pathsBySource[normalizedSource] = normalizedPath;
-    await Directory(File(normalizedPath).parent.path).create(recursive: true);
   }
 
   static void configureSourceLevel({required String source, required String level}) {
@@ -45,16 +44,18 @@ class LogWriter {
 
   static Future<void> truncateSource(String source) async {
     final path = _resolvePath(source);
+    final allowParentCreate = _allowParentCreate(source);
     final completer = Completer<void>();
-    _queue.add(_LogOp(path: path, line: '', truncate: true, rotate: false, completer: completer));
+    _queue.add(_LogOp(path: path, line: '', truncate: true, rotate: false, allowParentCreate: allowParentCreate, completer: completer));
     _ensureDrain();
     return completer.future;
   }
 
   static Future<void> rotateSource(String source) async {
     final path = _resolvePath(source);
+    final allowParentCreate = _allowParentCreate(source);
     final completer = Completer<void>();
-    _queue.add(_LogOp(path: path, line: '', truncate: false, rotate: true, completer: completer));
+    _queue.add(_LogOp(path: path, line: '', truncate: false, rotate: true, allowParentCreate: allowParentCreate, completer: completer));
     _ensureDrain();
     return completer.future;
   }
@@ -69,13 +70,14 @@ class LogWriter {
     if (!_shouldLog(source: source, messageLevel: normalizedLevel)) {
       return;
     }
-    if (normalizedLevel == _consoleLevel) {
-      stdout.writeln(trimmedMessage);
-    }
     final timestamp = _formatTimestamp(DateTime.now());
+    if (normalizedLevel == _consoleLevel) {
+      stdout.writeln('$timestamp $trimmedMessage');
+    }
     final line = '$timestamp level=$normalizedLevel message=${_sanitize(trimmedMessage)}';
+    final allowParentCreate = _allowParentCreate(source);
     final completer = Completer<void>();
-    _queue.add(_LogOp(path: _resolvePath(source), line: line, truncate: false, rotate: false, completer: completer));
+    _queue.add(_LogOp(path: _resolvePath(source), line: line, truncate: false, rotate: false, allowParentCreate: allowParentCreate, completer: completer));
     _ensureDrain();
     return completer.future;
   }
@@ -100,11 +102,7 @@ class LogWriter {
     final normalized = _normalizeLevel(level);
     return switch (normalized) {
       'console' => 0,
-      'info' => 1,
-      'warn' => 1,
-      'warning' => 1,
-      'error' => 1,
-      'debug' => 2,
+      'debug' => 1,
       _ => null,
     };
   }
@@ -113,8 +111,17 @@ class LogWriter {
     return source.trim().toLowerCase();
   }
 
+  static bool _allowParentCreate(String source) {
+    return _normalizeSource(source) != _guiSource;
+  }
+
   static String _normalizeLevel(String level) {
-    return level.trim().toLowerCase();
+    final normalized = level.trim().toLowerCase();
+    return switch (normalized) {
+      'debug' => 'debug',
+      'dbug' => 'debug',
+      _ => 'console',
+    };
   }
 
   static String _formatTimestamp(DateTime value) {
@@ -154,11 +161,11 @@ class LogWriter {
       final op = _queue.removeFirst();
       try {
         if (op.truncate) {
-          await _truncateLocked(op.path);
+          await _truncateLocked(op.path, allowParentCreate: op.allowParentCreate);
         } else if (op.rotate) {
-          await _rotateLocked(op.path);
+          await _rotateLocked(op.path, allowParentCreate: op.allowParentCreate);
         } else {
-          await _appendLocked(op.path, op.line);
+          await _appendLocked(op.path, op.line, allowParentCreate: op.allowParentCreate);
         }
         op.completer.complete();
       } catch (error, stackTrace) {
@@ -168,9 +175,13 @@ class LogWriter {
     _draining = false;
   }
 
-  static Future<void> _truncateLocked(String path) async {
+  static Future<void> _truncateLocked(String path, {required bool allowParentCreate}) async {
     final file = File(path);
-    await file.parent.create(recursive: true);
+    if (allowParentCreate) {
+      await file.parent.create(recursive: true);
+    } else if (!await file.parent.exists()) {
+      return;
+    }
     final raf = await file.open(mode: FileMode.write);
     try {
       await raf.lock(FileLock.exclusive);
@@ -184,9 +195,13 @@ class LogWriter {
     }
   }
 
-  static Future<void> _appendLocked(String path, String line) async {
+  static Future<void> _appendLocked(String path, String line, {required bool allowParentCreate}) async {
     final file = File(path);
-    await file.parent.create(recursive: true);
+    if (allowParentCreate) {
+      await file.parent.create(recursive: true);
+    } else if (!await file.parent.exists()) {
+      return;
+    }
     final raf = await file.open(mode: FileMode.append);
     try {
       await raf.lock(FileLock.exclusive);
@@ -202,9 +217,13 @@ class LogWriter {
     }
   }
 
-  static Future<void> _rotateLocked(String path) async {
+  static Future<void> _rotateLocked(String path, {required bool allowParentCreate}) async {
     final file = File(path);
-    await file.parent.create(recursive: true);
+    if (allowParentCreate) {
+      await file.parent.create(recursive: true);
+    } else if (!await file.parent.exists()) {
+      return;
+    }
     final rotated = File('$path.1');
     if (await rotated.exists()) {
       await rotated.delete();
@@ -217,11 +236,12 @@ class LogWriter {
 }
 
 class _LogOp {
-  _LogOp({required this.path, required this.line, required this.truncate, required this.rotate, required this.completer});
+  _LogOp({required this.path, required this.line, required this.truncate, required this.rotate, required this.allowParentCreate, required this.completer});
 
   final String path;
   final String line;
   final bool truncate;
   final bool rotate;
+  final bool allowParentCreate;
   final Completer<void> completer;
 }

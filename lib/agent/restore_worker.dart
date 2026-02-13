@@ -9,6 +9,7 @@ import 'package:virtbackup/agent/drv/dummy_driver.dart';
 import 'package:virtbackup/agent/drv/filesystem_driver.dart';
 import 'package:virtbackup/agent/drv/gdrive_driver.dart';
 import 'package:virtbackup/agent/drv/sftp_driver.dart';
+import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/models.dart';
 import 'package:virtbackup/common/settings.dart';
 
@@ -18,7 +19,6 @@ const String _typeCancel = 'cancel';
 const String _typeStatus = 'status';
 const String _typeResult = 'result';
 const String _typeSettings = 'settings';
-const String _typeLog = 'log';
 const String _typeContext = 'context';
 
 void restoreWorkerMain(Map<String, dynamic> init) {
@@ -102,11 +102,23 @@ void restoreWorkerMain(Map<String, dynamic> init) {
 
     final settings = AppSettings.fromMap(settingsMap);
     final server = ServerConfig.fromMap(serverMap);
+    var logConfigured = false;
+
+    Future<void> writeAgentLog(String level, String message) async {
+      if (!logConfigured) {
+        await LogWriter.configureSourcePath(
+          source: 'agent',
+          path: LogWriter.defaultPathForSource('agent', basePath: settings.backupPath.trim()),
+        );
+        LogWriter.configureSourceLevel(source: 'agent', level: settings.logLevel);
+        logConfigured = true;
+      }
+      await LogWriter.log(source: 'agent', level: level, message: message);
+    }
 
     final host = BackupAgentHost(
-      onInfo: (message) => mainPort.send({'type': _typeLog, 'level': 'info', 'message': message}),
-      onError: (message, error, stackTrace) => mainPort.send({'type': _typeLog, 'level': 'error', 'message': '$message $error\n$stackTrace'}),
-      includeTimestamp: false,
+      onInfo: (message) => unawaited(writeAgentLog('console', message)),
+      onError: (message, error, stackTrace) => unawaited(writeAgentLog('console', '$message $error\n$stackTrace')),
     );
 
     BackupDriver buildDriver() {
@@ -115,7 +127,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         'gdrive': () => GdriveBackupDriver(
           settings: settings,
           persistSettings: (updated) async => mainPort.send({'type': _typeSettings, 'settings': updated.toMap()}),
-          logInfo: (message) => mainPort.send({'type': _typeLog, 'level': 'info', 'message': message}),
+          logInfo: (message) => unawaited(writeAgentLog('console', message)),
         ),
         'filesystem': () => FilesystemBackupDriver(backupPath.trim()),
         'sftp': () => SftpBackupDriver(settings: settings),
@@ -352,13 +364,13 @@ void restoreWorkerMain(Map<String, dynamic> init) {
             final remoteSize = await host.runSshCommand(server, 'stat -c %s "$remotePath"');
             final remoteValue = int.tryParse(remoteSize.stdout.trim());
             if (remoteValue == target.fileSize) {
-              mainPort.send({'type': _typeLog, 'level': 'info', 'message': 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=$remoteValue'});
+              await writeAgentLog('console', 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=$remoteValue');
             } else {
-              mainPort.send({'type': _typeLog, 'level': 'error', 'message': 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=${remoteSize.stdout.trim()}'});
+              await writeAgentLog('console', 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=${remoteSize.stdout.trim()}');
               throw 'restore size mismatch for ${target.diskBaseName}: expected ${target.fileSize}, got ${remoteSize.stdout.trim()}';
             }
           } catch (error, stackTrace) {
-            mainPort.send({'type': _typeLog, 'level': 'error', 'message': 'restore: size check failed for ${target.diskBaseName}: $error\\n$stackTrace'});
+            await writeAgentLog('console', 'restore: size check failed for ${target.diskBaseName}: $error\\n$stackTrace');
             throw 'restore size check failed for ${target.diskBaseName}: $error';
           }
         }
@@ -409,7 +421,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     } catch (error, stackTrace) {
       final isCanceled = error is _Canceled;
       if (!isCanceled) {
-        mainPort.send({'type': _typeLog, 'level': 'error', 'message': 'Restore failed: $error\n$stackTrace'});
+        await writeAgentLog('console', 'Restore failed: $error\n$stackTrace');
       }
       sendResult(
         AgentJobStatus(

@@ -14,7 +14,6 @@ class _SftpWorker {
     required this.markSftpRead,
     required this.registerProgressBlocks,
     required this.enqueueWriteBlock,
-    required this.waitForBackpressureClear,
     required this.ensureNotCanceled,
     required this.logInfo,
   });
@@ -31,7 +30,6 @@ class _SftpWorker {
   final void Function(int bytes) markSftpRead;
   final void Function(int blocks) registerProgressBlocks;
   final Future<void> Function(String hash, Uint8List bytes) enqueueWriteBlock;
-  final Future<void> Function() waitForBackpressureClear;
   final void Function() ensureNotCanceled;
   final void Function(String message) logInfo;
 
@@ -98,7 +96,6 @@ class _SftpWorker {
 
     while (bytesConsumed < rangeLength) {
       ensureNotCanceled();
-      await waitForBackpressureClear();
       final remaining = rangeLength - bytesConsumed;
       final chunkLength = remaining > maxRemoteReadBytes ? maxRemoteReadBytes : remaining;
       var bytesRead = 0;

@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
@@ -1389,11 +1388,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   }
 
   void _logInfo(String message) {
-    unawaited(LogWriter.log(source: 'gui', level: 'info', message: message).catchError((_) {}));
+    unawaited(LogWriter.log(source: 'gui', level: 'console', message: message).catchError((_) {}));
   }
 
   void _logError(String message, Object error, StackTrace stackTrace) {
-    unawaited(LogWriter.log(source: 'gui', level: 'error', message: '$message $error').catchError((_) {}));
+    unawaited(LogWriter.log(source: 'gui', level: 'console', message: '$message $error').catchError((_) {}));
     unawaited(LogWriter.log(source: 'gui', level: 'debug', message: stackTrace.toString()).catchError((_) {}));
   }
 
@@ -1663,6 +1662,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
           name: AppSettings.filesystemDestinationName,
           driverId: 'filesystem',
           enabled: true,
+          disableFresh: current.disableFresh,
           params: <String, dynamic>{'path': trimmedPath},
         );
         if (current.params['path']?.toString().trim() != trimmedPath) {
@@ -1953,6 +1953,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                   name: nameController.text.trim(),
                                   driverId: driverId,
                                   enabled: enabled,
+                                  disableFresh: existing?.disableFresh ?? false,
                                   params: destinationParams,
                                 ),
                               );
@@ -2268,25 +2269,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
     final fallbackName = _sshHostController.text.trim();
     _serverNameController.text = fallbackName.isEmpty ? 'Server' : fallbackName;
-  }
-
-  Future<void> _createBackupFolder() async {
-    final path = _backupPathController.text.trim();
-    if (path.isEmpty) {
-      _showSnackBarInfo('Enter a backup base path first.');
-      return;
-    }
-    try {
-      final directory = Directory(path);
-      await directory.create(recursive: true);
-      if (mounted) {
-        _showSnackBarInfo('Folder created at $path');
-      }
-    } catch (error) {
-      if (mounted) {
-        _showSnackBarError('Folder creation failed: $error');
-      }
-    }
   }
 
   Widget _buildRailItem({

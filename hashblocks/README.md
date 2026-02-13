@@ -38,6 +38,8 @@ Long ZERO runs may be emitted in chunks (e.g. `0-4095 -> ZERO`, `4096-8191 -> ZE
 
 `hashblocks` can be controlled via stdin while it is running:
 - `LIMIT <index>`: throttle reading/hashing so the tool will not advance past the given 0-based block index.
+  - Exception: when the current block at/near the limit is part of a ZERO run, reading may continue past `LIMIT`
+    until that ZERO run ends. This allows long ZERO ranges to be emitted quickly.
 - `STOP`: stop immediately (also triggered when stdin reaches EOF).
 
 This is used by the VirtBackup agent to apply backpressure (for example when the writer backlog grows).

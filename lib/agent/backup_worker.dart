@@ -9,6 +9,7 @@ import 'package:virtbackup/agent/drv/dummy_driver.dart';
 import 'package:virtbackup/agent/drv/filesystem_driver.dart';
 import 'package:virtbackup/agent/drv/gdrive_driver.dart';
 import 'package:virtbackup/agent/drv/sftp_driver.dart';
+import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/models.dart';
 import 'package:virtbackup/common/settings.dart';
 
@@ -18,7 +19,6 @@ const String _typeCancel = 'cancel';
 const String _typeProgress = 'progress';
 const String _typeResult = 'result';
 const String _typeSettings = 'settings';
-const String _typeLog = 'log';
 const bool _isDebug = !bool.fromEnvironment('dart.vm.product');
 
 Future<void> _deleteSharedBlobCacheIfNeeded(BackupAgentHost host, AppSettings settings, String driverId) async {
@@ -68,12 +68,21 @@ void backupWorkerMain(Map<String, dynamic> init) {
     final settings = AppSettings.fromMap(settingsMap);
     final server = ServerConfig.fromMap(serverMap);
     final vm = VmEntry.fromMap(vmMap);
+    var logConfigured = false;
 
-    final host = BackupAgentHost(
-      onInfo: (message) => mainPort.send({'type': _typeLog, 'level': 'info', 'message': message}),
-      onError: (message, error, stackTrace) => mainPort.send({'type': _typeLog, 'level': 'error', 'message': '$message $error'}),
-      includeTimestamp: false,
-    );
+    Future<void> writeAgentLog(String level, String message) async {
+      if (!logConfigured) {
+        await LogWriter.configureSourcePath(
+          source: 'agent',
+          path: LogWriter.defaultPathForSource('agent', basePath: settings.backupPath.trim()),
+        );
+        LogWriter.configureSourceLevel(source: 'agent', level: settings.logLevel);
+        logConfigured = true;
+      }
+      await LogWriter.log(source: 'agent', level: level, message: message);
+    }
+
+    final host = BackupAgentHost(onInfo: (message) => unawaited(writeAgentLog('console', message)), onError: (message, error, stackTrace) => unawaited(writeAgentLog('console', '$message $error')));
 
     BackupDriver buildDriver() {
       final factories = <String, BackupDriver Function(Map<String, dynamic>)>{
@@ -81,7 +90,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
         'gdrive': (_) => GdriveBackupDriver(
           settings: settings,
           persistSettings: (updated) async => mainPort.send({'type': _typeSettings, 'settings': updated.toMap()}),
-          logInfo: (message) => mainPort.send({'type': _typeLog, 'level': 'info', 'message': message}),
+          logInfo: (message) => unawaited(writeAgentLog('console', message)),
         ),
         'filesystem': (_) => FilesystemBackupDriver(backupPath.trim()),
         'sftp': (_) => SftpBackupDriver(settings: settings),
@@ -111,7 +120,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
       final result = await agent!.runVmBackup(server: server, vm: vm, driver: driver);
       mainPort.send({'type': _typeResult, 'jobId': jobId, 'result': result.toMap()});
     } catch (error, _) {
-      mainPort.send({'type': _typeLog, 'level': 'error', 'message': 'Backup worker failed: $error'});
+      await writeAgentLog('console', 'Backup worker failed: $error');
       mainPort.send({'type': _typeResult, 'jobId': jobId, 'result': BackupAgentResult(success: false, message: error.toString()).toMap()});
     }
   }
@@ -125,7 +134,6 @@ void backupWorkerMain(Map<String, dynamic> init) {
           await runBackup(payload);
         },
         (error, _) {
-          mainPort.send({'type': _typeLog, 'level': 'error', 'message': 'Backup worker unhandled error: $error'});
           mainPort.send({'type': _typeResult, 'jobId': payload['jobId']?.toString() ?? '', 'result': BackupAgentResult(success: false, message: error.toString()).toMap()});
         },
       );

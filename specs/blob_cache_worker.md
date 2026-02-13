@@ -10,17 +10,20 @@ The `blob_cache_worker` manages the blob directory cache during a backup run.
 
 ## Worker lifecycle
 1. At worker startup:
-- Perform an initial scan of `blobs` via the active driver.
+- Set `writeReady=false`.
+- Perform one top-level scan of `blobs` via the active driver (`00..ff` shards).
+- Determine missing shard directories and create them via the driver (max 256).
+- Set `writeReady=true` only after all create calls finished successfully.
 
 2. Then process the queue:
 - Process incoming items immediately.
 - The worker does not wait for other components; it only processes queue content.
 
 ## Cache behavior during processing
-For a hash like `aa/bb/cc...`:
+For a hash like `aa...`:
 - Scan `aa` only if `aa` is not already in the cache.
-- Scan `aa/bb` only if `aa/bb` is not already in the cache.
-- If later hashes with the same `aa` or `aa/bb` arrive, always use the cache.
+- Use the full `list blobs/aa` result as the source of truth for existing/missing in `aa`.
+- If later hashes with the same `aa` arrive, always use the cache.
 - Per backup run: scan a directory at most once, then never scan it again.
 
 ## Directory creation behavior
@@ -29,11 +32,12 @@ For a hash like `aa/bb/cc...`:
 - which directories already exist / were already created
 - which directories still need to be created
 
-## Shard-ready contract for writer
-- The writer asks: `is shard aa/bb ready?`
-- The answer is strictly `yes` or `no`.
-- `yes` is returned only when `aa` and `aa/bb` are present in the cache.
+## Writer dependency contract
+- Writer and blob cache are independent except for one signal: `writeReady`.
+- Writer waits only for `writeReady=true`.
+- No shard-ready dependency exists between writer and blob cache.
 
 ## Existing/Missing basis
 - Existing/missing is decided by a separate exists worker.
-- The exists worker waits for shard-ready (`aa/bb`) before checking `blobExists`.
+- Existing hashes are handled immediately and are not sent to SFTP or writer.
+- Only missing hashes are sent to SFTP and writer.

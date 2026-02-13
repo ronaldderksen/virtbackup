@@ -112,14 +112,27 @@ class AppSettings {
 
   Map<String, dynamic> toMap() {
     return {
+      'backupPath': backupPath,
       'log_level': logLevel,
       'destinations': destinations.map((destination) => destination.toMap()).toList(),
       'backupDestinationId': backupDestinationId,
       'restoreDestinationId': restoreDestinationId,
+      'backupDriverId': backupDriverId,
+      'sftpHost': sftpHost,
+      'sftpPort': sftpPort,
+      'sftpUsername': sftpUsername,
+      'sftpPassword': sftpPassword,
+      'sftpBasePath': sftpBasePath,
       'connectionVerified': connectionVerified,
       'hashblocksLimitBufferMb': hashblocksLimitBufferMb,
       'dummyDriverTmpWrites': dummyDriverTmpWrites,
       'ntfymeToken': ntfymeToken,
+      'gdriveScope': gdriveScope,
+      'gdriveRootPath': gdriveRootPath,
+      'gdriveAccessToken': gdriveAccessToken,
+      'gdriveRefreshToken': gdriveRefreshToken,
+      'gdriveAccountEmail': gdriveAccountEmail,
+      'gdriveExpiresAt': gdriveExpiresAt?.toUtc().toIso8601String(),
       'selectedServerId': selectedServerId,
       'listenAll': listenAll,
       'servers': servers.map((server) => server.toMap()).toList(),
@@ -134,6 +147,17 @@ class AppSettings {
     final selectedBackupDestination = _resolveDestination(destinations: destinations, requestedId: backupDestinationId);
     final selectedSftp = _resolveDestinationByDriver(destinations, 'sftp');
     final selectedGdrive = _resolveDestinationByDriver(destinations, 'gdrive');
+    final sftpHost = json['sftpHost']?.toString();
+    final sftpPort = json['sftpPort'];
+    final sftpUsername = json['sftpUsername']?.toString();
+    final sftpPassword = json['sftpPassword']?.toString();
+    final sftpBasePath = json['sftpBasePath']?.toString();
+    final gdriveScope = json['gdriveScope']?.toString();
+    final gdriveRootPath = json['gdriveRootPath']?.toString();
+    final gdriveAccessToken = json['gdriveAccessToken']?.toString();
+    final gdriveRefreshToken = json['gdriveRefreshToken']?.toString();
+    final gdriveAccountEmail = json['gdriveAccountEmail']?.toString();
+    final gdriveExpiresAt = _parseDateTime(json['gdriveExpiresAt']);
 
     final serversJson = json['servers'];
     final servers = <ServerConfig>[];
@@ -150,22 +174,24 @@ class AppSettings {
       destinations: destinations,
       backupDestinationId: backupDestinationId == null || backupDestinationId.isEmpty ? selectedBackupDestination?.id : backupDestinationId,
       restoreDestinationId: restoreDestinationId == null || restoreDestinationId.isEmpty ? null : restoreDestinationId,
-      backupDriverId: selectedBackupDestination?.driverId.isNotEmpty == true ? selectedBackupDestination!.driverId : 'filesystem',
+      backupDriverId: (json['backupDriverId']?.toString().trim().isNotEmpty ?? false)
+          ? json['backupDriverId'].toString().trim()
+          : (selectedBackupDestination?.driverId.isNotEmpty == true ? selectedBackupDestination!.driverId : 'filesystem'),
       connectionVerified: json['connectionVerified'] == true,
       hashblocksLimitBufferMb: _parseHashblocksLimitBufferMb(json['hashblocksLimitBufferMb']),
       dummyDriverTmpWrites: json['dummyDriverTmpWrites'] == true,
       ntfymeToken: (json['ntfymeToken'] ?? '').toString(),
-      gdriveScope: (selectedGdrive?.params['scope'] ?? 'https://www.googleapis.com/auth/drive.file').toString(),
-      gdriveRootPath: (selectedGdrive?.params['rootPath'] ?? '/').toString(),
-      gdriveAccessToken: (selectedGdrive?.params['accessToken'] ?? '').toString(),
-      gdriveRefreshToken: (selectedGdrive?.params['refreshToken'] ?? '').toString(),
-      gdriveAccountEmail: (selectedGdrive?.params['accountEmail'] ?? '').toString(),
-      gdriveExpiresAt: _parseDateTime(selectedGdrive?.params['expiresAt']),
-      sftpHost: (selectedSftp?.params['host'] ?? '').toString(),
-      sftpPort: _parsePort(selectedSftp?.params['port']),
-      sftpUsername: (selectedSftp?.params['username'] ?? '').toString(),
-      sftpPassword: (selectedSftp?.params['password'] ?? '').toString(),
-      sftpBasePath: (selectedSftp?.params['basePath'] ?? '').toString(),
+      gdriveScope: gdriveScope ?? (selectedGdrive?.params['scope'] ?? 'https://www.googleapis.com/auth/drive.file').toString(),
+      gdriveRootPath: gdriveRootPath ?? (selectedGdrive?.params['rootPath'] ?? '/').toString(),
+      gdriveAccessToken: gdriveAccessToken ?? (selectedGdrive?.params['accessToken'] ?? '').toString(),
+      gdriveRefreshToken: gdriveRefreshToken ?? (selectedGdrive?.params['refreshToken'] ?? '').toString(),
+      gdriveAccountEmail: gdriveAccountEmail ?? (selectedGdrive?.params['accountEmail'] ?? '').toString(),
+      gdriveExpiresAt: gdriveExpiresAt ?? _parseDateTime(selectedGdrive?.params['expiresAt']),
+      sftpHost: sftpHost ?? (selectedSftp?.params['host'] ?? '').toString(),
+      sftpPort: sftpPort == null ? _parsePort(selectedSftp?.params['port']) : _parsePort(sftpPort),
+      sftpUsername: sftpUsername ?? (selectedSftp?.params['username'] ?? '').toString(),
+      sftpPassword: sftpPassword ?? (selectedSftp?.params['password'] ?? '').toString(),
+      sftpBasePath: sftpBasePath ?? (selectedSftp?.params['basePath'] ?? '').toString(),
       selectedServerId: json['selectedServerId']?.toString(),
       listenAll: json['listenAll'] == true,
       servers: servers,
@@ -250,10 +276,12 @@ class AppSettings {
     final destinations = List<BackupDestination>.from(input);
     var filesystemIndex = -1;
     String? existingPath;
+    var existingDisableFresh = false;
     for (var index = 0; index < destinations.length; index++) {
       final entry = destinations[index];
       if (entry.id == filesystemDestinationId) {
         filesystemIndex = index;
+        existingDisableFresh = entry.disableFresh;
         final value = entry.params['path']?.toString().trim();
         if (value != null && value.isNotEmpty) {
           existingPath = value;
@@ -267,6 +295,7 @@ class AppSettings {
       name: filesystemDestinationName,
       driverId: 'filesystem',
       enabled: true,
+      disableFresh: existingDisableFresh,
       params: <String, dynamic>{'path': normalizedPath},
     );
     if (filesystemIndex >= 0) {

@@ -239,12 +239,9 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                     helperText: 'VirtBackup will create a "VirtBackup" folder inside this path.',
                     prefixIcon: Icon(Icons.folder_outlined),
                     suffixIcon: SizedBox(
-                      width: 96,
+                      width: 48,
                       child: Row(
-                        children: [
-                          IconButton(tooltip: 'Browse folders', onPressed: _pickBackupFolder, icon: const Icon(Icons.folder_open_outlined)),
-                          IconButton(tooltip: 'Create folder', onPressed: _createBackupFolder, icon: const Icon(Icons.create_new_folder_outlined)),
-                        ],
+                        children: [IconButton(tooltip: 'Browse folders', onPressed: _pickBackupFolder, icon: const Icon(Icons.folder_open_outlined))],
                       ),
                     ),
                     border: OutlineInputBorder(),

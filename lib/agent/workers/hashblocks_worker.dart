@@ -67,7 +67,6 @@ class _HashblocksWorker {
     handleHashblocksBytes(blockLength);
     enqueueExists(index, hash, blockLength);
     lastHashblocksIndex = index;
-    registerProgressBlocks(1);
   }
 
   Future<void> finishBatch() async {}

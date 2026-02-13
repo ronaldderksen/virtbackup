@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 import 'package:virtbackup/agent/logging_config.dart';
 import 'package:virtbackup/common/models.dart';
+import 'package:virtbackup/common/log_writer.dart';
 
 part 'backup_models.dart';
 part 'backup_types.dart';
@@ -64,9 +65,7 @@ class BackupAgent {
        _onProgress = onProgress,
        _onInfo = onInfo,
        _onError = onError,
-       _writerBacklogBytesLimit = writerBacklogBytesLimit ?? _defaultWriterBacklogBytesLimit,
-       _writerBacklogClearBytes = _calcBackpressureClearBytes(writerBacklogBytesLimit ?? _defaultWriterBacklogBytesLimit),
-       _hashblocksLimitBufferMb = hashblocksLimitBufferMb ?? _defaultHashblocksLimitBufferMb;
+       _writerBacklogBytesLimit = writerBacklogBytesLimit ?? _defaultWriterBacklogBytesLimit;
 
   final BackupAgentDependencies _dependencies;
   final BackupProgressListener _onProgress;
@@ -96,11 +95,8 @@ class BackupAgent {
   static const int _hashblocksRangeSizeBytes = 128 * 1024 * 1024;
   static const int _hashblocksRangeConcurrency = 4;
   static const int _defaultWriterBacklogBytesLimit = 4 * 1024 * 1024 * 1024;
-  static const int _defaultHashblocksLimitBufferMb = 1024;
   final Set<Future<void>> _inFlightWrites = {};
   final int _writerBacklogBytesLimit;
-  final int _writerBacklogClearBytes;
-  final int _hashblocksLimitBufferMb;
   _BlobDirectoryCache? _blobDirectoryCache;
   _BlobCacheWorker? _blobCacheWorker;
   Future<void>? _blobCacheWorkerFuture;
@@ -172,7 +168,7 @@ class BackupAgent {
       final serverFolderName = _dependencies.sanitizeFileName(server.id);
       await driver.ensureReady();
       final BlobDirectoryLister? blobLister = driver is BlobDirectoryLister ? driver as BlobDirectoryLister : null;
-      _blobDirectoryCache = blobLister == null ? null : _BlobDirectoryCache(driver: blobLister, createShard: (hash) => driver.ensureBlobDir(hash));
+      _blobDirectoryCache = blobLister == null ? null : _BlobDirectoryCache(driver: blobLister, createShard: (hash) => driver.ensureBlobDir(hash), logInfo: _logInfo);
       _startBlobCacheWorker();
       await driver.prepareBackup(serverFolderName, vmFolderName);
       final manifestsBase = driver.manifestsDir(serverFolderName, vmFolderName);
@@ -670,23 +666,6 @@ class BackupAgent {
     return 'backup: $trimmed';
   }
 
-  static int _calcBackpressureClearBytes(int limitBytes) {
-    const clearTarget = 2 * 1024 * 1024 * 1024;
-    if (limitBytes <= 0) {
-      return 0;
-    }
-    return min(limitBytes, clearTarget);
-  }
-
-  static int _calcLimitBufferBlocks(int bufferMb) {
-    if (bufferMb <= 0) {
-      return 0;
-    }
-    final bytes = bufferMb * 1024 * 1024;
-    final blocks = bytes ~/ _blockSize;
-    return max(1, blocks);
-  }
-
   Future<void> _writeDiskStreamToDedupStore({
     required BackupDriver driver,
     required String backupTimestamp,
@@ -873,12 +852,16 @@ class BackupAgent {
     Object? missingError;
     StackTrace? missingStack;
     HashblocksController? controller;
-    final bufferBlocks = _calcLimitBufferBlocks(_hashblocksLimitBufferMb);
-    final halfBufferBlocks = max(1, bufferBlocks ~/ 2);
-    var sftpProgressBlocks = 0;
-    var nextLimitUpdateAt = halfBufferBlocks;
+    const initialLeadMb = 64;
+    const targetQueuedBlocks = 512;
+    const limitStepBlocks = 128;
+    const limitUpdateInterval = Duration(seconds: 1);
+    const unlimitedLimitIndex = 2147483647;
+    final maxFileLimitIndex = max(0, ((fileSize + _blockSize - 1) ~/ _blockSize) - 1);
     var lastLimitSent = -1;
-    int? pendingLimit;
+    Timer? limitUpdateTimer;
+    var hasSeenExistingOrMissing = false;
+    var unlimitedSent = false;
 
     late final _WriterWorker writerWorker;
     late final _SftpWorker sftpWorker;
@@ -892,44 +875,66 @@ class BackupAgent {
       return _formatBytes(blocks * _blockSize);
     }
 
-    void sendLimit(int maxIndex, {bool force = false}) {
-      if (!force && maxIndex == lastLimitSent) {
-        return;
+    void sendLimitCommand(HashblocksController value, int maxIndex, {required String reason, String? detail}) {
+      final suffix = detail == null || detail.isEmpty ? '' : ' $detail';
+      _logInfo('hashblocks limit command: LIMIT $maxIndex reason=$reason (${formatLimitBlocks(maxIndex)})$suffix');
+      value.setLimit(maxIndex);
+    }
+
+    bool sendLimit(int maxIndex, {bool force = false, String reason = 'progress', String? detail}) {
+      maxIndex = min(maxIndex, maxFileLimitIndex);
+      maxIndex = max(maxIndex, lastLimitSent);
+      if (maxIndex == lastLimitSent) {
+        return false;
       }
       final writerBufferedBytes = _writerQueuedBytes + _writerInFlightBytes + _driverBufferedBytes;
-      if (writerBufferedBytes > _writerBacklogBytesLimit && maxIndex > lastLimitSent) {
-        return;
+      if (!force && writerBufferedBytes > _writerBacklogBytesLimit && maxIndex > lastLimitSent) {
+        return false;
       }
       lastLimitSent = maxIndex;
       if (controller == null) {
-        pendingLimit = maxIndex;
-        _logInfo('hashblocks limit (pending): $maxIndex (${formatLimitBlocks(maxIndex)})');
-        return;
+        return false;
       }
-      _logInfo('hashblocks limit: $maxIndex (${formatLimitBlocks(maxIndex)})');
-      controller?.setLimit(maxIndex);
+      sendLimitCommand(controller!, maxIndex, reason: reason, detail: detail);
+      return true;
     }
 
-    void updateLimitFromProgress({bool force = false}) {
-      if (hashblocksWorker.batchHold) {
+    int leadBlocksForMb(int mb) {
+      if (mb <= 0) {
+        return 0;
+      }
+      final bytes = mb * 1024 * 1024;
+      final blocks = bytes ~/ _blockSize;
+      return max(1, blocks);
+    }
+
+    void updateLimitFromProgress({bool force = false, String reason = 'progress'}) {
+      if (!unlimitedSent && controller != null && lastLimitSent >= maxFileLimitIndex) {
+        sendLimitCommand(controller!, unlimitedLimitIndex, reason: 'eof-unlimited', detail: 'targetQueue=$targetQueuedBlocks queued=0');
+        lastLimitSent = unlimitedLimitIndex;
+        unlimitedSent = true;
         return;
       }
-      final writerBufferedBytes = _writerQueuedBytes + _writerInFlightBytes + _driverBufferedBytes;
-      if (!force && writerBufferedBytes > _writerBacklogBytesLimit) {
+      final queuedBlocksNow = _writerQueuedBytes <= 0 ? 0 : ((_writerQueuedBytes + _blockSize - 1) ~/ _blockSize);
+      if (!hasSeenExistingOrMissing) {
         return;
       }
-      final maxIndex = max(0, sftpProgressBlocks + bufferBlocks - 1);
-      sendLimit(maxIndex, force: force);
+      if (queuedBlocksNow >= targetQueuedBlocks) {
+        return;
+      }
+      final nextLimit = max(0, lastLimitSent + limitStepBlocks);
+      sendLimit(nextLimit, force: force, reason: reason, detail: 'targetQueue=$targetQueuedBlocks queued=$queuedBlocksNow');
     }
 
     void registerProgressBlocks(int count) {
       if (count <= 0) {
         return;
       }
-      sftpProgressBlocks += count;
-      if (sftpProgressBlocks >= nextLimitUpdateAt) {
-        updateLimitFromProgress();
-        nextLimitUpdateAt = sftpProgressBlocks + halfBufferBlocks;
+    }
+
+    void registerWriterCompletedBlocks(int count) {
+      if (count <= 0) {
+        return;
       }
     }
 
@@ -963,16 +968,14 @@ class BackupAgent {
       blockTimeout: writerTimeout,
       logInterval: agentLogInterval,
       backlogLimitBytes: _writerBacklogBytesLimit,
-      backlogClearBytes: _writerBacklogClearBytes,
       driverBufferedBytes: () => driver.bufferedBytes,
       onMetrics: _handleWriterMetrics,
       scheduleWrite: (hash, bytes) => _scheduleWriteBlob(hash, bytes, driver),
       handlePhysicalBytes: _handlePhysicalBytes,
+      onWriteCompletedBlocks: registerWriterCompletedBlocks,
       logInfo: _logInfo,
-      isShardReady: (shardKey) => cache?.isShardReady(shardKey) ?? true,
-      waitForAnyShardReady: cache?.waitForAnyReady,
-      onBackpressureStart: () {},
-      onBackpressureEnd: () => updateLimitFromProgress(force: true),
+      isWriteReady: () => cache?.isWriteReady() ?? true,
+      waitForWriteReady: cache?.waitForWriteReady,
     );
 
     sftpWorker = _SftpWorker(
@@ -994,7 +997,6 @@ class BackupAgent {
       },
       registerProgressBlocks: registerProgressBlocks,
       enqueueWriteBlock: (hash, bytes) async => writerWorker.enqueue(hash, bytes),
-      waitForBackpressureClear: writerWorker.waitForBackpressureClear,
       ensureNotCanceled: _ensureNotCanceled,
       logInfo: _logInfo,
     );
@@ -1004,15 +1006,19 @@ class BackupAgent {
     existsWorker = _ExistsWorker(
       maxMissingRun: maxMissingRun,
       blobExists: _blobExists,
-      isShardReady: (shardKey) => cache?.isShardReady(shardKey) ?? true,
-      waitForAnyShardReady: cache?.waitForAnyReady,
       enqueueMissingRun: enqueueMissingRun,
       handleBytes: _handleBytes,
       registerProgressBlocks: registerProgressBlocks,
       logInfo: _logInfo,
       ensureNotCanceled: _ensureNotCanceled,
-      onExisting: () => hashblocksWorker.markExisting(),
-      onMissing: () => hashblocksWorker.markMissing(),
+      onExisting: () {
+        hasSeenExistingOrMissing = true;
+        hashblocksWorker.markExisting();
+      },
+      onMissing: () {
+        hasSeenExistingOrMissing = true;
+        hashblocksWorker.markMissing();
+      },
     );
 
     hashblocksWorker = _HashblocksWorker(
@@ -1067,13 +1073,12 @@ class BackupAgent {
           if (_cancelRequested) {
             value.stop();
           }
-          if (pendingLimit != null) {
-            _logInfo('hashblocks limit: $pendingLimit (${formatLimitBlocks(pendingLimit!)})');
-            value.setLimit(pendingLimit!);
-            pendingLimit = null;
-          } else {
-            updateLimitFromProgress(force: true);
-          }
+          final initialLimitIndex = max(0, leadBlocksForMb(initialLeadMb) - 1);
+          sendLimit(initialLimitIndex, force: true, reason: 'initial', detail: 'targetQueue=$targetQueuedBlocks queued=0');
+          limitUpdateTimer?.cancel();
+          limitUpdateTimer = Timer.periodic(limitUpdateInterval, (_) {
+            updateLimitFromProgress(force: true, reason: 'progress');
+          });
         },
         onLine: (line) async {
           try {
@@ -1141,6 +1146,7 @@ class BackupAgent {
       if (_activeHashblocksController == controller) {
         _activeHashblocksController = null;
       }
+      limitUpdateTimer?.cancel();
       existsWorker.signalDone();
       writerWorker.signalDone();
       if (writerFutureRef != null && !writerAwaited) {
@@ -1343,178 +1349,177 @@ class _SpeedSample {
 }
 
 class _BlobDirectoryCache {
-  _BlobDirectoryCache({required BlobDirectoryLister driver, required this.createShard}) : _driver = driver;
+  _BlobDirectoryCache({required BlobDirectoryLister driver, required this.createShard, required this.logInfo}) : _driver = driver;
 
   final BlobDirectoryLister _driver;
   final Future<void> Function(String hash) createShard;
+  final void Function(String message) logInfo;
 
-  Set<String>? _shard1Names;
-  Future<Set<String>>? _shard1InFlight;
-  final Map<String, Set<String>> _shard2NamesByShard1 = {};
-  final Map<String, Future<Set<String>>> _shard2InFlight = {};
+  Set<String>? _shardNames;
+  Future<Set<String>>? _shardsInFlight;
   final Map<String, Set<String>> _blobNamesByShardKey = {};
   final Map<String, Future<Set<String>>> _blobNamesInFlight = {};
   final Map<String, Future<void>> _shardCreateInFlight = {};
-  final Set<String> _readyShards = <String>{};
-  final List<Completer<void>> _readyWaiters = <Completer<void>>[];
+  final List<Completer<void>> _writeReadyWaiters = <Completer<void>>[];
+  final Map<String, DateTime> _lastExistsLogAt = <String, DateTime>{};
+  Future<void>? _initializeInFlight;
+  bool _writeReady = false;
 
   Future<void> initialize() async {
-    await _loadShard1();
+    await _ensureInitialized();
   }
 
-  bool isShardReady(String shardKey) {
-    return _readyShards.contains(shardKey);
+  bool isWriteReady() {
+    return _writeReady;
   }
 
-  Future<void> waitForAnyReady() async {
+  Future<void> waitForWriteReady() async {
+    if (_writeReady) {
+      return;
+    }
     final completer = Completer<void>();
-    _readyWaiters.add(completer);
+    _writeReadyWaiters.add(completer);
     return completer.future;
   }
 
   Future<bool> blobExists(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return false;
     }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    final shardKey = '$shard1$shard2';
-    final shard1Names = _shard1Names;
-    if (shard1Names == null) {
-      unawaited(prefetchHash(hash));
+    await _ensureInitialized();
+    final shardKey = hash.substring(0, 2);
+    final shardNames = _shardNames ?? <String>{};
+    if (!shardNames.contains(shardKey)) {
+      _maybeLogExistsShard(shardKey, 'absent');
       return false;
     }
-    if (!shard1Names.contains(shard1)) {
-      return false;
-    }
-    final shard2Names = _shard2NamesByShard1[shard1];
-    if (shard2Names == null) {
-      unawaited(prefetchHash(hash));
-      return false;
-    }
-    if (!shard2Names.contains(shard2)) {
-      return false;
-    }
-    final blobNames = _blobNamesByShardKey[shardKey];
-    if (blobNames == null) {
-      unawaited(prefetchHash(hash));
-      return false;
-    }
-    _markShardReady(shardKey);
-    return blobNames.contains(hash);
+    final blobNames = await _loadBlobNames(shardKey);
+    final exists = blobNames.contains(hash);
+    _maybeLogExistsShard(shardKey, exists ? 'hit' : 'miss');
+    return exists;
   }
 
   Future<void> prefetchHash(String hash) async {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return;
     }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    final shardKey = '$shard1$shard2';
-    final shard1Names = await _loadShard1();
-    if (!shard1Names.contains(shard1)) {
-      await _ensureShardCreated(hash: hash, shard1: shard1, shard2: shard2, shardKey: shardKey);
+    await _ensureInitialized();
+    final shardKey = hash.substring(0, 2);
+    final shardNames = _shardNames ?? <String>{};
+    if (!shardNames.contains(shardKey)) {
       return;
     }
-    final shard2Names = await _loadShard2(shard1);
-    if (!shard2Names.contains(shard2)) {
-      await _ensureShardCreated(hash: hash, shard1: shard1, shard2: shard2, shardKey: shardKey);
-      return;
-    }
-    await _loadBlobNames(shard1, shard2);
-    _markShardReady(shardKey);
+    await _loadBlobNames(shardKey);
   }
 
   void markHashKnown(String hash) {
-    if (hash.length < 4) {
+    if (hash.length < 2) {
       return;
     }
-    final shard1 = hash.substring(0, 2);
-    final shard2 = hash.substring(2, 4);
-    final shardKey = '$shard1$shard2';
-    (_shard1Names ??= <String>{}).add(shard1);
-    _shard2NamesByShard1.putIfAbsent(shard1, () => <String>{}).add(shard2);
-    _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{}).add(hash);
-    _markShardReady(shardKey);
-  }
-
-  Future<Set<String>> _loadShard1() async {
-    final cached = _shard1Names;
-    if (cached != null) {
-      return cached;
-    }
-    final inFlight = _shard1InFlight;
-    if (inFlight != null) {
-      return inFlight;
-    }
-    final future = _driver.listBlobShard1();
-    _shard1InFlight = future;
-    try {
-      final names = await future;
-      _shard1Names = names;
-      return names;
-    } finally {
-      _shard1InFlight = null;
+    final shardKey = hash.substring(0, 2);
+    (_shardNames ??= <String>{}).add(shardKey);
+    final shardSet = _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{});
+    final added = shardSet.add(hash);
+    if (added && (shardSet.length == 1 || shardSet.length % 1024 == 0)) {
+      _logDebug('markHashKnown shard=$shardKey total=${shardSet.length}');
     }
   }
 
-  Future<Set<String>> _loadShard2(String shard1) async {
-    final cached = _shard2NamesByShard1[shard1];
-    if (cached != null) {
-      return cached;
-    }
-    final inFlight = _shard2InFlight[shard1];
+  Future<void> _ensureInitialized() async {
+    final inFlight = _initializeInFlight;
     if (inFlight != null) {
       return inFlight;
     }
-    final future = _driver.listBlobShard2(shard1);
-    _shard2InFlight[shard1] = future;
-    try {
-      final names = await future;
-      _shard2NamesByShard1[shard1] = names;
-      for (final shard2 in names) {
-        final shardKey = '$shard1$shard2';
-        _markShardReady(shardKey);
+    final future = _initializeCore();
+    _initializeInFlight = future;
+    return future;
+  }
+
+  Future<void> _initializeCore() async {
+    logInfo('blob-cache writeReady=false (initializing)');
+    logInfo('blob-cache write ready: false');
+    _logDebug('writeReady=false initialize-start');
+    _logDebug('write ready=false initialize-start');
+    _writeReady = false;
+    final shardNames = await _loadShards();
+    _logDebug('top-level shard scan completed count=${shardNames.length}');
+    final missingShards = <String>[];
+    for (var i = 0; i < 256; i += 1) {
+      final shardKey = i.toRadixString(16).padLeft(2, '0');
+      if (!shardNames.contains(shardKey)) {
+        missingShards.add(shardKey);
       }
-      return names;
-    } finally {
-      _shard2InFlight.remove(shard1);
     }
+    for (final shardKey in missingShards) {
+      await _ensureShardCreated(shardKey: shardKey);
+    }
+    _writeReady = true;
+    logInfo('blob-cache writeReady=true (missingShardsCreated=${missingShards.length})');
+    logInfo('blob-cache write ready: true');
+    _logDebug('writeReady=true missingShardsCreated=${missingShards.length}');
+    _logDebug('write ready=true missingShardsCreated=${missingShards.length}');
+    _notifyWriteReady();
   }
 
-  Future<Set<String>> _loadBlobNames(String shard1, String shard2) async {
-    final key = '$shard1$shard2';
-    final cached = _blobNamesByShardKey[key];
+  Future<Set<String>> _loadShards() async {
+    final cached = _shardNames;
     if (cached != null) {
       return cached;
     }
-    final inFlight = _blobNamesInFlight[key];
+    final inFlight = _shardsInFlight;
     if (inFlight != null) {
       return inFlight;
     }
-    final future = _driver.listBlobNames(shard1, shard2);
-    _blobNamesInFlight[key] = future;
+    final future = _driver.listBlobShards();
+    _shardsInFlight = future;
     try {
       final names = await future;
-      _blobNamesByShardKey[key] = names;
+      _shardNames = names;
       return names;
     } finally {
-      _blobNamesInFlight.remove(key);
+      _shardsInFlight = null;
     }
   }
 
-  Future<void> _ensureShardCreated({required String hash, required String shard1, required String shard2, required String shardKey}) async {
+  Future<Set<String>> _loadBlobNames(String shardKey) async {
+    final cached = _blobNamesByShardKey[shardKey];
+    if (cached != null) {
+      return cached;
+    }
+    final inFlight = _blobNamesInFlight[shardKey];
+    if (inFlight != null) {
+      return inFlight;
+    }
+    final future = _driver.listBlobNames(shardKey);
+    _blobNamesInFlight[shardKey] = future;
+    try {
+      final names = await future;
+      _blobNamesByShardKey[shardKey] = names;
+      _logDebug('shard scan completed shard=$shardKey blobCount=${names.length}');
+      return names;
+    } finally {
+      _blobNamesInFlight.remove(shardKey);
+    }
+  }
+
+  Future<void> _ensureShardCreated({required String shardKey}) async {
     final existing = _shardCreateInFlight[shardKey];
     if (existing != null) {
       await existing;
       return;
     }
     final createFuture = () async {
-      await createShard(hash);
-      (_shard1Names ??= <String>{}).add(shard1);
-      _shard2NamesByShard1.putIfAbsent(shard1, () => <String>{}).add(shard2);
+      if (shardKey == 'ff') {
+        logInfo('blob-cache shard create: ff start');
+        _logDebug('shard create ff start');
+      }
+      await createShard(shardKey);
+      (_shardNames ??= <String>{}).add(shardKey);
       _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{});
-      _markShardReady(shardKey);
+      if (shardKey == 'ff') {
+        logInfo('blob-cache shard create: ff ok');
+        _logDebug('shard create ff ok');
+      }
     }();
     _shardCreateInFlight[shardKey] = createFuture;
     try {
@@ -1526,19 +1531,33 @@ class _BlobDirectoryCache {
     }
   }
 
-  void _markShardReady(String shardKey) {
-    if (_readyShards.contains(shardKey)) {
+  void _notifyWriteReady() {
+    if (_writeReadyWaiters.isEmpty) {
       return;
     }
-    _readyShards.add(shardKey);
-    if (_readyWaiters.isEmpty) {
-      return;
-    }
-    for (final waiter in _readyWaiters) {
+    for (final waiter in _writeReadyWaiters) {
       if (!waiter.isCompleted) {
         waiter.complete();
       }
     }
-    _readyWaiters.clear();
+    _writeReadyWaiters.clear();
+  }
+
+  void _maybeLogExistsShard(String shardKey, String result) {
+    final now = DateTime.now();
+    final last = _lastExistsLogAt[shardKey];
+    if (last != null && now.difference(last) < const Duration(seconds: 5)) {
+      return;
+    }
+    _lastExistsLogAt[shardKey] = now;
+    _logDebug('exists shard=$shardKey result=$result writeReady=$_writeReady');
+  }
+
+  void _logDebug(String message) {
+    unawaited(
+      LogWriter.log(source: 'agent', level: 'debug', message: 'blob-cache: $message').catchError((Object _, StackTrace stackTrace) {
+        return;
+      }),
+    );
   }
 }

@@ -6,32 +6,28 @@ class _WriterWorker {
     required this.blockTimeout,
     required this.logInterval,
     required this.backlogLimitBytes,
-    required this.backlogClearBytes,
     required this.driverBufferedBytes,
     required this.onMetrics,
     required this.scheduleWrite,
     required this.handlePhysicalBytes,
+    required this.onWriteCompletedBlocks,
     required this.logInfo,
-    required this.isShardReady,
-    this.waitForAnyShardReady,
-    this.onBackpressureStart,
-    this.onBackpressureEnd,
+    required this.isWriteReady,
+    this.waitForWriteReady,
   });
 
   final int maxConcurrentWrites;
   final Duration blockTimeout;
   final Duration logInterval;
   final int backlogLimitBytes;
-  final int backlogClearBytes;
   final int Function() driverBufferedBytes;
   final void Function(int queuedBytes, int inFlightBytes, int driverBufferedBytes) onMetrics;
   final Future<void> Function(String hash, Uint8List bytes) scheduleWrite;
   final void Function(int bytes) handlePhysicalBytes;
+  final void Function(int blocks) onWriteCompletedBlocks;
   final void Function(String message) logInfo;
-  final bool Function(String shardKey) isShardReady;
-  final Future<void> Function()? waitForAnyShardReady;
-  final void Function()? onBackpressureStart;
-  final void Function()? onBackpressureEnd;
+  final bool Function() isWriteReady;
+  final Future<void> Function()? waitForWriteReady;
 
   final Map<String, List<_MissingBlock>> _writeQueues = {};
   final List<String> _shardQueue = [];
@@ -42,8 +38,6 @@ class _WriterWorker {
   DateTime? _lastQueueStatsLogAt;
   DateTime? _lastLoopDebugLogAt;
 
-  bool _backpressureActive = false;
-  Completer<void>? _backpressureWaiter;
   Completer<void>? _wakeWriter;
   bool _done = false;
   Object? _writerError;
@@ -61,24 +55,10 @@ class _WriterWorker {
     _queuedBlocks += 1;
     _queuedBytes += bytes.length;
     _reportMetrics();
-    _checkBackpressure('enqueue');
     if (_wakeWriter != null && !_wakeWriter!.isCompleted) {
       _wakeWriter!.complete();
       _wakeWriter = null;
     }
-  }
-
-  Future<void> waitForBackpressureClear() async {
-    throwIfError();
-    if (backlogBytes() > backlogLimitBytes) {
-      _applyBackpressure('writer backlog');
-    }
-    if (!_backpressureActive) {
-      return;
-    }
-    _backpressureWaiter ??= Completer<void>();
-    await _backpressureWaiter!.future;
-    throwIfError();
   }
 
   void signalDone() {
@@ -120,9 +100,9 @@ class _WriterWorker {
           handlePhysicalBytes(size);
         }
         _writtenBlocks += 1;
+        onWriteCompletedBlocks(1);
         _inFlightBytes -= size;
         _reportMetrics();
-        _checkBackpressure('writer');
         if (_writtenBlocks % 512 == 0) {
           final now = DateTime.now();
           if (_lastQueueStatsLogAt == null || now.difference(_lastQueueStatsLogAt!) >= logInterval) {
@@ -145,6 +125,14 @@ class _WriterWorker {
       }
 
       while (!_done || _queuedBlocks > 0 || writeFutures.isNotEmpty) {
+        if (!isWriteReady()) {
+          if (waitForWriteReady != null) {
+            await waitForWriteReady!();
+          } else {
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+          }
+          continue;
+        }
         if (_queuedBlocks == 0) {
           if (writeFutures.isNotEmpty) {
             await drainOne();
@@ -161,10 +149,6 @@ class _WriterWorker {
           final bucket = _writeQueues[shardKey];
           if (bucket == null || bucket.isEmpty) {
             _writeQueues.remove(shardKey);
-            continue;
-          }
-          if (!isShardReady(shardKey)) {
-            _shardQueue.add(shardKey);
             continue;
           }
           await drainCompleted();
@@ -193,23 +177,17 @@ class _WriterWorker {
           }
         }
         if (scheduled) {
-          _maybeLogLoopDebug('scheduled');
+          _maybeLogLoopDebug('scheduled', writeFutures.length);
           continue;
         }
         if (writeFutures.isNotEmpty) {
-          _maybeLogLoopDebug('drain-inflight');
+          _maybeLogLoopDebug('drain-inflight', writeFutures.length);
           await drainOne();
           continue;
         }
         if (_queuedBlocks > 0) {
-          _maybeLogLoopDebug('wait-shard-ready');
-          if (waitForAnyShardReady != null) {
-            // Avoid indefinite stalls when a ready signal is missed due to timing;
-            // keep re-checking the queue at a short interval while work is pending.
-            await Future.any<void>(<Future<void>>[waitForAnyShardReady!(), Future<void>.delayed(const Duration(milliseconds: 100))]);
-          } else {
-            await Future<void>.delayed(const Duration(milliseconds: 50));
-          }
+          _maybeLogLoopDebug('wait-shard-ready', writeFutures.length);
+          await Future<void>.delayed(const Duration(milliseconds: 50));
           continue;
         }
       }
@@ -218,46 +196,9 @@ class _WriterWorker {
       _writerError = error;
       _writerStack = stackTrace;
       logInfo('hashblocks writer error: $error');
-      if (_backpressureWaiter != null && !_backpressureWaiter!.isCompleted) {
-        _backpressureWaiter!.complete();
-      }
       if (_wakeWriter != null && !_wakeWriter!.isCompleted) {
         _wakeWriter!.complete();
       }
-    }
-  }
-
-  void _applyBackpressure(String reason) {
-    if (_backpressureActive) {
-      return;
-    }
-    _backpressureActive = true;
-    _backpressureWaiter ??= Completer<void>();
-    logInfo('sftp backpressure: writer backlog=${backlogBytes()} limit=$backlogLimitBytes ($reason)');
-    onBackpressureStart?.call();
-  }
-
-  void _clearBackpressure(String reason) {
-    if (!_backpressureActive) {
-      return;
-    }
-    if (backlogBytes() > backlogClearBytes) {
-      return;
-    }
-    _backpressureActive = false;
-    if (_backpressureWaiter != null && !_backpressureWaiter!.isCompleted) {
-      _backpressureWaiter!.complete();
-    }
-    _backpressureWaiter = null;
-    logInfo('sftp backpressure cleared: writer backlog=${backlogBytes()} threshold=$backlogClearBytes ($reason)');
-    onBackpressureEnd?.call();
-  }
-
-  void _checkBackpressure(String reason) {
-    if (backlogBytes() > backlogLimitBytes) {
-      _applyBackpressure(reason);
-    } else if (_backpressureActive && backlogBytes() <= backlogClearBytes) {
-      _clearBackpressure(reason);
     }
   }
 
@@ -265,30 +206,18 @@ class _WriterWorker {
     onMetrics(_queuedBytes, _inFlightBytes, driverBufferedBytes());
   }
 
-  void _maybeLogLoopDebug(String reason) {
+  void _maybeLogLoopDebug(String reason, int inFlightWrites) {
     final now = DateTime.now();
-    if (_lastLoopDebugLogAt != null && now.difference(_lastLoopDebugLogAt!) < logInterval) {
+    if (_lastLoopDebugLogAt != null && now.difference(_lastLoopDebugLogAt!) < const Duration(seconds: 1)) {
       return;
     }
     _lastLoopDebugLogAt = now;
-    var schedulableShards = 0;
-    for (final shardKey in _shardQueue) {
-      final bucket = _writeQueues[shardKey];
-      if (bucket == null || bucket.isEmpty) {
-        continue;
-      }
-      if (isShardReady(shardKey)) {
-        schedulableShards += 1;
-      }
-    }
-    logInfo(
-      'writer debug: reason=$reason queuedBlocks=$_queuedBlocks queuedBytes=$_queuedBytes inFlightBytes=$_inFlightBytes shards=${_shardQueue.length} schedulableShards=$schedulableShards backpressure=$_backpressureActive',
-    );
+    logInfo('writer debug: reason=$reason queuedBlocks=$_queuedBlocks queuedBytes=$_queuedBytes inFlightWrites=$inFlightWrites inFlightBytes=$_inFlightBytes queueDepth=$_queuedBlocks');
   }
 
   String _shardKeyForHash(String hash) {
-    if (hash.length >= 4) {
-      return hash.substring(0, 4);
+    if (hash.length >= 2) {
+      return hash.substring(0, 2);
     }
     return hash;
   }

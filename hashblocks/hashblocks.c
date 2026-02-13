@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
       close(fd);
       return 2;
     }
-    if (index > limit_index) {
+    if (index > limit_index && !in_zero_run) {
       struct timespec ts;
       ts.tv_sec = 0;
       ts.tv_nsec = 100 * 1000 * 1000;
@@ -201,6 +201,25 @@ int main(int argc, char **argv) {
         zero_len = 0;
       }
     } else {
+      if (index > limit_index && in_zero_run) {
+        /* End of ZERO run beyond LIMIT:
+           - flush ZERO run quickly beyond LIMIT
+           - rewind current non-zero block so it will be processed only after LIMIT advances */
+        print_zero_run(zero_start, index - 1);
+        in_zero_run = 0;
+        zero_len = 0;
+        if (lseek(fd, -(off_t)n, SEEK_CUR) == (off_t)-1) {
+          fprintf(stderr, "Seek error after ZERO run: %s\n", strerror(errno));
+          free(buf);
+          close(fd);
+          return 1;
+        }
+        struct timespec ts;
+        ts.tv_sec = 0;
+        ts.tv_nsec = 100 * 1000 * 1000;
+        nanosleep(&ts, NULL);
+        continue;
+      }
       if (in_zero_run) {
         print_zero_run(zero_start, index - 1);
         in_zero_run = 0;
