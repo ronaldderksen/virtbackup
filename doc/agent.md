@@ -282,10 +282,13 @@ The agent supports optional native SFTP via FFI:
 - SFTP password is stored in `agent.yaml` as an encrypted value under `backup.sftp` (`passwordEnc`) using the same AES-GCM key derivation as SSH passwords.
 - The Google Drive storage driver (`driverId: gdrive`) stores data as individual blob files using the same directory layout as the filesystem driver.
 - All Google Drive API calls retry up to 5 times with exponential backoff starting at 2 seconds; each retry recreates the HTTP client connection, and a persistent failure aborts the backup with a clean error.
-- Google Drive and SFTP driver debug calls are written to `VirtBackup/logs/debug.log` under the active backup base path; each backup run starts with a fresh (truncated) file.
-- Agent console output is also mirrored to `VirtBackup/logs/debug.log` as `action=console` records.
-- Debug log writes use a centralized writer with file locking to avoid interleaved/corrupted lines when multiple isolates write concurrently.
-- For `--fresh` runs, the debug log is prepared before cleanup so `Fresh cleanup` and SFTP rename timing lines are retained in the same job log.
+- Log records are routed by source: `agent` writes to `VirtBackup/logs/agent.log` and `gui` writes to `VirtBackup/logs/gui.log` under the configured backup base path.
+- Agent log filtering reads `log_level` from `agent.yaml` (default `console` when missing/empty); GUI log filtering reads `log_level` from SharedPreferences (default `console` when missing/empty).
+- Log records include `timestamp`, `level`, and `message`; source is used only for routing and is not included in the line payload.
+- Log writes go through a centralized sequential queue writer with file locking to avoid interleaved/corrupted lines when multiple producers log concurrently.
+- The writer timestamps records when they are enqueued; on slow storage the queue can lag while preserving record order.
+- On each process startup, `agent.log` and `gui.log` are rotated to `<name>.log.1` and a fresh log file is started.
+- `level=console` records are also echoed to stdout by the writer so console output and persisted logs stay aligned.
 - SFTP debug logs include `action=sftp_timing` records with `leaseWaitMs`, `connectMs`, `opMs`, `leaseSource`, and `queued` to separate pool wait/connect time from operation time.
 - Google Drive HTTP calls are logged as operation records with timestamp, action (`mkdir`, `list`, `upload`, `download`, `move`, `trash`, `auth.refresh`), status, duration, and request details.
 - Google Drive upload HTTP clients are leased from a bounded pool so upload retries/concurrency cannot fan out into unbounded concurrent connections.

@@ -4,8 +4,7 @@ import 'dart:io';
 import 'package:virtbackup/agent/http_server.dart';
 import 'package:virtbackup/agent/settings_store.dart';
 import 'package:virtbackup/agent/backup_host.dart';
-import 'package:virtbackup/common/debug_log_writer.dart';
-import 'package:virtbackup/common/settings.dart';
+import 'package:virtbackup/common/log_writer.dart';
 
 Future<void> main(List<String> args) async {
   await runZonedGuarded(
@@ -21,7 +20,12 @@ Future<void> main(List<String> args) async {
         exit(1);
       }
       final loadedSettings = await settingsStore.load();
-      _debugLogMirror.configureFromSettings(loadedSettings);
+      await LogWriter.configureSourcePath(
+        source: 'agent',
+        path: LogWriter.defaultPathForSource('agent', basePath: loadedSettings.backupPath.trim()),
+      );
+      LogWriter.configureSourceLevel(source: 'agent', level: loadedSettings.logLevel);
+      await LogWriter.rotateSource('agent');
       _logInfo('Settings file: ${settingsStore.file.path}');
       if (!await settingsStore.file.exists()) {
         _logInfo('Settings file not found.');
@@ -60,22 +64,19 @@ Future<void> main(List<String> args) async {
     },
     zoneSpecification: ZoneSpecification(
       print: (self, parent, zone, line) {
-        parent.print(zone, line);
-        _debugLogMirror.appendRaw(line);
+        unawaited(LogWriter.log(source: 'agent', level: 'console', message: line).catchError((_) {}));
       },
     ),
   );
 }
 
 void _logInfo(String message) {
-  stdout.writeln(message);
-  _debugLogMirror.append(message, level: 'INFO');
+  unawaited(LogWriter.log(source: 'agent', level: 'console', message: message).catchError((_) {}));
 }
 
 void _logError(String message, Object error, StackTrace stackTrace) {
-  stderr.writeln('$message $error');
-  _debugLogMirror.append('$message $error');
-  _debugLogMirror.append(stackTrace.toString(), level: 'ERROR');
+  unawaited(LogWriter.log(source: 'agent', level: 'console', message: '$message $error').catchError((_) {}));
+  unawaited(LogWriter.log(source: 'agent', level: 'console', message: stackTrace.toString()).catchError((_) {}));
 }
 
 void _startEventLoopLagMonitor() {
@@ -92,34 +93,3 @@ void _startEventLoopLagMonitor() {
     }
   });
 }
-
-class _DebugLogMirror {
-  String? _logFilePath;
-
-  void configureFromSettings(AppSettings settings) {
-    final basePath = settings.backupPath.trim().isEmpty ? '${Platform.pathSeparator}var' : settings.backupPath.trim();
-    _logFilePath = '$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}logs${Platform.pathSeparator}debug.log';
-  }
-
-  void append(String message, {String level = 'INFO'}) {
-    final trimmed = message.trimRight();
-    if (trimmed.isEmpty) {
-      return;
-    }
-    appendRaw('${DateTime.now().toIso8601String()} action=console level=$level message=${_sanitize(trimmed)}');
-  }
-
-  void appendRaw(String line) {
-    final path = _logFilePath;
-    if (path == null || path.isEmpty) {
-      return;
-    }
-    unawaited(DebugLogWriter.appendLine(path, line).catchError((_) {}));
-  }
-
-  String _sanitize(String value) {
-    return value.replaceAll('\n', r'\n').replaceAll('\r', r'\r');
-  }
-}
-
-final _debugLogMirror = _DebugLogMirror();

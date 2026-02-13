@@ -7,6 +7,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:ffi/ffi.dart';
 
 import 'package:virtbackup/agent/drv/backup_storage.dart';
+import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/settings.dart';
 
 class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
@@ -17,7 +18,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   final _NativeSftpBindings? _nativeSftp = _NativeSftpBindings.tryLoad();
 
   static const int _writeConcurrency = 8;
-  static const int _blobCacheReservedSessions = 2;
+  static const int _blobCacheReservedSessions = 6;
   static const int _generalPoolSessions = _writeConcurrency > _blobCacheReservedSessions ? _writeConcurrency - _blobCacheReservedSessions : 1;
   // Temporary safety switch: keep upload code intact but disable remote blob uploads.
   // Set to true when cache behavior is verified and uploads should be active again.
@@ -29,6 +30,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   final Set<String> _knownRemoteShardKeys = <String>{};
   final Set<String> _remoteBlobNames = <String>{};
   final Map<String, int> _remoteBlobSizes = <String, int>{};
+  bool _agentLogConfigured = false;
 
   String get _host => _settings.sftpHost.trim();
   int get _port => _settings.sftpPort;
@@ -68,6 +70,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Future<void> ensureReady() async {
+    await _configureAgentLogPath();
     await _cacheRoot.create(recursive: true);
     await manifestsDir('tmp', 'tmp').parent.create(recursive: true);
     await tmpDir().create(recursive: true);
@@ -221,7 +224,22 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     if (line.isEmpty) {
       return;
     }
-    return;
+    try {
+      await _configureAgentLogPath();
+      await LogWriter.log(source: 'agent', level: 'debug', message: line);
+    } catch (_) {}
+  }
+
+  Future<void> _configureAgentLogPath() async {
+    if (_agentLogConfigured) {
+      return;
+    }
+    await LogWriter.configureSourcePath(
+      source: 'agent',
+      path: LogWriter.defaultPathForSource('agent', basePath: _settings.backupPath.trim()),
+    );
+    LogWriter.configureSourceLevel(source: 'agent', level: _settings.logLevel);
+    _agentLogConfigured = true;
   }
 
   @override
@@ -291,7 +309,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     final stamp = sanitizeFileName(DateTime.now().toUtc().toIso8601String());
     final renamed = _remoteJoin(base, '${_remoteAppFolderName}__fresh_$stamp');
     final opStopwatch = Stopwatch();
-    await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=fresh_cleanup status=running durationMs=0 target=VirtBackup method=RENAME detail=from:$current to:$renamed');
+    await _appendDebugLogLine('action=fresh_cleanup status=running durationMs=0 target=VirtBackup method=RENAME detail=from:$current to:$renamed');
 
     await _withSftp('fresh cleanup rename remote root', (sftp) async {
       opStopwatch.start();
@@ -312,9 +330,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         }
       }
     });
-    await _appendDebugLogLine(
-      '${DateTime.now().toIso8601String()} action=fresh_cleanup status=200 durationMs=${opStopwatch.elapsedMilliseconds} target=VirtBackup method=RENAME detail=from:$current to:$renamed',
-    );
+    await _appendDebugLogLine('action=fresh_cleanup status=200 durationMs=${opStopwatch.elapsedMilliseconds} target=VirtBackup method=RENAME detail=from:$current to:$renamed');
     _knownRemoteShardKeys.clear();
     _remoteBlobNames.clear();
     _remoteBlobSizes.clear();
@@ -346,7 +362,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     if (!_remoteBlobUploadEnabled) {
       _remoteBlobNames.add(hash);
       _remoteBlobSizes[hash] = bytes.length;
-      await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload status=disabled durationMs=0 method=WRITE detail=remote-upload-disabled hash=$hash bytes=${bytes.length}');
+      await _appendDebugLogLine('action=upload status=disabled durationMs=0 method=WRITE detail=remote-upload-disabled hash=$hash bytes=${bytes.length}');
       return;
     }
     final remotePath = _remoteBlobPath(hash);
@@ -452,7 +468,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   Stream<File> listXmlFiles() async* {
     _validateConfig();
     final opStopwatch = Stopwatch();
-    await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=list status=running durationMs=0 target=manifests method=LIST');
+    await _appendDebugLogLine('action=list status=running durationMs=0 target=manifests method=LIST');
     final lease = await _pool.lease(_connect);
     try {
       final sftp = lease.sftp;
@@ -508,7 +524,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     } finally {
       lease.release();
       final duration = opStopwatch.elapsedMilliseconds;
-      await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=list status=200 durationMs=$duration target=manifests method=LIST');
+      await _appendDebugLogLine('action=list status=200 durationMs=$duration target=manifests method=LIST');
     }
   }
 
@@ -779,7 +795,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       }
       final elapsedMs = opStopwatch.elapsedMilliseconds;
       if (elapsedMs > 250) {
-        await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload status=200 durationMs=$elapsedMs method=WRITE detail=native bytes=${data.length}');
+        await _appendDebugLogLine('action=upload status=200 durationMs=$elapsedMs method=WRITE detail=native bytes=${data.length}');
       }
     }
   }
@@ -810,26 +826,26 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         writeStopwatch.stop();
         writeMs = writeStopwatch.elapsedMilliseconds;
 
-        await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload_rename status=start durationMs=0 method=RENAME');
+        await _appendDebugLogLine('action=upload_rename status=start durationMs=0 method=RENAME');
         final renameStopwatch = Stopwatch()..start();
         try {
           await lease.sftp.rename(remoteTemp, remotePath);
         } catch (_) {
           renameStopwatch.stop();
           renameMs = renameStopwatch.elapsedMilliseconds;
-          await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload_rename status=error durationMs=$renameMs method=RENAME');
+          await _appendDebugLogLine('action=upload_rename status=error durationMs=$renameMs method=RENAME');
           await _tryRemoveRemoteFile(lease.sftp, remoteTemp);
           rethrow;
         }
         renameStopwatch.stop();
         renameMs = renameStopwatch.elapsedMilliseconds;
-        await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=upload_rename status=200 durationMs=$renameMs method=RENAME');
+        await _appendDebugLogLine('action=upload_rename status=200 durationMs=$renameMs method=RENAME');
 
         _remoteBlobNames.add(hash);
         _remoteBlobSizes[hash] = data.length;
 
         await _appendDebugLogLine(
-          '${DateTime.now().toIso8601String()} action=upload status=200 durationMs=${operationStopwatch.elapsedMilliseconds} '
+          'action=upload status=200 durationMs=${operationStopwatch.elapsedMilliseconds} '
           'method=WRITE '
           'detail=leaseWaitMs:${leaseWaitStopwatch.elapsedMilliseconds} writeMs:$writeMs renameMs:$renameMs bytes:${data.length}',
         );
@@ -837,7 +853,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         released = true;
       } catch (error) {
         await _appendDebugLogLine(
-          '${DateTime.now().toIso8601String()} action=upload status=error durationMs=${operationStopwatch.elapsedMilliseconds} '
+          'action=upload status=error durationMs=${operationStopwatch.elapsedMilliseconds} '
           'method=WRITE '
           'detail=leaseWaitMs:${leaseWaitStopwatch.elapsedMilliseconds} writeMs:$writeMs renameMs:$renameMs bytes:${data.length} error=$error',
         );
@@ -886,16 +902,14 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         return await action();
       } catch (error) {
         if (attempt >= maxRetries) {
-          await _appendDebugLogLine('${DateTime.now().toIso8601String()} action=retry status=failed durationMs=0 target=$label method=RETRY error=$error');
+          await _appendDebugLogLine('action=retry status=failed durationMs=0 target=$label method=RETRY error=$error');
           rethrow;
         }
         _pool.invalidateIdle();
         _blobCachePool.invalidateIdle();
         _nativePool.invalidateIdle();
         attempt += 1;
-        await _appendDebugLogLine(
-          '${DateTime.now().toIso8601String()} action=retry status=retry durationMs=0 target=$label method=RETRY detail=attempt:$attempt delaySec:$delaySeconds closeIdle:true error=$error',
-        );
+        await _appendDebugLogLine('action=retry status=retry durationMs=0 target=$label method=RETRY detail=attempt:$attempt delaySec:$delaySeconds closeIdle:true error=$error');
         await Future.delayed(Duration(seconds: delaySeconds));
         delaySeconds *= 2;
       }

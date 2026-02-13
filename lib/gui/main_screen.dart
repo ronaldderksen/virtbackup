@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:developer' as developer;
 import 'dart:io';
 import 'dart:math';
 
@@ -13,6 +12,7 @@ import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:virtbackup/agent/settings_store.dart';
+import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/models.dart';
 import 'package:virtbackup/common/google_oauth_client.dart';
 import 'package:virtbackup/common/settings.dart';
@@ -68,6 +68,7 @@ class BackupServerSetupScreen extends StatefulWidget {
 }
 
 class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
+  static const String _guiLogLevelPrefKey = 'log_level';
   static const EdgeInsets _contentPadding = EdgeInsets.only(left: 24, right: 24, bottom: 32);
   static const double _contentTitleSpacing = 8;
   static const double _contentSectionSpacing = 32;
@@ -181,11 +182,13 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _isLoadingAgentSettings = false;
   Timer? _jobSyncTimer;
   bool _jobSyncInProgress = false;
+  bool _guiLogRotated = false;
 
   @override
   void initState() {
     super.initState();
     _attachFieldListeners();
+    unawaited(_configureGuiLogWriter());
     _loadAgentEndpointsAndSettings();
     _loadGdriveClientConfig();
   }
@@ -371,6 +374,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _ensureBackupDriverSelection();
     _backupPathController.text = _agentSettings.backupPath;
     _savedBackupPath = _backupPathController.text.trim();
+    unawaited(_configureGuiLogWriter(backupPath: _savedBackupPath, rotateOnStartup: true));
     _ntfymeTokenController.text = _agentSettings.ntfymeToken;
     _savedNtfymeToken = _ntfymeTokenController.text.trim();
     _gdriveScope = _agentSettings.gdriveScope.isNotEmpty ? _agentSettings.gdriveScope : _gdriveScopeFile;
@@ -1475,12 +1479,26 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
 
   bool _isSelectedServerVerified() => _connectionVerified;
 
+  Future<void> _configureGuiLogWriter({String? backupPath, bool rotateOnStartup = false}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final configuredLevel = (prefs.getString(_guiLogLevelPrefKey) ?? '').trim();
+    final level = configuredLevel.isEmpty ? 'console' : configuredLevel;
+    final path = LogWriter.defaultPathForSource('gui', basePath: backupPath);
+    await LogWriter.configureSourcePath(source: 'gui', path: path);
+    LogWriter.configureSourceLevel(source: 'gui', level: level);
+    if (rotateOnStartup && !_guiLogRotated) {
+      await LogWriter.rotateSource('gui');
+      _guiLogRotated = true;
+    }
+  }
+
   void _logInfo(String message) {
-    developer.log(message, name: 'BackupApp');
+    unawaited(LogWriter.log(source: 'gui', level: 'info', message: message).catchError((_) {}));
   }
 
   void _logError(String message, Object error, StackTrace stackTrace) {
-    developer.log(message, name: 'BackupApp', error: error, stackTrace: stackTrace);
+    unawaited(LogWriter.log(source: 'gui', level: 'error', message: '$message $error').catchError((_) {}));
+    unawaited(LogWriter.log(source: 'gui', level: 'debug', message: stackTrace.toString()).catchError((_) {}));
   }
 
   String _buildLibvirtHost() {
@@ -1769,6 +1787,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       );
       await _pushAgentSettings();
       _savedBackupPath = trimmedPath;
+      unawaited(_configureGuiLogWriter(backupPath: trimmedPath));
       _savedBackupDriverId = _backupDriverId;
       _savedNtfymeToken = trimmedToken;
       _savedGdriveScope = _gdriveScope;

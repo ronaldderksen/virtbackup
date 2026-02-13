@@ -3,6 +3,7 @@ import 'models.dart';
 class AppSettings {
   AppSettings({
     required this.backupPath,
+    required this.logLevel,
     required this.backupDriverId,
     required this.sftpHost,
     required this.sftpPort,
@@ -25,6 +26,7 @@ class AppSettings {
   });
 
   final String backupPath;
+  final String logLevel;
   final String backupDriverId;
   final String sftpHost;
   final int sftpPort;
@@ -47,6 +49,7 @@ class AppSettings {
 
   AppSettings copyWith({
     String? backupPath,
+    String? logLevel,
     String? backupDriverId,
     String? sftpHost,
     int? sftpPort,
@@ -69,6 +72,7 @@ class AppSettings {
   }) {
     return AppSettings(
       backupPath: backupPath ?? this.backupPath,
+      logLevel: logLevel ?? this.logLevel,
       backupDriverId: backupDriverId ?? this.backupDriverId,
       sftpHost: sftpHost ?? this.sftpHost,
       sftpPort: sftpPort ?? this.sftpPort,
@@ -106,6 +110,7 @@ class AppSettings {
         },
         'sftp': {'host': sftpHost, 'port': sftpPort, 'username': sftpUsername, 'password': sftpPassword, 'basePath': sftpBasePath},
       },
+      'log_level': logLevel,
       'connectionVerified': connectionVerified,
       'hashblocksLimitBufferMb': hashblocksLimitBufferMb,
       'dummyDriverTmpWrites': dummyDriverTmpWrites,
@@ -132,6 +137,7 @@ class AppSettings {
     }
     return AppSettings(
       backupPath: (backup['base_path'] ?? '').toString(),
+      logLevel: ((json['log_level'] ?? '').toString().trim().isEmpty ? 'console' : json['log_level'].toString().trim()),
       backupDriverId: (backup['driverId'] ?? 'filesystem').toString(),
       connectionVerified: json['connectionVerified'] == true,
       hashblocksLimitBufferMb: _parseHashblocksLimitBufferMb(json['hashblocksLimitBufferMb']),
@@ -156,6 +162,7 @@ class AppSettings {
 
   factory AppSettings.empty() => AppSettings(
     backupPath: '',
+    logLevel: 'console',
     backupDriverId: 'filesystem',
     sftpHost: '',
     sftpPort: 22,

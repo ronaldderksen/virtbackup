@@ -7,7 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
 import 'package:virtbackup/agent/drv/backup_storage.dart';
-import 'package:virtbackup/common/debug_log_writer.dart';
+import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/google_oauth_client.dart';
 import 'package:virtbackup/common/settings.dart';
 
@@ -49,7 +49,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   final Map<String, _DriveFileRef> _blobFiles = {};
   final Set<String> _blobNames = {};
   final _NamedAsyncLock _folderLocks = _NamedAsyncLock();
-  bool _debugLogPrepared = false;
+  bool _agentLogConfigured = false;
   http.Client _client = IOClient(_createHttpClient());
   final _HttpClientPool _uploadClientPool = _HttpClientPool(maxClients: _uploadConcurrency);
   int _inFlightUploads = 0;
@@ -210,8 +210,8 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   @override
   Future<void> ensureReady() async {
+    await _configureAgentLogPath();
     await _cacheRoot.create(recursive: true);
-    await _prepareDebugLogFile();
     await manifestsDir('tmp', 'tmp').parent.create(recursive: true);
     await tmpDir().create(recursive: true);
     await _ensureBlobsRoot();
@@ -1411,24 +1411,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     }
   }
 
-  File _debugLogFile() {
-    final basePath = _settings.backupPath.trim();
-    if (basePath.isNotEmpty) {
-      return File('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}logs${Platform.pathSeparator}debug.log');
-    }
-    return File('${_cacheRoot.path}${Platform.pathSeparator}logs${Platform.pathSeparator}debug.log');
-  }
-
-  Future<void> _prepareDebugLogFile() async {
-    final path = _debugLogFile().path;
-    if (_debugLogPrepared) {
-      await Directory(_debugLogFile().parent.path).create(recursive: true);
-      return;
-    }
-    await DebugLogWriter.truncate(path);
-    _debugLogPrepared = true;
-  }
-
   Future<http.Response> _requestWithApiLog({required String action, required String method, required Uri uri, required Future<http.Response> Function() send, String? target, String? detail}) async {
     final stopwatch = Stopwatch()..start();
     final targetText = target == null || target.isEmpty ? '' : ' target=$target';
@@ -1436,23 +1418,32 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     try {
       final response = await send();
       stopwatch.stop();
-      await _appendApiLogLine(
-        '${DateTime.now().toIso8601String()} action=$action status=${response.statusCode} durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()}',
-      );
+      await _appendApiLogLine('action=$action status=${response.statusCode} durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()}');
       return response;
     } catch (error) {
       stopwatch.stop();
-      await _appendApiLogLine(
-        '${DateTime.now().toIso8601String()} action=$action status=error durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()} error=$error',
-      );
+      await _appendApiLogLine('action=$action status=error durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()} error=$error');
       rethrow;
     }
   }
 
   Future<void> _appendApiLogLine(String line) async {
     try {
-      await DebugLogWriter.appendLine(_debugLogFile().path, line);
+      await _configureAgentLogPath();
+      await LogWriter.log(source: 'agent', level: 'debug', message: line);
     } catch (_) {}
+  }
+
+  Future<void> _configureAgentLogPath() async {
+    if (_agentLogConfigured) {
+      return;
+    }
+    await LogWriter.configureSourcePath(
+      source: 'agent',
+      path: LogWriter.defaultPathForSource('agent', basePath: _settings.backupPath.trim()),
+    );
+    LogWriter.configureSourceLevel(source: 'agent', level: _settings.logLevel);
+    _agentLogConfigured = true;
   }
 
   static HttpClient _createHttpClient() {
