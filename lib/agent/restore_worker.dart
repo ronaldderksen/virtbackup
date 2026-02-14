@@ -110,23 +110,15 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         ? 8
         : selectedDestination?.downloadConcurrency ?? (throw StateError('downloadConcurrency is required for destination "${selectedDestination?.id ?? ''}".'));
     final server = ServerConfig.fromMap(serverMap);
-    var logConfigured = false;
-
-    Future<void> writeAgentLog(String level, String message) async {
-      if (!logConfigured) {
-        await LogWriter.configureSourcePath(
-          source: 'agent',
-          path: LogWriter.defaultPathForSource('agent', basePath: settings.backupPath.trim()),
-        );
-        LogWriter.configureSourceLevel(source: 'agent', level: settings.logLevel);
-        logConfigured = true;
-      }
-      await LogWriter.log(source: 'agent', level: level, message: message);
-    }
+    await LogWriter.configureSourcePath(
+      source: 'agent',
+      path: LogWriter.defaultPathForSource('agent', basePath: settings.backupPath.trim()),
+    );
+    LogWriter.configureSourceLevel(source: 'agent', level: settings.logLevel);
 
     final host = BackupAgentHost(
-      onInfo: (message) => unawaited(writeAgentLog('console', message)),
-      onError: (message, error, stackTrace) => unawaited(writeAgentLog('console', '$message $error\n$stackTrace')),
+      onInfo: (message) => LogWriter.logAgentBackground(level: 'info', message: message),
+      onError: (message, error, stackTrace) => LogWriter.logAgentBackground(level: 'info', message: '$message $error\n$stackTrace'),
     );
 
     BackupDriver buildDriver() {
@@ -135,7 +127,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         'gdrive': () => GdriveBackupDriver(
           settings: settings,
           persistSettings: (updated) async => mainPort.send({'type': _typeSettings, 'settings': updated.toMap()}),
-          logInfo: (message) => unawaited(writeAgentLog('console', message)),
+          logInfo: (message) => LogWriter.logAgentBackground(level: 'info', message: message),
         ),
         'filesystem': () => FilesystemBackupDriver(backupPath.trim()),
         'sftp': () => SftpBackupDriver(settings: settings, poolSessions: downloadConcurrency),
@@ -390,13 +382,13 @@ void restoreWorkerMain(Map<String, dynamic> init) {
             final remoteSize = await host.runSshCommand(server, 'stat -c %s "$remotePath"');
             final remoteValue = int.tryParse(remoteSize.stdout.trim());
             if (remoteValue == target.fileSize) {
-              await writeAgentLog('console', 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=$remoteValue');
+              LogWriter.logAgentBackground(level: 'info', message: 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=$remoteValue');
             } else {
-              await writeAgentLog('console', 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=${remoteSize.stdout.trim()}');
+              LogWriter.logAgentBackground(level: 'info', message: 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=${remoteSize.stdout.trim()}');
               throw 'restore size mismatch for ${target.diskBaseName}: expected ${target.fileSize}, got ${remoteSize.stdout.trim()}';
             }
           } catch (error, stackTrace) {
-            await writeAgentLog('console', 'restore: size check failed for ${target.diskBaseName}: $error\\n$stackTrace');
+            LogWriter.logAgentBackground(level: 'info', message: 'restore: size check failed for ${target.diskBaseName}: $error\\n$stackTrace');
             throw 'restore size check failed for ${target.diskBaseName}: $error';
           }
         }
@@ -447,7 +439,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     } catch (error, stackTrace) {
       final isCanceled = error is _Canceled;
       if (!isCanceled) {
-        await writeAgentLog('console', 'Restore failed: $error\n$stackTrace');
+        LogWriter.logAgentBackground(level: 'info', message: 'Restore failed: $error\n$stackTrace');
       }
       sendResult(
         AgentJobStatus(

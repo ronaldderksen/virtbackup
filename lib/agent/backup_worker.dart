@@ -55,21 +55,16 @@ void backupWorkerMain(Map<String, dynamic> init) {
         : selectedDestination?.uploadConcurrency ?? (throw StateError('uploadConcurrency is required for destination "${selectedDestination?.id ?? ''}".'));
     final server = ServerConfig.fromMap(serverMap);
     final vm = VmEntry.fromMap(vmMap);
-    var logConfigured = false;
+    await LogWriter.configureSourcePath(
+      source: 'agent',
+      path: LogWriter.defaultPathForSource('agent', basePath: settings.backupPath.trim()),
+    );
+    LogWriter.configureSourceLevel(source: 'agent', level: settings.logLevel);
 
-    Future<void> writeAgentLog(String level, String message) async {
-      if (!logConfigured) {
-        await LogWriter.configureSourcePath(
-          source: 'agent',
-          path: LogWriter.defaultPathForSource('agent', basePath: settings.backupPath.trim()),
-        );
-        LogWriter.configureSourceLevel(source: 'agent', level: settings.logLevel);
-        logConfigured = true;
-      }
-      await LogWriter.log(source: 'agent', level: level, message: message);
-    }
-
-    final host = BackupAgentHost(onInfo: (message) => unawaited(writeAgentLog('console', message)), onError: (message, error, stackTrace) => unawaited(writeAgentLog('console', '$message $error')));
+    final host = BackupAgentHost(
+      onInfo: (message) => LogWriter.logAgentBackground(level: 'info', message: message),
+      onError: (message, error, stackTrace) => LogWriter.logAgentBackground(level: 'info', message: '$message $error'),
+    );
 
     BackupDriver buildDriver() {
       final factories = <String, BackupDriver Function(Map<String, dynamic>)>{
@@ -77,7 +72,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
         'gdrive': (_) => GdriveBackupDriver(
           settings: settings,
           persistSettings: (updated) async => mainPort.send({'type': _typeSettings, 'settings': updated.toMap()}),
-          logInfo: (message) => unawaited(writeAgentLog('console', message)),
+          logInfo: (message) => LogWriter.logAgentBackground(level: 'info', message: message),
         ),
         'filesystem': (_) => FilesystemBackupDriver(backupPath.trim()),
         'sftp': (_) => SftpBackupDriver(settings: settings, poolSessions: uploadConcurrency),
@@ -108,7 +103,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
       final result = await agent!.runVmBackup(server: server, vm: vm, driver: driver);
       mainPort.send({'type': _typeResult, 'jobId': jobId, 'result': result.toMap()});
     } catch (error, _) {
-      await writeAgentLog('console', 'Backup worker failed: $error');
+      LogWriter.logAgentBackground(level: 'info', message: 'Backup worker failed: $error');
       mainPort.send({'type': _typeResult, 'jobId': jobId, 'result': BackupAgentResult(success: false, message: error.toString()).toMap()});
     }
   }

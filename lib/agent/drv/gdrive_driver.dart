@@ -25,7 +25,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       _persistSettings = persistSettings,
       _settingsDir = settingsDir,
       _cacheRoot = _cacheRootForSettings(settings),
-      _logInfo = logInfo ?? ((_) {});
+      _logInfo = ((message) => (logInfo ?? ((_) {}))('driver=gdrive $message'));
 
   final Directory? _settingsDir;
   GoogleOAuthInstalledClient? _oauthClient;
@@ -1320,7 +1320,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   Future<void> _appendApiLogLine(String line) async {
     try {
       await _configureAgentLogPath();
-      await LogWriter.log(source: 'agent', level: 'debug', message: line);
+      LogWriter.logAgentBackground(level: 'debug', message: 'driver=gdrive $line');
     } catch (_) {}
   }
 

@@ -1377,7 +1377,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   Future<void> _configureGuiLogWriter({String? backupPath, bool rotateOnStartup = false}) async {
     final prefs = await SharedPreferences.getInstance();
     final configuredLevel = (prefs.getString(_guiLogLevelPrefKey) ?? '').trim();
-    final level = configuredLevel.isEmpty ? 'console' : configuredLevel;
+    final level = configuredLevel.isEmpty ? 'info' : configuredLevel;
     final path = LogWriter.defaultPathForSource('gui', basePath: backupPath);
     await LogWriter.configureSourcePath(source: 'gui', path: path);
     LogWriter.configureSourceLevel(source: 'gui', level: level);
@@ -1388,12 +1388,12 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   }
 
   void _logInfo(String message) {
-    unawaited(LogWriter.log(source: 'gui', level: 'console', message: message).catchError((_) {}));
+    LogWriter.logGuiBackground(level: 'info', message: message);
   }
 
   void _logError(String message, Object error, StackTrace stackTrace) {
-    unawaited(LogWriter.log(source: 'gui', level: 'console', message: '$message $error').catchError((_) {}));
-    unawaited(LogWriter.log(source: 'gui', level: 'debug', message: stackTrace.toString()).catchError((_) {}));
+    LogWriter.logGuiBackground(level: 'info', message: '$message $error');
+    LogWriter.logGuiBackground(level: 'debug', message: stackTrace.toString());
   }
 
   String _buildLibvirtHost() {

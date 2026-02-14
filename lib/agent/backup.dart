@@ -883,7 +883,7 @@ class BackupAgent {
 
     void sendLimitCommand(HashblocksController value, int maxIndex, {required String reason, String? detail}) {
       final suffix = detail == null || detail.isEmpty ? '' : ' $detail';
-      _logInfo('hashblocks limit command: LIMIT $maxIndex reason=$reason (${formatLimitBlocks(maxIndex)})$suffix');
+      LogWriter.logAgentBackground(level: 'debug', message: _formatLogMessage('hashblocks limit command: LIMIT $maxIndex reason=$reason (${formatLimitBlocks(maxIndex)})$suffix') ?? '');
       value.setLimit(maxIndex);
     }
 
@@ -1430,7 +1430,7 @@ class _BlobDirectoryCache {
     final shardSet = _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{});
     final added = shardSet.add(hash);
     if (added && (shardSet.length == 1 || shardSet.length % 1024 == 0)) {
-      _logDebug('markHashKnown shard=$shardKey total=${shardSet.length}');
+      LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: markHashKnown shard=$shardKey total=${shardSet.length}');
     }
   }
 
@@ -1447,11 +1447,11 @@ class _BlobDirectoryCache {
   Future<void> _initializeCore() async {
     logInfo('blob-cache writeReady=false (initializing)');
     logInfo('blob-cache write ready: false');
-    _logDebug('writeReady=false initialize-start');
-    _logDebug('write ready=false initialize-start');
+    LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: writeReady=false initialize-start');
+    LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: write ready=false initialize-start');
     _writeReady = false;
     final shardNames = await _loadShards();
-    _logDebug('top-level shard scan completed count=${shardNames.length}');
+    LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: top-level shard scan completed count=${shardNames.length}');
     final missingShards = <String>[];
     for (var i = 0; i < 256; i += 1) {
       final shardKey = i.toRadixString(16).padLeft(2, '0');
@@ -1465,8 +1465,8 @@ class _BlobDirectoryCache {
     _writeReady = true;
     logInfo('blob-cache writeReady=true (missingShardsCreated=${missingShards.length})');
     logInfo('blob-cache write ready: true');
-    _logDebug('writeReady=true missingShardsCreated=${missingShards.length}');
-    _logDebug('write ready=true missingShardsCreated=${missingShards.length}');
+    LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: writeReady=true missingShardsCreated=${missingShards.length}');
+    LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: write ready=true missingShardsCreated=${missingShards.length}');
     _notifyWriteReady();
   }
 
@@ -1504,7 +1504,7 @@ class _BlobDirectoryCache {
     try {
       final names = await future;
       _blobNamesByShardKey[shardKey] = names;
-      _logDebug('shard scan completed shard=$shardKey blobCount=${names.length}');
+      LogWriter.logAgentBackground(level: 'trace', message: 'blob-cache: shard scan completed shard=$shardKey blobCount=${names.length}');
       return names;
     } finally {
       _blobNamesInFlight.remove(shardKey);
@@ -1520,14 +1520,14 @@ class _BlobDirectoryCache {
     final createFuture = () async {
       if (shardKey == 'ff') {
         logInfo('blob-cache shard create: ff start');
-        _logDebug('shard create ff start');
+        LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: shard create ff start');
       }
       await createShard(shardKey);
       (_shardNames ??= <String>{}).add(shardKey);
       _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{});
       if (shardKey == 'ff') {
         logInfo('blob-cache shard create: ff ok');
-        _logDebug('shard create ff ok');
+        LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: shard create ff ok');
       }
     }();
     _shardCreateInFlight[shardKey] = createFuture;
@@ -1559,14 +1559,6 @@ class _BlobDirectoryCache {
       return;
     }
     _lastExistsLogAt[shardKey] = now;
-    _logDebug('exists shard=$shardKey result=$result writeReady=$_writeReady');
-  }
-
-  void _logDebug(String message) {
-    unawaited(
-      LogWriter.log(source: 'agent', level: 'debug', message: 'blob-cache: $message').catchError((Object _, StackTrace stackTrace) {
-        return;
-      }),
-    );
+    LogWriter.logAgentBackground(level: 'trace', message: 'blob-cache: exists shard=$shardKey result=$result writeReady=$_writeReady');
   }
 }

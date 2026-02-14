@@ -5,8 +5,8 @@ import 'dart:io';
 class LogWriter {
   static const String _agentSource = 'agent';
   static const String _guiSource = 'gui';
-  static const String _consoleLevel = 'console';
-  static const String _defaultLevel = _consoleLevel;
+  static const String _infoLevel = 'info';
+  static const String _defaultLevel = _infoLevel;
   static final Queue<_LogOp> _queue = Queue<_LogOp>();
   static final Map<String, String> _pathsBySource = <String, String>{};
   static final Map<String, String> _levelsBySource = <String, String>{};
@@ -71,7 +71,7 @@ class LogWriter {
       return;
     }
     final timestamp = _formatTimestamp(DateTime.now());
-    if (normalizedLevel == _consoleLevel) {
+    if (normalizedLevel == _infoLevel) {
       stdout.writeln('$timestamp $trimmedMessage');
     }
     final line = '$timestamp level=$normalizedLevel message=${_sanitize(trimmedMessage)}';
@@ -80,6 +80,22 @@ class LogWriter {
     _queue.add(_LogOp(path: _resolvePath(source), line: line, truncate: false, rotate: false, allowParentCreate: allowParentCreate, completer: completer));
     _ensureDrain();
     return completer.future;
+  }
+
+  static Future<void> logAgent({required String level, required String message}) {
+    return log(source: _agentSource, level: level, message: message);
+  }
+
+  static Future<void> logGui({required String level, required String message}) {
+    return log(source: _guiSource, level: level, message: message);
+  }
+
+  static void logAgentBackground({required String level, required String message}) {
+    unawaited(logAgent(level: level, message: message).catchError((Object _, StackTrace _) {}));
+  }
+
+  static void logGuiBackground({required String level, required String message}) {
+    unawaited(logGui(level: level, message: message).catchError((Object _, StackTrace _) {}));
   }
 
   static String _resolvePath(String source) {
@@ -101,8 +117,12 @@ class LogWriter {
   static int? _levelRank(String level) {
     final normalized = _normalizeLevel(level);
     return switch (normalized) {
-      'console' => 0,
-      'debug' => 1,
+      'fatal' => 0,
+      'error' => 1,
+      'warn' => 2,
+      'info' => 3,
+      'debug' => 4,
+      'trace' => 5,
       _ => null,
     };
   }
@@ -118,9 +138,17 @@ class LogWriter {
   static String _normalizeLevel(String level) {
     final normalized = level.trim().toLowerCase();
     return switch (normalized) {
+      'fatal' => 'fatal',
+      'critical' => 'fatal',
+      'error' => 'error',
+      'warn' => 'warn',
+      'warning' => 'warn',
+      'info' => 'info',
+      'console' => 'info',
       'debug' => 'debug',
       'dbug' => 'debug',
-      _ => 'console',
+      'trace' => 'trace',
+      _ => 'info',
     };
   }
 

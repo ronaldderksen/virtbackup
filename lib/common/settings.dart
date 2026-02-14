@@ -170,7 +170,7 @@ class AppSettings {
     }
     return AppSettings(
       backupPath: resolvedBackupPath,
-      logLevel: ((json['log_level'] ?? '').toString().trim().isEmpty ? 'console' : json['log_level'].toString().trim()),
+      logLevel: ((json['log_level'] ?? '').toString().trim().isEmpty ? 'info' : json['log_level'].toString().trim()),
       destinations: destinations,
       backupDestinationId: backupDestinationId == null || backupDestinationId.isEmpty ? selectedBackupDestination?.id : backupDestinationId,
       restoreDestinationId: restoreDestinationId == null || restoreDestinationId.isEmpty ? null : restoreDestinationId,
@@ -200,7 +200,7 @@ class AppSettings {
 
   factory AppSettings.empty() => AppSettings(
     backupPath: '',
-    logLevel: 'console',
+    logLevel: 'info',
     destinations: const <BackupDestination>[],
     backupDestinationId: null,
     restoreDestinationId: null,
