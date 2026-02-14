@@ -43,10 +43,16 @@ void backupWorkerMain(Map<String, dynamic> init) {
     final driverParams = Map<String, dynamic>.from(payload['driverParams'] as Map? ?? const {});
     final freshRequested = payload['fresh'] == true;
     final settingsMap = Map<String, dynamic>.from(payload['settings'] as Map? ?? const {});
+    final destinationMap = Map<String, dynamic>.from(payload['destination'] as Map? ?? const {});
     final serverMap = Map<String, dynamic>.from(payload['server'] as Map? ?? const {});
     final vmMap = Map<String, dynamic>.from(payload['vm'] as Map? ?? const {});
 
     final settings = AppSettings.fromMap(settingsMap);
+    final selectedDestination = destinationMap.isEmpty ? null : BackupDestination.fromMap(destinationMap);
+    final isFilesystemDestination = selectedDestination?.id == AppSettings.filesystemDestinationId;
+    final uploadConcurrency = isFilesystemDestination
+        ? null
+        : selectedDestination?.uploadConcurrency ?? (throw StateError('uploadConcurrency is required for destination "${selectedDestination?.id ?? ''}".'));
     final server = ServerConfig.fromMap(serverMap);
     final vm = VmEntry.fromMap(vmMap);
     var logConfigured = false;
@@ -74,7 +80,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
           logInfo: (message) => unawaited(writeAgentLog('console', message)),
         ),
         'filesystem': (_) => FilesystemBackupDriver(backupPath.trim()),
-        'sftp': (_) => SftpBackupDriver(settings: settings),
+        'sftp': (_) => SftpBackupDriver(settings: settings, poolSessions: uploadConcurrency),
       };
       final factory = factories[driverId] ?? factories['filesystem']!;
       return factory(driverParams);
@@ -88,6 +94,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
       onInfo: host.logInfo,
       onError: host.logError,
       hashblocksLimitBufferMb: settings.hashblocksLimitBufferMb,
+      writerConcurrencyOverride: uploadConcurrency,
     );
 
     try {

@@ -70,6 +70,7 @@ class _ExistsWorker {
             continue;
           }
           onMissing();
+          registerProgressBlocks(1);
           if (_pendingMissingStart < 0) {
             _pendingMissingStart = entry.index;
           } else {

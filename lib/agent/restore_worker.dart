@@ -106,6 +106,9 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     final isFilesystemDestination = selectedDestination?.id == AppSettings.filesystemDestinationId;
     final useStoredBlobs = !isFilesystemDestination && selectedDestination?.useBlobs == true;
     final storeDownloadedBlobs = !isFilesystemDestination && selectedDestination?.storeBlobs == true;
+    final downloadConcurrency = isFilesystemDestination
+        ? 8
+        : selectedDestination?.downloadConcurrency ?? (throw StateError('downloadConcurrency is required for destination "${selectedDestination?.id ?? ''}".'));
     final server = ServerConfig.fromMap(serverMap);
     var logConfigured = false;
 
@@ -135,7 +138,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           logInfo: (message) => unawaited(writeAgentLog('console', message)),
         ),
         'filesystem': () => FilesystemBackupDriver(backupPath.trim()),
-        'sftp': () => SftpBackupDriver(settings: settings),
+        'sftp': () => SftpBackupDriver(settings: settings, poolSessions: downloadConcurrency),
       };
       final factory = factories[driverId] ?? factories['filesystem']!;
       return factory();
@@ -354,6 +357,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           localBlobDriver: localBlobDriver,
           useStoredBlobs: useStoredBlobs,
           storeDownloadedBlobs: storeDownloadedBlobs,
+          maxConcurrentDownloads: downloadConcurrency,
         );
         await host.uploadRemoteStream(
           server,
@@ -621,11 +625,12 @@ Stream<List<int>> _blobStream(
   BackupDriver? localBlobDriver,
   required bool useStoredBlobs,
   required bool storeDownloadedBlobs,
+  required int maxConcurrentDownloads,
 }) async* {
   var totalEmitted = 0;
   final remote = driver is RemoteBlobDriver ? driver as RemoteBlobDriver : null;
   if (remote != null) {
-    const maxConcurrent = 8;
+    final maxConcurrent = maxConcurrentDownloads;
     var nextIndex = 0;
     var nextEmit = 0;
     final inFlight = <int, Future<_BlockData>>{};

@@ -52,7 +52,6 @@ class _HashblocksWorker {
       handleHashblocksBytes(zeroBytes);
       handleBytes(zeroBytes);
       lastHashblocksIndex = zeroRange.$2;
-      registerProgressBlocks(zeroCount);
       return;
     }
     final hashEntry = parseHashEntry(line);

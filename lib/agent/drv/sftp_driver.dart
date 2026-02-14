@@ -11,7 +11,10 @@ import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/settings.dart';
 
 class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
-  SftpBackupDriver({required AppSettings settings}) : _settings = settings, _cacheRoot = _cacheRootForSettings(settings);
+  SftpBackupDriver({required AppSettings settings, int? poolSessions})
+    : _settings = settings,
+      _cacheRoot = _cacheRootForSettings(settings),
+      _pool = _SftpPool(maxSessions: poolSessions ?? _writeConcurrency);
 
   final AppSettings _settings;
   final Directory _cacheRoot;
@@ -19,11 +22,10 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   static const int _writeConcurrency = 8;
   static const int _blobCacheReservedSessions = 1;
-  static const int _generalPoolSessions = _writeConcurrency + 2;
   // Safety switch: disable all remote uploads for SFTP driver.
   static const bool _remoteUploadEnabled = true;
   static const String _remoteAppFolderName = 'VirtBackup';
-  final _SftpPool _pool = _SftpPool(maxSessions: _generalPoolSessions);
+  final _SftpPool _pool;
   final _SftpPool _blobCachePool = _SftpPool(maxSessions: _blobCacheReservedSessions);
   final _NativeSftpPool _nativePool = _NativeSftpPool(maxSessions: _writeConcurrency);
   bool _agentLogConfigured = false;

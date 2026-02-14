@@ -1448,6 +1448,7 @@ class AgentHttpServer {
           'driverParams': driverParams ?? const <String, dynamic>{},
           'fresh': freshRequested,
           'settings': (destination?.settings ?? _agentSettings).toMap(),
+          'destination': destination?.destination.toMap(),
           'server': server.toMap(),
           'vm': vm.toMap(),
         });

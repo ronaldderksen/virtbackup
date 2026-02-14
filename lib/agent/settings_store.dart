@@ -109,7 +109,7 @@ class AppSettingsStore {
       return AppSettings.empty();
     }
     final normalized = _normalizeYaml(decoded);
-    final updated = _ensureDestinationBlobFlags(normalized);
+    final updated = _ensureDestinationDefaults(normalized);
     if (updated) {
       final encoded = _ensureTrailingNewline(_toYaml(normalized));
       await file.writeAsString(encoded);
@@ -121,7 +121,7 @@ class AppSettingsStore {
     return AppSettings.fromMap(normalized);
   }
 
-  bool _ensureDestinationBlobFlags(Map<String, dynamic> data) {
+  bool _ensureDestinationDefaults(Map<String, dynamic> data) {
     final destinations = data['destinations'];
     if (destinations is! List) {
       return false;
@@ -141,6 +141,14 @@ class AppSettingsStore {
       }
       if (!destination.containsKey('useBlobs')) {
         destination['useBlobs'] = false;
+        changed = true;
+      }
+      if (!destination.containsKey('uploadConcurrency')) {
+        destination['uploadConcurrency'] = 8;
+        changed = true;
+      }
+      if (!destination.containsKey('downloadConcurrency')) {
+        destination['downloadConcurrency'] = 8;
         changed = true;
       }
     }

@@ -116,6 +116,8 @@ class BackupDestination {
     this.disableFresh = false,
     this.storeBlobs = false,
     this.useBlobs = false,
+    this.uploadConcurrency,
+    this.downloadConcurrency,
   });
 
   final String id;
@@ -125,6 +127,8 @@ class BackupDestination {
   final bool disableFresh;
   final bool storeBlobs;
   final bool useBlobs;
+  final int? uploadConcurrency;
+  final int? downloadConcurrency;
   final Map<String, dynamic> params;
 
   Map<String, dynamic> toMap() {
@@ -132,6 +136,12 @@ class BackupDestination {
     if (driverId.trim() != 'filesystem') {
       map['storeBlobs'] = storeBlobs;
       map['useBlobs'] = useBlobs;
+      if (uploadConcurrency != null) {
+        map['uploadConcurrency'] = uploadConcurrency;
+      }
+      if (downloadConcurrency != null) {
+        map['downloadConcurrency'] = downloadConcurrency;
+      }
     }
     return map;
   }
@@ -147,8 +157,21 @@ class BackupDestination {
       disableFresh: json['disableFresh'] == true,
       storeBlobs: json['storeBlobs'] == true,
       useBlobs: json['useBlobs'] == true,
+      uploadConcurrency: _parsePositiveIntOrNull(json['uploadConcurrency'], field: 'uploadConcurrency'),
+      downloadConcurrency: _parsePositiveIntOrNull(json['downloadConcurrency'], field: 'downloadConcurrency'),
       params: params,
     );
+  }
+
+  static int? _parsePositiveIntOrNull(Object? raw, {required String field}) {
+    if (raw == null) {
+      return null;
+    }
+    final parsed = raw is num ? raw.toInt() : int.tryParse(raw.toString().trim());
+    if (parsed == null || parsed <= 0) {
+      throw FormatException('Invalid $field value: $raw');
+    }
+    return parsed;
   }
 }
 

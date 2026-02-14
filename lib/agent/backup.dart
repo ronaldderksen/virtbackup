@@ -61,11 +61,13 @@ class BackupAgent {
     LogError? onError,
     int? writerBacklogBytesLimit,
     int? hashblocksLimitBufferMb,
+    int? writerConcurrencyOverride,
   }) : _dependencies = dependencies,
        _onProgress = onProgress,
        _onInfo = onInfo,
        _onError = onError,
-       _writerBacklogBytesLimit = writerBacklogBytesLimit ?? _defaultWriterBacklogBytesLimit;
+       _writerBacklogBytesLimit = writerBacklogBytesLimit ?? _defaultWriterBacklogBytesLimit,
+       _writerConcurrencyOverride = writerConcurrencyOverride;
 
   final BackupAgentDependencies _dependencies;
   final BackupProgressListener _onProgress;
@@ -97,6 +99,7 @@ class BackupAgent {
   static const int _defaultWriterBacklogBytesLimit = 4 * 1024 * 1024 * 1024;
   final Set<Future<void>> _inFlightWrites = {};
   final int _writerBacklogBytesLimit;
+  final int? _writerConcurrencyOverride;
   _BlobDirectoryCache? _blobDirectoryCache;
   _BlobCacheWorker? _blobCacheWorker;
   Future<void>? _blobCacheWorkerFuture;
@@ -855,6 +858,8 @@ class BackupAgent {
     const initialLeadMb = 64;
     const targetQueuedBlocks = 512;
     const limitStepBlocks = 128;
+    const limitStepWhenQueueEmptyBlocks = 1024;
+    const maxLeadFromExistsCheckBlocks = 1024;
     const limitUpdateInterval = Duration(seconds: 1);
     const unlimitedLimitIndex = 2147483647;
     final maxFileLimitIndex = max(0, ((fileSize + _blockSize - 1) ~/ _blockSize) - 1);
@@ -862,6 +867,7 @@ class BackupAgent {
     Timer? limitUpdateTimer;
     var hasSeenExistingOrMissing = false;
     var unlimitedSent = false;
+    var existsCheckedBlocks = 0;
 
     late final _WriterWorker writerWorker;
     late final _SftpWorker sftpWorker;
@@ -922,7 +928,9 @@ class BackupAgent {
       if (queuedBlocksNow >= targetQueuedBlocks) {
         return;
       }
-      final nextLimit = max(0, lastLimitSent + limitStepBlocks);
+      final stepBlocks = queuedBlocksNow == 0 ? limitStepWhenQueueEmptyBlocks : limitStepBlocks;
+      final maxLimitFromExistsCheck = max(0, existsCheckedBlocks + maxLeadFromExistsCheckBlocks - 1);
+      final nextLimit = min(max(0, lastLimitSent + stepBlocks), maxLimitFromExistsCheck);
       sendLimit(nextLimit, force: force, reason: reason, detail: 'targetQueue=$targetQueuedBlocks queued=$queuedBlocksNow');
     }
 
@@ -930,6 +938,7 @@ class BackupAgent {
       if (count <= 0) {
         return;
       }
+      existsCheckedBlocks += count;
     }
 
     void registerWriterCompletedBlocks(int count) {
@@ -964,7 +973,7 @@ class BackupAgent {
     final writerTimeout = const Duration(minutes: 5);
     final cache = _blobDirectoryCache;
     writerWorker = _WriterWorker(
-      maxConcurrentWrites: max(1, driver.capabilities.maxConcurrentWrites),
+      maxConcurrentWrites: _writerConcurrencyOverride ?? max(1, driver.capabilities.maxConcurrentWrites),
       blockTimeout: writerTimeout,
       logInterval: agentLogInterval,
       backlogLimitBytes: _writerBacklogBytesLimit,
