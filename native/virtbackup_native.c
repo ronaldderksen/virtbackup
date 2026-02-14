@@ -197,14 +197,14 @@ void *vb_sftp_connect(const char *host, int port, const char *user, const char *
 
   int sock = connect_tcp(host, port);
   if (sock < 0) {
-    libssh2_exit();
+    release_libssh2_init();
     return NULL;
   }
 
   LIBSSH2_SESSION *session = libssh2_session_init();
   if (!session) {
     close(sock);
-    libssh2_exit();
+    release_libssh2_init();
     return NULL;
   }
 

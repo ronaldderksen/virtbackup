@@ -27,6 +27,7 @@ class BackupAgentHost {
   DateTime _sftpUploadLastLog = DateTime.now();
   DateTime? _firstSftpUploadAt;
   DateTime? _lastSftpUploadAt;
+  static const int _sftpRangeReadChunkSize = 16 * 1024 * 1024;
   static const int _sftpUploadChunkSize = 4 * 1024 * 1024;
 
   final SSHAlgorithms _sshAlgorithms = const SSHAlgorithms(cipher: [SSHCipherType.aes128ctr, SSHCipherType.aes256ctr]);
@@ -36,10 +37,10 @@ class BackupAgentHost {
   final Map<String, StreamSubscription<String>> _eventStdoutSubs = {};
   final Map<String, StreamSubscription<String>> _eventStderrSubs = {};
   final Set<String> _eventStarting = {};
-  final Map<String, _ReusableSftpSession> _rangeSftpSessions = {};
   final _NativeSftpBindings? _nativeSftp = _NativeSftpBindings.tryLoad();
   bool _nativeSftpLogged = false;
   final Map<String, Pointer<Void>> _nativeSftpSessions = {};
+  final Map<String, _NativeSftpReadHandle> _nativeSftpReadHandles = {};
 
   bool get nativeSftpAvailable => _nativeSftp != null;
 
@@ -72,9 +73,7 @@ class BackupAgentHost {
       return;
     }
     _nativeSftpLogged = true;
-    if (_nativeSftp == null) {
-      _logInfo('native sftp: not found');
-    } else {
+    if (_nativeSftp != null) {
       _logInfo('native sftp: loaded');
     }
   }
@@ -86,20 +85,20 @@ class BackupAgentHost {
   Future<void> _beginLargeTransferSession(ServerConfig server) async {
     _logNativeSftpStatusOnce();
     if (_nativeSftp == null) {
-      return;
+      throw StateError('Native SFTP is required but not available.');
     }
     if (_nativeSftpSessions.containsKey(server.id)) {
       return;
     }
     final session = _nativeSftp.connect(server.sshHost.trim(), int.tryParse(server.sshPort.trim()) ?? 22, server.sshUser.trim(), server.sshPassword);
     if (session == nullptr) {
-      _logInfo('native sftp connect failed for ${server.sshHost}');
-      return;
+      throw StateError('Native SFTP connect failed for ${server.sshHost}.');
     }
     _nativeSftpSessions[server.id] = session;
   }
 
   Future<void> _endLargeTransferSession(ServerConfig server) async {
+    _closeNativeReadHandlesForServer(server.id);
     final session = _nativeSftpSessions.remove(server.id);
     if (session == null || _nativeSftp == null) {
       return;
@@ -108,11 +107,80 @@ class BackupAgentHost {
   }
 
   Future<void> _reconnectNativeSftpSession(ServerConfig server) async {
+    _closeNativeReadHandlesForServer(server.id);
     final session = _nativeSftpSessions.remove(server.id);
     if (session != null && _nativeSftp != null) {
       _nativeSftp.disconnect(session);
     }
     await _beginLargeTransferSession(server);
+  }
+
+  String _nativeReadHandleKey(String serverId, String remotePath) {
+    return '$serverId|$remotePath';
+  }
+
+  void _closeNativeReadHandlesForServer(String serverId) {
+    if (_nativeSftp == null) {
+      _nativeSftpReadHandles.clear();
+      return;
+    }
+    final keysToClose = _nativeSftpReadHandles.keys.where((key) => key.startsWith('$serverId|')).toList();
+    for (final key in keysToClose) {
+      final entry = _nativeSftpReadHandles.remove(key);
+      if (entry == null) {
+        continue;
+      }
+      if (entry.file != nullptr) {
+        _nativeSftp.closeFile(entry.file);
+      }
+    }
+  }
+
+  _NativeSftpReadLease _acquireNativeReadLease(String serverId, String remotePath, Pointer<Void> session) {
+    final nativeSftp = _nativeSftp;
+    if (nativeSftp == null) {
+      throw StateError('Native SFTP bindings are unavailable.');
+    }
+    final key = _nativeReadHandleKey(serverId, remotePath);
+    final cached = _nativeSftpReadHandles[key];
+    if (cached != null && !cached.inUse) {
+      cached.inUse = true;
+      return _NativeSftpReadLease(file: cached.file, cacheKey: key);
+    }
+    final opened = nativeSftp.openRead(session, remotePath);
+    if (opened == nullptr) {
+      throw 'native sftp open failed for $remotePath';
+    }
+    if (cached == null) {
+      _nativeSftpReadHandles[key] = _NativeSftpReadHandle(file: opened, inUse: true);
+      return _NativeSftpReadLease(file: opened, cacheKey: key);
+    }
+    return _NativeSftpReadLease(file: opened);
+  }
+
+  void _releaseNativeReadLease(_NativeSftpReadLease? lease, {required bool keepOpen}) {
+    if (lease == null || _nativeSftp == null) {
+      return;
+    }
+    final key = lease.cacheKey;
+    if (key == null) {
+      if (lease.file != nullptr) {
+        _nativeSftp.closeFile(lease.file);
+      }
+      return;
+    }
+    final entry = _nativeSftpReadHandles[key];
+    if (entry == null) {
+      return;
+    }
+    if (keepOpen) {
+      entry.inUse = false;
+      return;
+    }
+    _nativeSftpReadHandles.remove(key);
+    if (entry.file != nullptr) {
+      _nativeSftp.closeFile(entry.file);
+    }
   }
 
   void _markSftpUpload(int bytes) {
@@ -447,170 +515,81 @@ class BackupAgentHost {
       return;
     }
     final nativeSession = _nativeSftpSessions[server.id];
-    if (nativeSession != null && _nativeSftp != null) {
-      var remaining = length;
-      var currentOffset = offset;
-      const chunkSize = 4 * 1024 * 1024;
-      final buffer = calloc<Uint8>(chunkSize);
-      Pointer<Void>? file;
-      Pointer<Void>? retryFile;
-      try {
-        file = _nativeSftp.openRead(nativeSession, remotePath);
-        if (file == nullptr) {
-          throw 'native sftp open failed for $remotePath';
-        }
-        while (remaining > 0) {
-          final toRead = remaining > chunkSize ? chunkSize : remaining;
-          final read = _nativeSftp.read(file, currentOffset, buffer, toRead);
-          if (read <= 0) {
-            break;
-          }
-          final data = Uint8List.fromList(buffer.asTypedList(read));
-          currentOffset += read;
-          remaining -= read;
-          _sftpRangeBytesSinceLog += read;
-          final now = DateTime.now();
-          final elapsedMs = now.difference(_sftpRangeLastLog).inMilliseconds;
-          if (elapsedMs >= agentLogInterval.inMilliseconds) {
-            final mbPerSec = (_sftpRangeBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
-            _logInfo('SFTP range speed: ${mbPerSec.toStringAsFixed(1)}MB/s');
-            _sftpRangeBytesSinceLog = 0;
-            _sftpRangeLastLog = now;
-          }
-          onBytes?.call(read);
-          await onChunk(data);
-        }
-        if (remaining == 0) {
-          return;
-        }
-        _logInfo('SFTP short read for $remotePath offset=$currentOffset expected=$remaining got=0; retrying once');
-        await _reconnectNativeSftpSession(server);
-        final sessionAfterRetry = _nativeSftpSessions[server.id];
-        if (sessionAfterRetry == null) {
-          throw 'native sftp reconnect failed for ${server.sshHost}';
-        }
-        retryFile = _nativeSftp.openRead(sessionAfterRetry, remotePath);
-        if (retryFile == nullptr) {
-          throw 'native sftp open failed for $remotePath';
-        }
-        while (remaining > 0) {
-          final toRead = remaining > chunkSize ? chunkSize : remaining;
-          final read = _nativeSftp.read(retryFile, currentOffset, buffer, toRead);
-          if (read <= 0) {
-            break;
-          }
-          final data = Uint8List.fromList(buffer.asTypedList(read));
-          currentOffset += read;
-          remaining -= read;
-          _sftpRangeBytesSinceLog += read;
-          final now = DateTime.now();
-          final elapsedMs = now.difference(_sftpRangeLastLog).inMilliseconds;
-          if (elapsedMs >= agentLogInterval.inMilliseconds) {
-            final mbPerSec = (_sftpRangeBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
-            _logInfo('SFTP range speed: ${mbPerSec.toStringAsFixed(1)}MB/s');
-            _sftpRangeBytesSinceLog = 0;
-            _sftpRangeLastLog = now;
-          }
-          onBytes?.call(read);
-          await onChunk(data);
-        }
-        if (remaining == 0) {
-          return;
-        }
-        throw 'SFTP short read for $remotePath offset=$currentOffset expected=$remaining got=0';
-      } finally {
-        if (file != null && file != nullptr) {
-          _nativeSftp.closeFile(file);
-        }
-        if (retryFile != null && retryFile != nullptr) {
-          _nativeSftp.closeFile(retryFile);
-        }
-        calloc.free(buffer);
-      }
+    if (nativeSession == null || _nativeSftp == null) {
+      throw StateError('Native SFTP range session is required but unavailable for ${server.sshHost}.');
     }
-    SftpClient? sftp;
-    SftpFile? remoteFile;
-    var bytesRead = 0;
     var remaining = length;
     var currentOffset = offset;
-    var retried = false;
+    const chunkSize = _sftpRangeReadChunkSize;
+    final buffer = calloc<Uint8>(chunkSize);
+    _NativeSftpReadLease? lease;
+    var completed = false;
     try {
+      lease = _acquireNativeReadLease(server.id, remotePath, nativeSession);
       while (remaining > 0) {
-        bytesRead = 0;
-        sftp = (await _getRangeSftpSession(server)).sftp;
-        remoteFile = await sftp.open(remotePath);
-        final rangeStream = remoteFile.read(length: remaining, offset: currentOffset);
-        try {
-          await for (final chunk in rangeStream) {
-            bytesRead += chunk.length;
-            _sftpRangeBytesSinceLog += chunk.length;
-            final now = DateTime.now();
-            final elapsedMs = now.difference(_sftpRangeLastLog).inMilliseconds;
-            if (elapsedMs >= agentLogInterval.inMilliseconds) {
-              final mbPerSec = (_sftpRangeBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
-              _logInfo('SFTP range speed: ${mbPerSec.toStringAsFixed(1)}MB/s');
-              _sftpRangeBytesSinceLog = 0;
-              _sftpRangeLastLog = now;
-            }
-            onBytes?.call(chunk.length);
-            await onChunk(chunk);
-          }
-        } on StateError catch (error) {
-          final message = error.message.toString();
-          if (message.contains('Cannot add event after closing')) {
-            _logInfo('SFTP range stream closed early.');
-          } else {
-            rethrow;
-          }
-        } finally {
-          try {
-            await remoteFile.close();
-          } catch (_) {}
+        final toRead = remaining > chunkSize ? chunkSize : remaining;
+        final read = _nativeSftp.read(lease.file, currentOffset, buffer, toRead);
+        if (read <= 0) {
+          break;
         }
-        if (bytesRead == remaining) {
-          return;
+        final data = Uint8List.fromList(buffer.asTypedList(read));
+        currentOffset += read;
+        remaining -= read;
+        _sftpRangeBytesSinceLog += read;
+        final now = DateTime.now();
+        final elapsedMs = now.difference(_sftpRangeLastLog).inMilliseconds;
+        if (elapsedMs >= agentLogInterval.inMilliseconds) {
+          final mbPerSec = (_sftpRangeBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
+          _logInfo('SFTP range speed: ${mbPerSec.toStringAsFixed(1)}MB/s');
+          _sftpRangeBytesSinceLog = 0;
+          _sftpRangeLastLog = now;
         }
-        if (retried) {
-          throw 'SFTP short read for $remotePath offset=$currentOffset expected=$remaining got=$bytesRead';
-        }
-        _logInfo('SFTP short read for $remotePath offset=$currentOffset expected=$remaining got=$bytesRead; retrying once');
-        retried = true;
-        remaining -= bytesRead;
-        currentOffset += bytesRead;
+        onBytes?.call(read);
+        await onChunk(data);
       }
-    } catch (error) {
-      _closeRangeSftpSession(server.id);
-      rethrow;
+      if (remaining == 0) {
+        completed = true;
+        return;
+      }
+      _logInfo('SFTP short read for $remotePath offset=$currentOffset expected=$remaining got=0; retrying once');
+      _releaseNativeReadLease(lease, keepOpen: false);
+      lease = null;
+      await _reconnectNativeSftpSession(server);
+      final sessionAfterRetry = _nativeSftpSessions[server.id];
+      if (sessionAfterRetry == null) {
+        throw 'native sftp reconnect failed for ${server.sshHost}';
+      }
+      lease = _acquireNativeReadLease(server.id, remotePath, sessionAfterRetry);
+      while (remaining > 0) {
+        final toRead = remaining > chunkSize ? chunkSize : remaining;
+        final read = _nativeSftp.read(lease.file, currentOffset, buffer, toRead);
+        if (read <= 0) {
+          break;
+        }
+        final data = Uint8List.fromList(buffer.asTypedList(read));
+        currentOffset += read;
+        remaining -= read;
+        _sftpRangeBytesSinceLog += read;
+        final now = DateTime.now();
+        final elapsedMs = now.difference(_sftpRangeLastLog).inMilliseconds;
+        if (elapsedMs >= agentLogInterval.inMilliseconds) {
+          final mbPerSec = (_sftpRangeBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
+          _logInfo('SFTP range speed: ${mbPerSec.toStringAsFixed(1)}MB/s');
+          _sftpRangeBytesSinceLog = 0;
+          _sftpRangeLastLog = now;
+        }
+        onBytes?.call(read);
+        await onChunk(data);
+      }
+      if (remaining == 0) {
+        completed = true;
+        return;
+      }
+      throw 'SFTP short read for $remotePath offset=$currentOffset expected=$remaining got=0';
     } finally {
-      try {
-        await remoteFile?.close();
-      } catch (_) {}
+      _releaseNativeReadLease(lease, keepOpen: completed);
+      calloc.free(buffer);
     }
-  }
-
-  Future<_ReusableSftpSession> _getRangeSftpSession(ServerConfig server) async {
-    final existing = _rangeSftpSessions[server.id];
-    if (existing != null && !existing.isClosed) {
-      return existing;
-    }
-    final host = server.sshHost.trim();
-    final port = int.tryParse(server.sshPort.trim()) ?? 22;
-    final user = server.sshUser.trim();
-    final password = server.sshPassword;
-    final socket = await SSHSocket.connect(host, port);
-    final client = SSHClient(socket, username: user, onPasswordRequest: () => password, algorithms: _sshAlgorithms);
-    final sftp = await client.sftp();
-    final session = _ReusableSftpSession(socket: socket, client: client, sftp: sftp);
-    _rangeSftpSessions[server.id] = session;
-    return session;
-  }
-
-  void _closeRangeSftpSession(String serverId) {
-    final session = _rangeSftpSessions.remove(serverId);
-    if (session == null) {
-      return;
-    }
-    session.close();
   }
 
   Future<String?> _ensureHashblocksOnServer(ServerConfig server) async {
@@ -1351,29 +1330,18 @@ class BackupAgentHost {
   }
 }
 
-class _ReusableSftpSession {
-  _ReusableSftpSession({required this.socket, required this.client, required this.sftp});
+class _NativeSftpReadHandle {
+  _NativeSftpReadHandle({required this.file, required this.inUse});
 
-  final SSHSocket socket;
-  final SSHClient client;
-  final SftpClient sftp;
-  bool isClosed = false;
+  final Pointer<Void> file;
+  bool inUse;
+}
 
-  void close() {
-    if (isClosed) {
-      return;
-    }
-    isClosed = true;
-    try {
-      sftp.close();
-    } catch (_) {}
-    try {
-      client.close();
-    } catch (_) {}
-    try {
-      socket.close();
-    } catch (_) {}
-  }
+class _NativeSftpReadLease {
+  _NativeSftpReadLease({required this.file, this.cacheKey});
+
+  final Pointer<Void> file;
+  final String? cacheKey;
 }
 
 class _NativeSftpBindings {

@@ -173,8 +173,11 @@ The hashblocks path is divided into logical workers:
 
 - `SftpWorker` (in `workers/sftp_worker.dart`)
   - Fetches missing blocks via range reads.
-  - Missing hashes are forwarded immediately (run size 1), then split into ranges.
+  - Uses a small bounded prefetch window for missing hashes.
+  - Fetches one block (1 MiB) per range read call.
   - Streams block data into the writer queue.
+  - Native SFTP range reads reuse open read handles per `(server, path)` and reconnect on short-read.
+  - Native SFTP is required for range reads; no dartssh fallback path is used.
 
 - `WriterWorker` (in `workers/writer_worker.dart`)
   - De-queues blocks and writes blobs.

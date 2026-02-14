@@ -93,9 +93,7 @@ class BackupAgent {
   int _driverBufferedBytes = 0;
   DateTime? _backupStartAt;
   static const int _blockSize = 1024 * 1024;
-  static const int _maxRemoteReadBytes = 4 * 1024 * 1024;
-  static const int _hashblocksRangeSizeBytes = 128 * 1024 * 1024;
-  static const int _hashblocksRangeConcurrency = 4;
+  static const int _sftpPrefetchWindow = 2;
   static const int _defaultWriterBacklogBytesLimit = 4 * 1024 * 1024 * 1024;
   final Set<Future<void>> _inFlightWrites = {};
   final int _writerBacklogBytesLimit;
@@ -992,9 +990,7 @@ class BackupAgent {
       sourcePath: sourcePath,
       blockSize: _blockSize,
       fileSize: fileSize,
-      maxRemoteReadBytes: _maxRemoteReadBytes,
-      rangeSizeBytes: _hashblocksRangeSizeBytes,
-      rangeConcurrency: _hashblocksRangeConcurrency,
+      prefetchWindow: _sftpPrefetchWindow,
       streamRemoteRange: _dependencies.streamRemoteRange,
       handleBytes: _handleBytes,
       markSftpRead: (bytes) {
