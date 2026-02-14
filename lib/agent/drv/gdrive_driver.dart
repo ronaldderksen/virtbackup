@@ -57,7 +57,16 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       // Fallback for misconfiguration; callers should configure backup.base_path.
       return Directory('${_tempBase()}${Platform.pathSeparator}virtbackup_gdrive_cache');
     }
-    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}cache${Platform.pathSeparator}gdrive');
+    final destinationId = _cacheKeyFromSettings(settings);
+    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}cache${Platform.pathSeparator}$destinationId');
+  }
+
+  static String _cacheKeyFromSettings(AppSettings settings) {
+    final destinationId = settings.backupDestinationId?.trim() ?? '';
+    if (destinationId.isEmpty) {
+      throw StateError('GDrive cache root requires backupDestinationId in settings.');
+    }
+    return destinationId.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
   }
 
   @override

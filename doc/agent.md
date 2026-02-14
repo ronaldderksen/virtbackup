@@ -302,6 +302,15 @@ The agent supports optional native SFTP via FFI:
 - Google Drive folder creation is guarded by a local folder lock and checks for existing folders before creating; when duplicate folder names are detected, the driver performs a strict merge into a primary folder and fails the operation if duplicates cannot be fully resolved.
 - Storage destinations are configured at root-level `destinations` in `agent.yaml` (not under `backup`), each with its own `id`, `driverId`, and `params`.
 - Destination option `disableFresh: true` forces `fresh` off for that destination; backup requests with `fresh: true` continue and are logged.
+- `fresh` cleanup never deletes filesystem destination blobs (`destinations[id=filesystem].params.path/VirtBackup/blobs`).
+- For non-filesystem destinations, `storeBlobs` and `useBlobs` are persisted in `agent.yaml`.
+- On agent startup, missing `storeBlobs`/`useBlobs` keys on non-filesystem destinations are auto-added as `false` and written back immediately.
+- Remote destination cache folders under `<filesystem path>/VirtBackup/cache/` are keyed by destination id (not by driver id).
+- Restore behavior for non-filesystem destinations:
+  - `useBlobs: true`: restore tries local blobs from `destinations[id=filesystem].params.path` first; if present, remote download is skipped.
+  - `storeBlobs: true`: blobs downloaded from remote during restore are also written to local filesystem blob storage.
+  - Existing local blobs are not overwritten.
+  - Local blob write failures fail the restore job.
 - Destination `id: filesystem` is mandatory, always enabled, and cannot be removed.
 - `backup.base_path` is deprecated; `destinations[id=filesystem].params.path` is the source of truth and is what gets persisted.
 - Backup uses `backupDestinationId` to pick the active destination.

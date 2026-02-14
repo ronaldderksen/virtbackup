@@ -337,7 +337,6 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
   @override
   Future<void> freshCleanup() async {
     await _deleteDirIfExists(_manifestsRoot());
-    await _deleteDirIfExists(blobsDir());
   }
 
   @override

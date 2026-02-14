@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:isolate';
-import 'dart:io';
 
 import 'package:virtbackup/agent/backup.dart';
 import 'package:virtbackup/agent/backup_host.dart';
@@ -22,25 +21,7 @@ const String _typeSettings = 'settings';
 const bool _isDebug = !bool.fromEnvironment('dart.vm.product');
 
 Future<void> _deleteSharedBlobCacheIfNeeded(BackupAgentHost host, AppSettings settings, String driverId) async {
-  // The shared blobstore at ${backup.base_path}/VirtBackup/blobs is intended as a restore/download cache for remote drivers.
-  // Note: for the filesystem driver this deletes actual backups; this is still allowed here because it is debug-only and explicitly requested.
-  final basePath = settings.backupPath.trim();
-  if (basePath.isEmpty) {
-    host.logInfo('Fresh cleanup: backup.base_path is empty; skipping local blob cache cleanup.');
-    return;
-  }
-  final sep = Platform.pathSeparator;
-  final blobsDir = Directory('$basePath${sep}VirtBackup${sep}blobs');
-  if (!await blobsDir.exists()) {
-    host.logInfo('Fresh cleanup: local blob cache not found: ${blobsDir.path}');
-    return;
-  }
-  host.logInfo('Fresh cleanup: deleting local blob cache: ${blobsDir.path}');
-  try {
-    await blobsDir.delete(recursive: true);
-  } catch (error, stackTrace) {
-    host.logError('Fresh cleanup: failed to delete local blob cache.', error, stackTrace);
-  }
+  host.logInfo('Fresh cleanup: skipping local filesystem blob cleanup.');
 }
 
 void backupWorkerMain(Map<String, dynamic> init) {

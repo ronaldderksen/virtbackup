@@ -19,7 +19,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   static const int _writeConcurrency = 8;
   static const int _blobCacheReservedSessions = 1;
-  static const int _generalPoolSessions = _writeConcurrency > _blobCacheReservedSessions ? _writeConcurrency - _blobCacheReservedSessions : 1;
+  static const int _generalPoolSessions = _writeConcurrency + 2;
   // Safety switch: disable all remote uploads for SFTP driver.
   static const bool _remoteUploadEnabled = true;
   static const String _remoteAppFolderName = 'VirtBackup';
@@ -40,7 +40,16 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       // Fallback for misconfiguration; callers should configure backup.base_path.
       return Directory('${_tempBase()}${Platform.pathSeparator}virtbackup_sftp_cache');
     }
-    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}cache${Platform.pathSeparator}sftp');
+    final destinationId = _cacheKeyFromSettings(settings);
+    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}cache${Platform.pathSeparator}$destinationId');
+  }
+
+  static String _cacheKeyFromSettings(AppSettings settings) {
+    final destinationId = settings.backupDestinationId?.trim() ?? '';
+    if (destinationId.isEmpty) {
+      throw StateError('SFTP cache root requires backupDestinationId in settings.');
+    }
+    return destinationId.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
   }
 
   @override

@@ -98,9 +98,14 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     final decision = payload['decision']?.toString() ?? 'overwrite';
     final xmlPath = payload['xmlPath']?.toString() ?? '';
     final settingsMap = Map<String, dynamic>.from(payload['settings'] as Map? ?? const {});
+    final destinationMap = Map<String, dynamic>.from(payload['destination'] as Map? ?? const {});
     final serverMap = Map<String, dynamic>.from(payload['server'] as Map? ?? const {});
 
     final settings = AppSettings.fromMap(settingsMap);
+    final selectedDestination = destinationMap.isEmpty ? null : BackupDestination.fromMap(destinationMap);
+    final isFilesystemDestination = selectedDestination?.id == AppSettings.filesystemDestinationId;
+    final useStoredBlobs = !isFilesystemDestination && selectedDestination?.useBlobs == true;
+    final storeDownloadedBlobs = !isFilesystemDestination && selectedDestination?.storeBlobs == true;
     final server = ServerConfig.fromMap(serverMap);
     var logConfigured = false;
 
@@ -137,6 +142,14 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     }
 
     final driver = buildDriver();
+    BackupDriver? localBlobDriver;
+    if (useStoredBlobs || storeDownloadedBlobs) {
+      final filesystemPath = _resolveFilesystemDestinationPath(settings);
+      if (filesystemPath.isEmpty) {
+        throw 'restore blob cache failed: filesystem destination path is empty';
+      }
+      localBlobDriver = FilesystemBackupDriver(filesystemPath);
+    }
     final xmlFile = File(xmlPath);
     if (!await xmlFile.exists()) {
       sendResult(
@@ -332,7 +345,16 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           await host.runSshCommand(server, 'mkdir -p "$remoteDir"');
         }
         await host.runSshCommand(server, 'rm -f "$remotePath"');
-        final blobStream = _blobStream(driver, target.blocks, target.blockSize, target.fileSize, () => canceled);
+        final blobStream = _blobStream(
+          driver,
+          target.blocks,
+          target.blockSize,
+          target.fileSize,
+          () => canceled,
+          localBlobDriver: localBlobDriver,
+          useStoredBlobs: useStoredBlobs,
+          storeDownloadedBlobs: storeDownloadedBlobs,
+        );
         await host.uploadRemoteStream(
           server,
           remotePath,
@@ -590,7 +612,16 @@ int _blockLengthForIndex(int index, int totalSize, int blockSize) {
   return end - start;
 }
 
-Stream<List<int>> _blobStream(BackupDriver driver, List<_BlockRef> blocks, int blockSize, int? totalSize, [bool Function()? isCanceled]) async* {
+Stream<List<int>> _blobStream(
+  BackupDriver driver,
+  List<_BlockRef> blocks,
+  int blockSize,
+  int? totalSize,
+  bool Function()? isCanceled, {
+  BackupDriver? localBlobDriver,
+  required bool useStoredBlobs,
+  required bool storeDownloadedBlobs,
+}) async* {
   var totalEmitted = 0;
   final remote = driver is RemoteBlobDriver ? driver as RemoteBlobDriver : null;
   if (remote != null) {
@@ -612,6 +643,12 @@ Stream<List<int>> _blobStream(BackupDriver driver, List<_BlockRef> blocks, int b
       if (hash == null) {
         return const _BlockData.empty();
       }
+      if (useStoredBlobs && localBlobDriver != null) {
+        final localBytes = await _readLocalBlob(localBlobDriver, hash, expectedLength, index);
+        if (localBytes != null) {
+          return _BlockData(index, localBytes);
+        }
+      }
       final builder = BytesBuilder(copy: false);
       final stream = remote.openBlobStream(hash, length: expectedLength);
       await for (final chunk in stream) {
@@ -626,6 +663,9 @@ Stream<List<int>> _blobStream(BackupDriver driver, List<_BlockRef> blocks, int b
       }
       if (bytes.length != expectedLength) {
         throw 'restore blob size mismatch hash=$hash index=$index expected=$expectedLength got=${bytes.length}';
+      }
+      if (storeDownloadedBlobs && localBlobDriver != null) {
+        await _storeLocalBlob(localBlobDriver, hash, bytes, index);
       }
       return _BlockData(index, bytes);
     }
@@ -685,6 +725,44 @@ Stream<List<int>> _blobStream(BackupDriver driver, List<_BlockRef> blocks, int b
   if (totalSize != null && totalEmitted < totalSize) {
     yield Uint8List(totalSize - totalEmitted);
   }
+}
+
+Future<List<int>?> _readLocalBlob(BackupDriver localBlobDriver, String hash, int expectedLength, int index) async {
+  final blobFile = localBlobDriver.blobFile(hash);
+  if (!await blobFile.exists()) {
+    return null;
+  }
+  final bytes = await blobFile.readAsBytes();
+  if (bytes.length != expectedLength) {
+    throw 'restore local blob size mismatch hash=$hash index=$index expected=$expectedLength got=${bytes.length} path=${blobFile.path}';
+  }
+  return bytes;
+}
+
+Future<void> _storeLocalBlob(BackupDriver localBlobDriver, String hash, List<int> bytes, int index) async {
+  if (bytes.isEmpty) {
+    return;
+  }
+  final blobFile = localBlobDriver.blobFile(hash);
+  if (await blobFile.exists()) {
+    return;
+  }
+  try {
+    await localBlobDriver.ensureBlobDir(hash);
+    await localBlobDriver.writeBlob(hash, bytes);
+  } catch (error) {
+    throw 'restore local blob store failed hash=$hash index=$index path=${blobFile.path}: $error';
+  }
+}
+
+String _resolveFilesystemDestinationPath(AppSettings settings) {
+  for (final destination in settings.destinations) {
+    if (destination.id != AppSettings.filesystemDestinationId) {
+      continue;
+    }
+    return destination.params['path']?.toString().trim() ?? '';
+  }
+  return '';
 }
 
 class _BlockData {

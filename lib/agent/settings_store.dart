@@ -109,10 +109,42 @@ class AppSettingsStore {
       return AppSettings.empty();
     }
     final normalized = _normalizeYaml(decoded);
+    final updated = _ensureDestinationBlobFlags(normalized);
+    if (updated) {
+      final encoded = _ensureTrailingNewline(_toYaml(normalized));
+      await file.writeAsString(encoded);
+      await AppSettingsStore.setFilePermissions(file, ownerOnly: true);
+    }
     _decryptPasswordsInMap(normalized, token);
     _decryptGdriveTokensInMap(normalized, token);
     _decryptSftpPasswordInMap(normalized, token);
     return AppSettings.fromMap(normalized);
+  }
+
+  bool _ensureDestinationBlobFlags(Map<String, dynamic> data) {
+    final destinations = data['destinations'];
+    if (destinations is! List) {
+      return false;
+    }
+    var changed = false;
+    for (final destination in destinations) {
+      if (destination is! Map) {
+        continue;
+      }
+      final driverId = (destination['driverId'] ?? '').toString().trim();
+      if (driverId == 'filesystem') {
+        continue;
+      }
+      if (!destination.containsKey('storeBlobs')) {
+        destination['storeBlobs'] = false;
+        changed = true;
+      }
+      if (!destination.containsKey('useBlobs')) {
+        destination['useBlobs'] = false;
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   Map<String, dynamic> _normalizeYaml(YamlMap map) {

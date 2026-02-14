@@ -845,11 +845,26 @@ Future<String> _pickLatestRestoreXml(http.Client client, _Args args) async {
   }
   final entries = jsonDecode(response.body) as List<dynamic>;
   Map<String, dynamic>? best;
+  Map<String, dynamic>? bestIncomplete;
   for (final entry in entries) {
     if (entry is! Map<String, dynamic>) {
       continue;
     }
     if (entry['vmName']?.toString() != args.vmName) {
+      continue;
+    }
+    final missing = entry['missingDiskBasenames'];
+    final hasMissing = missing is List && missing.isNotEmpty;
+    if (hasMissing) {
+      if (bestIncomplete == null) {
+        bestIncomplete = entry;
+        continue;
+      }
+      final ts = entry['timestamp']?.toString() ?? '';
+      final bestTs = bestIncomplete['timestamp']?.toString() ?? '';
+      if (ts.compareTo(bestTs) > 0) {
+        bestIncomplete = entry;
+      }
       continue;
     }
     if (best == null) {
@@ -863,6 +878,11 @@ Future<String> _pickLatestRestoreXml(http.Client client, _Args args) async {
     }
   }
   if (best == null) {
+    if (bestIncomplete != null) {
+      final timestamp = bestIncomplete['timestamp']?.toString() ?? 'unknown';
+      final missing = bestIncomplete['missingDiskBasenames'];
+      throw StateError('Latest restore entry for vm ${args.vmName} on selected destination is incomplete (timestamp=$timestamp missingDisks=$missing).');
+    }
     throw StateError('No restore entry found for vm ${args.vmName}');
   }
   final xmlPath = best['xmlPath']?.toString();

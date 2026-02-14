@@ -1189,6 +1189,7 @@ class AgentHttpServer {
     final driverId = destination.driverId.trim();
     if (driverId == 'sftp') {
       return _agentSettings.copyWith(
+        backupDestinationId: destination.id,
         backupDriverId: 'sftp',
         sftpHost: (params['host'] ?? '').toString(),
         sftpPort: params['port'] is num ? (params['port'] as num).toInt() : int.tryParse((params['port'] ?? '').toString()) ?? 22,
@@ -1199,6 +1200,7 @@ class AgentHttpServer {
     }
     if (driverId == 'gdrive') {
       return _agentSettings.copyWith(
+        backupDestinationId: destination.id,
         backupDriverId: 'gdrive',
         gdriveScope: (params['scope'] ?? '').toString(),
         gdriveRootPath: (params['rootPath'] ?? '').toString(),
@@ -1209,12 +1211,12 @@ class AgentHttpServer {
       );
     }
     if (driverId == 'filesystem') {
-      return _agentSettings.copyWith(backupDriverId: 'filesystem');
+      return _agentSettings.copyWith(backupDestinationId: destination.id, backupDriverId: 'filesystem');
     }
     if (driverId == 'dummy') {
-      return _agentSettings.copyWith(backupDriverId: 'dummy');
+      return _agentSettings.copyWith(backupDestinationId: destination.id, backupDriverId: 'dummy');
     }
-    return _agentSettings.copyWith(backupDriverId: driverId);
+    return _agentSettings.copyWith(backupDestinationId: destination.id, backupDriverId: driverId);
   }
 
   Map<String, BackupDriverInfo> _buildDriverCatalog() {
@@ -1810,6 +1812,7 @@ class AgentHttpServer {
           'decision': decision,
           'xmlPath': xmlPath,
           'settings': (destination?.settings ?? _agentSettings).toMap(),
+          'destination': destination?.destination.toMap(),
           'server': server.toMap(),
         });
         return;

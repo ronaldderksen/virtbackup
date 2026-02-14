@@ -107,17 +107,33 @@ class BackupDriverInfo {
 }
 
 class BackupDestination {
-  BackupDestination({required this.id, required this.name, required this.driverId, required this.enabled, required this.params, this.disableFresh = false});
+  BackupDestination({
+    required this.id,
+    required this.name,
+    required this.driverId,
+    required this.enabled,
+    required this.params,
+    this.disableFresh = false,
+    this.storeBlobs = false,
+    this.useBlobs = false,
+  });
 
   final String id;
   final String name;
   final String driverId;
   final bool enabled;
   final bool disableFresh;
+  final bool storeBlobs;
+  final bool useBlobs;
   final Map<String, dynamic> params;
 
   Map<String, dynamic> toMap() {
-    return {'id': id, 'name': name, 'driverId': driverId, 'enabled': enabled, 'disableFresh': disableFresh, 'params': params};
+    final map = <String, dynamic>{'id': id, 'name': name, 'driverId': driverId, 'enabled': enabled, 'disableFresh': disableFresh, 'params': params};
+    if (driverId.trim() != 'filesystem') {
+      map['storeBlobs'] = storeBlobs;
+      map['useBlobs'] = useBlobs;
+    }
+    return map;
   }
 
   factory BackupDestination.fromMap(Map<String, dynamic> json) {
@@ -129,6 +145,8 @@ class BackupDestination {
       driverId: (json['driverId'] ?? '').toString(),
       enabled: json['enabled'] != false,
       disableFresh: json['disableFresh'] == true,
+      storeBlobs: json['storeBlobs'] == true,
+      useBlobs: json['useBlobs'] == true,
       params: params,
     );
   }
