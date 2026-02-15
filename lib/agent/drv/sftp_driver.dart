@@ -431,7 +431,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Stream<List<int>> openBlobStream(String hash, {int? length}) async* {
-    LogWriter.logAgentSync(level: 'debug', message: 'driver=sftp action=driver_call status=invoke durationMs=0 method=CALL target=openBlobStream detail=hash=$hash length=${length ?? -1}');
+    LogWriter.logAgentSync(level: 'trace', message: 'driver=sftp action=driver_call status=invoke durationMs=0 method=CALL target=openBlobStream detail=hash=$hash length=${length ?? -1}');
     if (hash.length < 2) {
       return;
     }
@@ -839,6 +839,15 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     if (bindings == null) {
       throw StateError('Native SFTP is required for SFTP blob reads.');
     }
+    final totalStopwatch = Stopwatch()..start();
+    final openStopwatch = Stopwatch()..start();
+    final readStopwatch = Stopwatch();
+    var openMs = 0;
+    var firstByteMs = -1;
+    var readAllMs = 0;
+    var totalBytes = 0;
+    var status = 'ok';
+    Object? failure;
     final lease = await _nativePool.lease(_connectNative);
     var invalidateLease = false;
     _NativeSftpReadLease? readLease;
@@ -847,9 +856,13 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     try {
       readLease = _acquireNativeReadLease(bindings, lease.session, remotePath);
       if (readLease == null) {
+        status = 'missing';
         throw _NativeBlobMissing();
       }
       buffer = calloc<Uint8>(_nativeTransferChunkSize);
+      openStopwatch.stop();
+      openMs = openStopwatch.elapsedMilliseconds;
+      readStopwatch.start();
       while (true) {
         if (length != null && offset >= length) {
           break;
@@ -865,13 +878,25 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         if (read == 0) {
           break;
         }
+        if (firstByteMs < 0) {
+          firstByteMs = totalStopwatch.elapsedMilliseconds;
+        }
         offset += read;
+        totalBytes += read;
         yield Uint8List.fromList(buffer.asTypedList(read));
       }
+      readStopwatch.stop();
+      readAllMs = readStopwatch.elapsedMilliseconds;
     } on _NativeBlobMissing {
       _releaseNativeReadLease(readLease, keepOpen: false);
       rethrow;
-    } catch (_) {
+    } catch (error) {
+      status = 'error';
+      failure = error;
+      if (readStopwatch.isRunning) {
+        readStopwatch.stop();
+      }
+      readAllMs = readStopwatch.elapsedMilliseconds;
       invalidateLease = true;
       _releaseNativeReadLease(readLease, keepOpen: false);
       rethrow;
@@ -887,6 +912,12 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       } else {
         lease.release();
       }
+      LogWriter.logAgentSync(
+        level: 'trace',
+        message:
+            'driver=sftp action=open_blob_stream status=$status durationMs=${totalStopwatch.elapsedMilliseconds} '
+            'method=READ detail=path:$remotePath openMs=$openMs firstByteMs=$firstByteMs readAllMs=$readAllMs bytes=$totalBytes length=${length ?? -1}${failure == null ? '' : ' error=$failure'}',
+      );
     }
   }
 
