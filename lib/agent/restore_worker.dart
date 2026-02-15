@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -103,12 +104,20 @@ void restoreWorkerMain(Map<String, dynamic> init) {
 
     final settings = AppSettings.fromMap(settingsMap);
     final selectedDestination = destinationMap.isEmpty ? null : BackupDestination.fromMap(destinationMap);
+    BackupDestination? settingsDestination;
+    final selectedDestinationId = selectedDestination?.id;
+    if (selectedDestinationId != null && selectedDestinationId.isNotEmpty) {
+      for (final destination in settings.destinations) {
+        if (destination.id == selectedDestinationId) {
+          settingsDestination = destination;
+          break;
+        }
+      }
+    }
     final isFilesystemDestination = selectedDestination?.id == AppSettings.filesystemDestinationId;
     final useStoredBlobs = !isFilesystemDestination && selectedDestination?.useBlobs == true;
     final storeDownloadedBlobs = !isFilesystemDestination && selectedDestination?.storeBlobs == true;
-    final downloadConcurrency = isFilesystemDestination
-        ? 8
-        : selectedDestination?.downloadConcurrency ?? (throw StateError('downloadConcurrency is required for destination "${selectedDestination?.id ?? ''}".'));
+    final downloadConcurrency = settingsDestination?.downloadConcurrency ?? selectedDestination?.downloadConcurrency ?? 8;
     final server = ServerConfig.fromMap(serverMap);
     await LogWriter.configureSourcePath(
       source: 'agent',
@@ -619,6 +628,10 @@ Stream<List<int>> _blobStream(
   required bool storeDownloadedBlobs,
   required int maxConcurrentDownloads,
 }) async* {
+  if (maxConcurrentDownloads <= 0) {
+    throw StateError('restore downloadConcurrency must be greater than 0.');
+  }
+  final localBlobCache = _BlobReadCache(maxBytes: 512 * 1024 * 1024);
   var totalEmitted = 0;
   final remote = driver is RemoteBlobDriver ? driver as RemoteBlobDriver : null;
   if (remote != null) {
@@ -641,7 +654,7 @@ Stream<List<int>> _blobStream(
         return const _BlockData.empty();
       }
       if (useStoredBlobs && localBlobDriver != null) {
-        final localBytes = await _readLocalBlob(localBlobDriver, hash, expectedLength, index);
+        final localBytes = await _readLocalBlob(localBlobDriver, hash, expectedLength, index, cache: localBlobCache);
         if (localBytes != null) {
           return _BlockData(index, localBytes);
         }
@@ -691,32 +704,57 @@ Stream<List<int>> _blobStream(
       nextEmit += 1;
     }
   } else {
-    for (var i = 0; i < blocks.length; i += 1) {
+    final maxConcurrent = maxConcurrentDownloads;
+    var nextIndex = 0;
+    var nextEmit = 0;
+    final inFlight = <int, Future<_BlockData>>{};
+
+    Future<_BlockData> startFetchLocal(int index) async {
       if (isCanceled?.call() == true) {
         throw const _Canceled();
       }
-      final block = blocks[i];
-      final expectedLength = totalSize == null ? blockSize : _blockLengthForIndex(i, totalSize, blockSize);
+      final block = blocks[index];
+      final expectedLength = totalSize == null ? blockSize : _blockLengthForIndex(index, totalSize, blockSize);
       if (block.zeroRun) {
         if (expectedLength > 0) {
-          yield Uint8List(expectedLength);
-          totalEmitted += expectedLength;
+          return _BlockData(index, Uint8List(expectedLength));
         }
-        continue;
+        return const _BlockData.empty();
       }
       final hash = block.hash;
       if (hash == null) {
+        return const _BlockData.empty();
+      }
+      final localBytes = await _readLocalBlob(driver, hash, expectedLength, index, cache: localBlobCache);
+      if (localBytes == null) {
+        final blobFile = driver.blobFile(hash);
+        throw 'restore missing local blob hash=$hash index=$index path=${blobFile.path}';
+      }
+      return _BlockData(index, localBytes);
+    }
+
+    void schedule() {
+      while (inFlight.length < maxConcurrent && nextIndex < blocks.length) {
+        inFlight[nextIndex] = startFetchLocal(nextIndex);
+        nextIndex += 1;
+      }
+    }
+
+    schedule();
+    while (nextEmit < blocks.length) {
+      schedule();
+      final future = inFlight[nextEmit];
+      if (future == null) {
+        await Future<void>.delayed(const Duration(milliseconds: 1));
         continue;
       }
-      final blobFile = driver.blobFile(hash);
-      if (!await blobFile.exists()) {
-        throw 'restore missing local blob hash=$hash index=$i path=${blobFile.path}';
+      final data = await future;
+      inFlight.remove(nextEmit);
+      if (data.bytes.isNotEmpty) {
+        yield data.bytes;
+        totalEmitted += data.bytes.length;
       }
-      final stream = expectedLength < blockSize ? blobFile.openRead(0, expectedLength) : blobFile.openRead();
-      await for (final chunk in stream) {
-        yield chunk;
-        totalEmitted += chunk.length;
-      }
+      nextEmit += 1;
     }
   }
   if (totalSize != null && totalEmitted < totalSize) {
@@ -724,15 +762,25 @@ Stream<List<int>> _blobStream(
   }
 }
 
-Future<List<int>?> _readLocalBlob(BackupDriver localBlobDriver, String hash, int expectedLength, int index) async {
+Future<List<int>?> _readLocalBlob(BackupDriver localBlobDriver, String hash, int expectedLength, int index, {_BlobReadCache? cache}) async {
   final blobFile = localBlobDriver.blobFile(hash);
-  if (!await blobFile.exists()) {
+  final cached = cache?.get(hash);
+  if (cached != null) {
+    if (cached.length != expectedLength) {
+      throw 'restore local blob size mismatch hash=$hash index=$index expected=$expectedLength got=${cached.length} path=${blobFile.path}';
+    }
+    return cached;
+  }
+  Uint8List bytes;
+  try {
+    bytes = await blobFile.readAsBytes();
+  } on FileSystemException {
     return null;
   }
-  final bytes = await blobFile.readAsBytes();
   if (bytes.length != expectedLength) {
     throw 'restore local blob size mismatch hash=$hash index=$index expected=$expectedLength got=${bytes.length} path=${blobFile.path}';
   }
+  cache?.put(hash, bytes);
   return bytes;
 }
 
@@ -769,6 +817,49 @@ class _BlockData {
 
   final int index;
   final List<int> bytes;
+}
+
+class _BlobReadCache {
+  _BlobReadCache({required this.maxBytes});
+
+  final int maxBytes;
+  final Map<String, Uint8List> _entries = {};
+  final ListQueue<String> _order = ListQueue<String>();
+  int _currentBytes = 0;
+
+  Uint8List? get(String hash) {
+    final bytes = _entries[hash];
+    if (bytes == null) {
+      return null;
+    }
+    _order.remove(hash);
+    _order.addLast(hash);
+    return bytes;
+  }
+
+  void put(String hash, Uint8List bytes) {
+    if (bytes.length > maxBytes) {
+      _entries.clear();
+      _order.clear();
+      _currentBytes = 0;
+      return;
+    }
+    final existing = _entries.remove(hash);
+    if (existing != null) {
+      _currentBytes -= existing.length;
+      _order.remove(hash);
+    }
+    _entries[hash] = bytes;
+    _order.addLast(hash);
+    _currentBytes += bytes.length;
+    while (_currentBytes > maxBytes && _order.isNotEmpty) {
+      final oldest = _order.removeFirst();
+      final removed = _entries.remove(oldest);
+      if (removed != null) {
+        _currentBytes -= removed.length;
+      }
+    }
+  }
 }
 
 class _RestoreDiskTarget {

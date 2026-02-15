@@ -113,6 +113,7 @@ There are two paths:
 3. **Hashblocks processing**
    - Each line advances hashblocks progress (including ZERO/existing).
    - ZERO runs are written to the manifest (no SFTP).
+   - ZERO runs also advance LIMIT progress-window tracking.
    - For hashes, entries are pushed to:
      - blob-cache queue (directory hydration/ready)
      - exists queue (existing/missing decision)
@@ -311,10 +312,17 @@ The agent supports optional native SFTP via FFI:
 - On agent startup, missing `storeBlobs`/`useBlobs` keys on non-filesystem destinations are auto-added as `false` and written back immediately.
 - For non-filesystem destinations, `uploadConcurrency` (backup) and `downloadConcurrency` (restore) are persisted in `agent.yaml`.
 - On agent startup, missing `uploadConcurrency`/`downloadConcurrency` keys on non-filesystem destinations are auto-added as `8` and written back immediately.
+- Restore read concurrency uses destination `downloadConcurrency` from `agent.yaml`; if not present, it defaults to `8`.
 - Remote destination cache folders under `<filesystem path>/VirtBackup/cache/` are keyed by destination id (not by driver id).
 - Restore behavior for non-filesystem destinations:
   - `useBlobs: true`: restore tries local blobs from `destinations[id=filesystem].params.path` first; if present, remote download is skipped.
   - `storeBlobs: true`: blobs downloaded from remote during restore are also written to local filesystem blob storage.
+  - For `driverId: sftp`, remote blob reads use native SFTP streaming with native handle reuse; no dartssh fallback is used for blob-read path.
+  - Restore disk upload to the hypervisor host uses native SFTP only; no dartssh upload fallback is used.
+  - Native SFTP upload writes use a non-blocking libssh2 loop with socket readiness waits (EAGAIN handling) instead of fully blocking per call.
+  - Restore blob emission keeps output order but prefetches local filesystem blobs concurrently (bounded by `downloadConcurrency`).
+  - Local filesystem blob reads skip pre-read `exists()` checks (direct read with missing-file handling) to reduce syscall overhead.
+  - Restore keeps a bounded in-memory local blob read cache (512 MiB LRU) so repeated hashes are not re-read from disk.
   - Existing local blobs are not overwritten.
   - Local blob write failures fail the restore job.
 - Destination `id: filesystem` is mandatory, always enabled, and cannot be removed.

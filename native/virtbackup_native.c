@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -30,6 +31,7 @@ static int g_libssh2_refcount = 0;
 static const int VB_SFTP_TIMEOUT_MS = 8000;
 
 static double now_seconds(void);
+static int wait_socket_ready(vb_sftp_session *sess);
 
 static int ensure_libssh2_init(void) {
   pthread_mutex_lock(&g_libssh2_lock);
@@ -59,6 +61,34 @@ static double now_seconds(void) {
   struct timeval tv;
   gettimeofday(&tv, NULL);
   return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
+
+static int wait_socket_ready(vb_sftp_session *sess) {
+  if (!sess || !sess->session || sess->sock < 0) {
+    return -1;
+  }
+  fd_set readfds;
+  fd_set writefds;
+  FD_ZERO(&readfds);
+  FD_ZERO(&writefds);
+
+  int directions = libssh2_session_block_directions(sess->session);
+  if (directions & LIBSSH2_SESSION_BLOCK_INBOUND) {
+    FD_SET(sess->sock, &readfds);
+  }
+  if (directions & LIBSSH2_SESSION_BLOCK_OUTBOUND) {
+    FD_SET(sess->sock, &writefds);
+  }
+  if ((directions & (LIBSSH2_SESSION_BLOCK_INBOUND | LIBSSH2_SESSION_BLOCK_OUTBOUND)) == 0) {
+    FD_SET(sess->sock, &readfds);
+    FD_SET(sess->sock, &writefds);
+  }
+
+  struct timeval timeout;
+  timeout.tv_sec = VB_SFTP_TIMEOUT_MS / 1000;
+  timeout.tv_usec = (VB_SFTP_TIMEOUT_MS % 1000) * 1000;
+  int rc = select(sess->sock + 1, &readfds, &writefds, NULL, &timeout);
+  return rc > 0 ? 0 : -1;
 }
 
 static int connect_tcp(const char *host, int port) {
@@ -333,14 +363,28 @@ int vb_sftp_write(void *file_ptr, const unsigned char *buffer, int length) {
     return -1;
   }
   vb_sftp_file *file = (vb_sftp_file *)file_ptr;
+  if (!file->sess || !file->sess->session) {
+    return -1;
+  }
+  LIBSSH2_SESSION *session = file->sess->session;
+  libssh2_session_set_blocking(session, 0);
   int total = 0;
   while (total < length) {
     ssize_t n = libssh2_sftp_write(file->handle, (const char *)buffer + total, length - total);
+    if (n == LIBSSH2_ERROR_EAGAIN || n == 0) {
+      if (wait_socket_ready(file->sess) != 0) {
+        libssh2_session_set_blocking(session, 1);
+        return total > 0 ? total : -1;
+      }
+      continue;
+    }
     if (n < 0) {
-      return -1;
+      libssh2_session_set_blocking(session, 1);
+      return total > 0 ? total : -1;
     }
     total += (int)n;
   }
+  libssh2_session_set_blocking(session, 1);
   return total;
 }
 

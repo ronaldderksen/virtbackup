@@ -48,6 +48,7 @@ class _HashblocksWorker {
       writeZeroRun(zeroRange.$1, zeroRange.$2);
       final zeroCount = zeroRange.$2 - zeroRange.$1 + 1;
       zeroBlocks += zeroCount;
+      registerProgressBlocks(zeroCount);
       final zeroBytes = bytesForRange(zeroRange.$1, zeroRange.$2, fileSize);
       handleHashblocksBytes(zeroBytes);
       handleBytes(zeroBytes);

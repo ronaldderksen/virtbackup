@@ -28,7 +28,6 @@ class BackupAgentHost {
   DateTime? _firstSftpUploadAt;
   DateTime? _lastSftpUploadAt;
   static const int _sftpRangeReadChunkSize = 16 * 1024 * 1024;
-  static const int _sftpUploadChunkSize = 4 * 1024 * 1024;
 
   final SSHAlgorithms _sshAlgorithms = const SSHAlgorithms(cipher: [SSHCipherType.aes128ctr, SSHCipherType.aes256ctr]);
   final Map<String, SSHSocket> _eventSockets = {};
@@ -1188,140 +1187,85 @@ class BackupAgentHost {
   }
 
   Future<void> _uploadRemoteStreamViaSftp(ServerConfig server, String remotePath, Stream<List<int>> stream, {void Function(int bytes)? onBytes}) async {
-    final host = server.sshHost.trim();
-    final port = int.tryParse(server.sshPort.trim()) ?? 22;
-    final user = server.sshUser.trim();
-    final password = server.sshPassword;
     final nativeSession = _nativeSftpSessions[server.id];
-    if (nativeSession != null && _nativeSftp != null) {
-      final file = _nativeSftp.openWrite(nativeSession, remotePath, true);
-      if (file == nullptr) {
-        throw 'native sftp open write failed for $remotePath';
-      }
-      const targetChunkSize = 4 * 1024 * 1024;
-      final buffer = BytesBuilder(copy: false);
-      var totalUploaded = 0;
-      Pointer<Uint8>? nativeBuffer;
-      var nativeCapacity = 0;
-      try {
-        await for (final chunk in stream) {
-          buffer.add(chunk);
-          while (buffer.length >= targetChunkSize) {
-            final data = buffer.takeBytes();
-            if (nativeCapacity < data.length) {
-              if (nativeBuffer != null) {
-                calloc.free(nativeBuffer);
-              }
-              nativeBuffer = calloc<Uint8>(data.length);
-              nativeCapacity = data.length;
-            }
-            nativeBuffer!.asTypedList(data.length).setAll(0, data);
-            final wrote = _nativeSftp.write(file, nativeBuffer, data.length);
-            if (wrote < 0) {
-              throw 'native sftp write failed for $remotePath';
-            }
-            _sftpUploadBytesSinceLog += wrote;
-            totalUploaded += wrote;
-            _markSftpUpload(wrote);
-            final now = DateTime.now();
-            final elapsedMs = now.difference(_sftpUploadLastLog).inMilliseconds;
-            if (elapsedMs >= agentLogInterval.inMilliseconds) {
-              final mbPerSec = (_sftpUploadBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
-              final totalMb = totalUploaded / (1024 * 1024);
-              _logInfo('SFTP upload speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
-              _sftpUploadBytesSinceLog = 0;
-              _sftpUploadLastLog = now;
-            }
-            onBytes?.call(wrote);
-          }
-        }
-        if (buffer.length > 0) {
-          final data = buffer.takeBytes();
-          if (nativeCapacity < data.length) {
-            if (nativeBuffer != null) {
-              calloc.free(nativeBuffer);
-            }
-            nativeBuffer = calloc<Uint8>(data.length);
-            nativeCapacity = data.length;
-          }
-          nativeBuffer!.asTypedList(data.length).setAll(0, data);
-          final wrote = _nativeSftp.write(file, nativeBuffer, data.length);
-          if (wrote < 0) {
-            throw 'native sftp write failed for $remotePath';
-          }
-          _sftpUploadBytesSinceLog += wrote;
-          totalUploaded += wrote;
-          _markSftpUpload(wrote);
-          onBytes?.call(wrote);
-        }
-      } finally {
-        if (nativeBuffer != null) {
-          calloc.free(nativeBuffer);
-        }
-        _nativeSftp.closeFile(file);
-        _logSftpUploadWindowIfAny();
-      }
-      return;
+    if (nativeSession == null || _nativeSftp == null) {
+      throw StateError('Native SFTP upload session is required but unavailable for ${server.sshHost}.');
     }
-    _logInfo('SFTP upload stream [$user@$host:$port]: $remotePath');
-    final socket = await SSHSocket.connect(host, port);
-    final client = SSHClient(socket, username: user, onPasswordRequest: () => password, algorithms: _sshAlgorithms);
-    SftpClient? sftp;
-    SftpFile? remoteFile;
-    Timer? speedTimer;
+    final file = _nativeSftp.openWrite(nativeSession, remotePath, true);
+    if (file == nullptr) {
+      throw 'native sftp open write failed for $remotePath';
+    }
+    const targetChunkSize = 16 * 1024 * 1024;
     var totalUploaded = 0;
-    try {
-      sftp = await client.sftp();
-      remoteFile = await sftp.open(remotePath, mode: SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate);
-      final converted = stream.map((chunk) {
-        _sftpUploadBytesSinceLog += chunk.length;
-        totalUploaded += chunk.length;
-        _markSftpUpload(chunk.length);
-        final now = DateTime.now();
-        final elapsedMs = now.difference(_sftpUploadLastLog).inMilliseconds;
-        if (elapsedMs >= agentLogInterval.inMilliseconds) {
-          final mbPerSec = (_sftpUploadBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
-          final totalMb = totalUploaded / (1024 * 1024);
-          _logInfo('SFTP upload speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
-          _sftpUploadBytesSinceLog = 0;
-          _sftpUploadLastLog = now;
-        }
-        onBytes?.call(chunk.length);
-        return Uint8List.fromList(chunk);
-      });
-      final buffered = _bufferStream(converted, _sftpUploadChunkSize);
-      speedTimer = Timer.periodic(agentLogInterval, (_) {});
-      await remoteFile.write(buffered);
-      await remoteFile.close();
-      _logSftpUploadWindowIfAny();
-    } finally {
-      speedTimer?.cancel();
-      try {
-        await remoteFile?.close();
-      } catch (_) {}
-      try {
-        sftp?.close();
-      } catch (_) {}
-      try {
-        client.close();
-      } catch (_) {}
-      try {
-        socket.close();
-      } catch (_) {}
-    }
-  }
+    Pointer<Uint8>? nativeBuffer;
+    var nativeCapacity = 0;
+    final pending = Uint8List(targetChunkSize);
+    var pendingLength = 0;
 
-  Stream<Uint8List> _bufferStream(Stream<Uint8List> input, int chunkSize) async* {
-    var builder = BytesBuilder(copy: false);
-    await for (final chunk in input) {
-      builder.add(chunk);
-      if (builder.length >= chunkSize) {
-        yield builder.takeBytes();
-        builder = BytesBuilder(copy: false);
+    void writeChunk(Uint8List source, int start, int length) {
+      if (length <= 0) {
+        return;
       }
+      if (nativeCapacity < length) {
+        if (nativeBuffer != null) {
+          calloc.free(nativeBuffer!);
+        }
+        nativeBuffer = calloc<Uint8>(length);
+        nativeCapacity = length;
+      }
+      nativeBuffer!.asTypedList(length).setAll(0, Uint8List.sublistView(source, start, start + length));
+      final wrote = _nativeSftp.write(file, nativeBuffer!, length);
+      if (wrote != length) {
+        throw 'native sftp write failed for $remotePath';
+      }
+      _sftpUploadBytesSinceLog += wrote;
+      totalUploaded += wrote;
+      _markSftpUpload(wrote);
+      final now = DateTime.now();
+      final elapsedMs = now.difference(_sftpUploadLastLog).inMilliseconds;
+      if (elapsedMs >= agentLogInterval.inMilliseconds) {
+        final mbPerSec = (_sftpUploadBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
+        final totalMb = totalUploaded / (1024 * 1024);
+        _logInfo('SFTP upload speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
+        _sftpUploadBytesSinceLog = 0;
+        _sftpUploadLastLog = now;
+      }
+      onBytes?.call(wrote);
     }
-    if (builder.length > 0) {
-      yield builder.takeBytes();
+
+    try {
+      await for (final chunk in stream) {
+        final current = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
+        var offset = 0;
+        if (pendingLength > 0) {
+          final fill = (targetChunkSize - pendingLength) < current.length ? (targetChunkSize - pendingLength) : current.length;
+          pending.setRange(pendingLength, pendingLength + fill, current, 0);
+          pendingLength += fill;
+          offset += fill;
+          if (pendingLength == targetChunkSize) {
+            writeChunk(pending, 0, targetChunkSize);
+            pendingLength = 0;
+          }
+        }
+        while (current.length - offset >= targetChunkSize) {
+          writeChunk(current, offset, targetChunkSize);
+          offset += targetChunkSize;
+        }
+        if (offset < current.length) {
+          final remaining = current.length - offset;
+          pending.setRange(0, remaining, current, offset);
+          pendingLength = remaining;
+        }
+      }
+      if (pendingLength > 0) {
+        writeChunk(pending, 0, pendingLength);
+      }
+    } finally {
+      if (nativeBuffer != null) {
+        calloc.free(nativeBuffer!);
+      }
+      _nativeSftp.closeFile(file);
+      _logSftpUploadWindowIfAny();
     }
   }
 
