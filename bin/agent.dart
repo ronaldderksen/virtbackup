@@ -6,11 +6,10 @@ import 'package:virtbackup/agent/settings_store.dart';
 import 'package:virtbackup/agent/backup_host.dart';
 import 'package:virtbackup/common/log_writer.dart';
 
-Future<void> main(List<String> args) async {
+Future<void> main(List<String> _) async {
   await runZonedGuarded(
     () async {
-      final logSshOutput = args.contains('-debug') || args.contains('--debug');
-      final host = BackupAgentHost(onInfo: _logInfo, onError: _logError, logSshOutput: logSshOutput);
+      final host = BackupAgentHost();
       late final AppSettingsStore settingsStore;
       try {
         settingsStore = await AppSettingsStore.fromAgentDefaultPath();
@@ -64,19 +63,14 @@ Future<void> main(List<String> args) async {
     },
     zoneSpecification: ZoneSpecification(
       print: (self, parent, zone, line) {
-        unawaited(LogWriter.log(source: 'agent', level: 'console', message: line).catchError((_) {}));
+        unawaited(LogWriter.log(source: 'agent', level: 'info', message: line).catchError((_) {}));
       },
     ),
   );
 }
 
 void _logInfo(String message) {
-  unawaited(LogWriter.log(source: 'agent', level: 'console', message: message).catchError((_) {}));
-}
-
-void _logError(String message, Object error, StackTrace stackTrace) {
-  unawaited(LogWriter.log(source: 'agent', level: 'console', message: '$message $error').catchError((_) {}));
-  unawaited(LogWriter.log(source: 'agent', level: 'console', message: stackTrace.toString()).catchError((_) {}));
+  unawaited(LogWriter.log(source: 'agent', level: 'info', message: message).catchError((_) {}));
 }
 
 void _startEventLoopLagMonitor() {

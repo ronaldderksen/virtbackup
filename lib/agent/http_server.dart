@@ -16,6 +16,7 @@ import 'package:virtbackup/agent/drv/dummy_driver.dart';
 import 'package:virtbackup/agent/drv/filesystem_driver.dart';
 import 'package:virtbackup/agent/drv/gdrive_driver.dart';
 import 'package:virtbackup/agent/drv/sftp_driver.dart';
+import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/models.dart';
 import 'package:virtbackup/common/settings.dart';
 import 'package:virtbackup/agent/settings_store.dart';
@@ -2139,11 +2140,12 @@ class AgentHttpServer {
   }
 
   void _hostLog(String message) {
-    _host.logInfo(message);
+    LogWriter.logAgentSync(level: 'info', message: message);
   }
 
   void _hostLogError(String message, Object error, StackTrace stackTrace) {
-    _host.logError(message, error, stackTrace);
+    LogWriter.logAgentSync(level: 'info', message: '$message $error');
+    LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
   }
 }
 

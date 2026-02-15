@@ -1388,12 +1388,12 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   }
 
   void _logInfo(String message) {
-    LogWriter.logGuiBackground(level: 'info', message: message);
+    LogWriter.logGuiSync(level: 'info', message: message);
   }
 
   void _logError(String message, Object error, StackTrace stackTrace) {
-    LogWriter.logGuiBackground(level: 'info', message: '$message $error');
-    LogWriter.logGuiBackground(level: 'debug', message: stackTrace.toString());
+    LogWriter.logGuiSync(level: 'info', message: '$message $error');
+    LogWriter.logGuiSync(level: 'debug', message: stackTrace.toString());
   }
 
   String _buildLibvirtHost() {

@@ -125,10 +125,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     );
     LogWriter.configureSourceLevel(source: 'agent', level: settings.logLevel);
 
-    final host = BackupAgentHost(
-      onInfo: (message) => LogWriter.logAgentBackground(level: 'info', message: message),
-      onError: (message, error, stackTrace) => LogWriter.logAgentBackground(level: 'info', message: '$message $error\n$stackTrace'),
-    );
+    final host = BackupAgentHost();
 
     BackupDriver buildDriver() {
       final factories = <String, BackupDriver Function()>{
@@ -136,7 +133,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         'gdrive': () => GdriveBackupDriver(
           settings: settings,
           persistSettings: (updated) async => mainPort.send({'type': _typeSettings, 'settings': updated.toMap()}),
-          logInfo: (message) => LogWriter.logAgentBackground(level: 'info', message: message),
+          logInfo: (message) => LogWriter.logAgentSync(level: 'info', message: message),
         ),
         'filesystem': () => FilesystemBackupDriver(backupPath.trim()),
         'sftp': () => SftpBackupDriver(settings: settings, poolSessions: downloadConcurrency),
@@ -391,13 +388,13 @@ void restoreWorkerMain(Map<String, dynamic> init) {
             final remoteSize = await host.runSshCommand(server, 'stat -c %s "$remotePath"');
             final remoteValue = int.tryParse(remoteSize.stdout.trim());
             if (remoteValue == target.fileSize) {
-              LogWriter.logAgentBackground(level: 'info', message: 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=$remoteValue');
+              LogWriter.logAgentSync(level: 'info', message: 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=$remoteValue');
             } else {
-              LogWriter.logAgentBackground(level: 'info', message: 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=${remoteSize.stdout.trim()}');
+              LogWriter.logAgentSync(level: 'info', message: 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=${remoteSize.stdout.trim()}');
               throw 'restore size mismatch for ${target.diskBaseName}: expected ${target.fileSize}, got ${remoteSize.stdout.trim()}';
             }
           } catch (error, stackTrace) {
-            LogWriter.logAgentBackground(level: 'info', message: 'restore: size check failed for ${target.diskBaseName}: $error\\n$stackTrace');
+            LogWriter.logAgentSync(level: 'info', message: 'restore: size check failed for ${target.diskBaseName}: $error\\n$stackTrace');
             throw 'restore size check failed for ${target.diskBaseName}: $error';
           }
         }
@@ -448,7 +445,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     } catch (error, stackTrace) {
       final isCanceled = error is _Canceled;
       if (!isCanceled) {
-        LogWriter.logAgentBackground(level: 'info', message: 'Restore failed: $error\n$stackTrace');
+        LogWriter.logAgentSync(level: 'info', message: 'Restore failed: $error\n$stackTrace');
       }
       sendResult(
         AgentJobStatus(

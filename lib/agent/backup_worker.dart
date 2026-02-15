@@ -20,8 +20,8 @@ const String _typeResult = 'result';
 const String _typeSettings = 'settings';
 const bool _isDebug = !bool.fromEnvironment('dart.vm.product');
 
-Future<void> _deleteSharedBlobCacheIfNeeded(BackupAgentHost host, AppSettings settings, String driverId) async {
-  host.logInfo('Fresh cleanup: skipping local filesystem blob cleanup.');
+Future<void> _deleteSharedBlobCacheIfNeeded() async {
+  LogWriter.logAgentSync(level: 'info', message: 'Fresh cleanup: skipping local filesystem blob cleanup.');
 }
 
 void backupWorkerMain(Map<String, dynamic> init) {
@@ -61,10 +61,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
     );
     LogWriter.configureSourceLevel(source: 'agent', level: settings.logLevel);
 
-    final host = BackupAgentHost(
-      onInfo: (message) => LogWriter.logAgentBackground(level: 'info', message: message),
-      onError: (message, error, stackTrace) => LogWriter.logAgentBackground(level: 'info', message: '$message $error'),
-    );
+    final host = BackupAgentHost();
 
     BackupDriver buildDriver() {
       final factories = <String, BackupDriver Function(Map<String, dynamic>)>{
@@ -72,7 +69,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
         'gdrive': (_) => GdriveBackupDriver(
           settings: settings,
           persistSettings: (updated) async => mainPort.send({'type': _typeSettings, 'settings': updated.toMap()}),
-          logInfo: (message) => LogWriter.logAgentBackground(level: 'info', message: message),
+          logInfo: (message) => LogWriter.logAgentSync(level: 'info', message: message),
         ),
         'filesystem': (_) => FilesystemBackupDriver(backupPath.trim()),
         'sftp': (_) => SftpBackupDriver(settings: settings, poolSessions: uploadConcurrency),
@@ -86,8 +83,11 @@ void backupWorkerMain(Map<String, dynamic> init) {
     agent = BackupAgent(
       dependencies: dependencies,
       onProgress: (progress) => mainPort.send({'type': _typeProgress, 'jobId': jobId, 'progress': progress.toMap()}),
-      onInfo: host.logInfo,
-      onError: host.logError,
+      onInfo: (message) => LogWriter.logAgentSync(level: 'info', message: message),
+      onError: (message, error, stackTrace) {
+        LogWriter.logAgentSync(level: 'info', message: '$message $error');
+        LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
+      },
       hashblocksLimitBufferMb: settings.hashblocksLimitBufferMb,
       writerConcurrencyOverride: uploadConcurrency,
     );
@@ -96,14 +96,14 @@ void backupWorkerMain(Map<String, dynamic> init) {
       if (freshRequested && _isDebug) {
         // Prepare local debug log first so fresh-cleanup logs are not lost by a later ensureReady() call.
         await driver.ensureReady();
-        host.logInfo('Fresh cleanup requested (debug only).');
-        await _deleteSharedBlobCacheIfNeeded(host, settings, driverId);
+        LogWriter.logAgentSync(level: 'info', message: 'Fresh cleanup requested (debug only).');
+        await _deleteSharedBlobCacheIfNeeded();
         await driver.freshCleanup();
       }
       final result = await agent!.runVmBackup(server: server, vm: vm, driver: driver);
       mainPort.send({'type': _typeResult, 'jobId': jobId, 'result': result.toMap()});
     } catch (error, _) {
-      LogWriter.logAgentBackground(level: 'info', message: 'Backup worker failed: $error');
+      LogWriter.logAgentSync(level: 'info', message: 'Backup worker failed: $error');
       mainPort.send({'type': _typeResult, 'jobId': jobId, 'result': BackupAgentResult(success: false, message: error.toString()).toMap()});
     }
   }

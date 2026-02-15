@@ -881,7 +881,7 @@ class BackupAgent {
 
     void sendLimitCommand(HashblocksController value, int maxIndex, {required String reason, String? detail}) {
       final suffix = detail == null || detail.isEmpty ? '' : ' $detail';
-      LogWriter.logAgentBackground(level: 'debug', message: _formatLogMessage('hashblocks limit command: LIMIT $maxIndex reason=$reason (${formatLimitBlocks(maxIndex)})$suffix') ?? '');
+      LogWriter.logAgentSync(level: 'debug', message: _formatLogMessage('hashblocks limit command: LIMIT $maxIndex reason=$reason (${formatLimitBlocks(maxIndex)})$suffix') ?? '');
       value.setLimit(maxIndex);
     }
 
@@ -1000,7 +1000,10 @@ class BackupAgent {
         }
       },
       registerProgressBlocks: registerProgressBlocks,
-      enqueueWriteBlock: (hash, bytes) async => writerWorker.enqueue(hash, bytes),
+      enqueueWriteBlock: (hash, bytes) async {
+        _blobDirectoryCache?.markHashKnown(hash);
+        writerWorker.enqueue(hash, bytes);
+      },
       ensureNotCanceled: _ensureNotCanceled,
     );
 
@@ -1172,11 +1175,11 @@ class BackupAgent {
 
   Future<void> _writeBlob(String hash, List<int> bytes, BackupDriver driver) async {
     await driver.writeBlob(hash, bytes);
-    _blobDirectoryCache?.markHashKnown(hash);
   }
 
   Future<void> _scheduleWriteBlob(String hash, Uint8List bytes, BackupDriver driver) async {
     _ensureNotCanceled();
+    _blobDirectoryCache?.markHashKnown(hash);
     final payload = Uint8List.fromList(bytes);
     final future = _writeBlob(hash, payload, driver);
     final tracking = future.then((_) {});
@@ -1421,7 +1424,7 @@ class _BlobDirectoryCache {
     final shardSet = _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{});
     final added = shardSet.add(hash);
     if (added && (shardSet.length == 1 || shardSet.length % 1024 == 0)) {
-      LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: markHashKnown shard=$shardKey total=${shardSet.length}');
+      LogWriter.logAgentSync(level: 'debug', message: 'blob-cache: markHashKnown shard=$shardKey total=${shardSet.length}');
     }
   }
 
@@ -1436,13 +1439,13 @@ class _BlobDirectoryCache {
   }
 
   Future<void> _initializeCore() async {
-    LogWriter.logAgentBackground(level: 'info', message: 'blob-cache writeReady=false (initializing)');
-    LogWriter.logAgentBackground(level: 'info', message: 'blob-cache write ready: false');
-    LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: writeReady=false initialize-start');
-    LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: write ready=false initialize-start');
+    LogWriter.logAgentSync(level: 'info', message: 'blob-cache writeReady=false (initializing)');
+    LogWriter.logAgentSync(level: 'info', message: 'blob-cache write ready: false');
+    LogWriter.logAgentSync(level: 'debug', message: 'blob-cache: writeReady=false initialize-start');
+    LogWriter.logAgentSync(level: 'debug', message: 'blob-cache: write ready=false initialize-start');
     _writeReady = false;
     final shardNames = await _loadShards();
-    LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: top-level shard scan completed count=${shardNames.length}');
+    LogWriter.logAgentSync(level: 'debug', message: 'blob-cache: top-level shard scan completed count=${shardNames.length}');
     final missingShards = <String>[];
     for (var i = 0; i < 256; i += 1) {
       final shardKey = i.toRadixString(16).padLeft(2, '0');
@@ -1454,10 +1457,10 @@ class _BlobDirectoryCache {
       await _ensureShardCreated(shardKey: shardKey);
     }
     _writeReady = true;
-    LogWriter.logAgentBackground(level: 'info', message: 'blob-cache writeReady=true (missingShardsCreated=${missingShards.length})');
-    LogWriter.logAgentBackground(level: 'info', message: 'blob-cache write ready: true');
-    LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: writeReady=true missingShardsCreated=${missingShards.length}');
-    LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: write ready=true missingShardsCreated=${missingShards.length}');
+    LogWriter.logAgentSync(level: 'info', message: 'blob-cache writeReady=true (missingShardsCreated=${missingShards.length})');
+    LogWriter.logAgentSync(level: 'info', message: 'blob-cache write ready: true');
+    LogWriter.logAgentSync(level: 'debug', message: 'blob-cache: writeReady=true missingShardsCreated=${missingShards.length}');
+    LogWriter.logAgentSync(level: 'debug', message: 'blob-cache: write ready=true missingShardsCreated=${missingShards.length}');
     _notifyWriteReady();
   }
 
@@ -1495,7 +1498,7 @@ class _BlobDirectoryCache {
     try {
       final names = await future;
       _blobNamesByShardKey[shardKey] = names;
-      LogWriter.logAgentBackground(level: 'trace', message: 'blob-cache: shard scan completed shard=$shardKey blobCount=${names.length}');
+      LogWriter.logAgentSync(level: 'trace', message: 'blob-cache: shard scan completed shard=$shardKey blobCount=${names.length}');
       return names;
     } finally {
       _blobNamesInFlight.remove(shardKey);
@@ -1510,15 +1513,15 @@ class _BlobDirectoryCache {
     }
     final createFuture = () async {
       if (shardKey == 'ff') {
-        LogWriter.logAgentBackground(level: 'info', message: 'blob-cache shard create: ff start');
-        LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: shard create ff start');
+        LogWriter.logAgentSync(level: 'info', message: 'blob-cache shard create: ff start');
+        LogWriter.logAgentSync(level: 'debug', message: 'blob-cache: shard create ff start');
       }
       await createShard(shardKey);
       (_shardNames ??= <String>{}).add(shardKey);
       _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{});
       if (shardKey == 'ff') {
-        LogWriter.logAgentBackground(level: 'info', message: 'blob-cache shard create: ff ok');
-        LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: shard create ff ok');
+        LogWriter.logAgentSync(level: 'info', message: 'blob-cache shard create: ff ok');
+        LogWriter.logAgentSync(level: 'debug', message: 'blob-cache: shard create ff ok');
       }
     }();
     _shardCreateInFlight[shardKey] = createFuture;
@@ -1550,6 +1553,6 @@ class _BlobDirectoryCache {
       return;
     }
     _lastExistsLogAt[shardKey] = now;
-    LogWriter.logAgentBackground(level: 'trace', message: 'blob-cache: exists shard=$shardKey result=$result writeReady=$_writeReady');
+    LogWriter.logAgentSync(level: 'trace', message: 'blob-cache: exists shard=$shardKey result=$result writeReady=$_writeReady');
   }
 }

@@ -35,7 +35,7 @@ class LogWriter {
 
   static void configureSourceLevel({required String source, required String level}) {
     final normalizedSource = _normalizeSource(source);
-    final normalizedLevel = _normalizeLevel(level);
+    final normalizedLevel = _normalizeLevel(level, source: normalizedSource);
     if (normalizedSource.isEmpty || normalizedLevel.isEmpty) {
       return;
     }
@@ -66,7 +66,7 @@ class LogWriter {
     if (trimmedLevel.isEmpty || trimmedMessage.isEmpty) {
       return;
     }
-    final normalizedLevel = _normalizeLevel(trimmedLevel);
+    final normalizedLevel = _normalizeLevel(trimmedLevel, source: source);
     if (!_shouldLog(source: source, messageLevel: normalizedLevel)) {
       return;
     }
@@ -90,12 +90,30 @@ class LogWriter {
     return log(source: _guiSource, level: level, message: message);
   }
 
-  static void logAgentBackground({required String level, required String message}) {
-    unawaited(logAgent(level: level, message: message).catchError((Object _, StackTrace _) {}));
+  static void logSync({required String source, required String level, required String message}) {
+    final trimmedLevel = level.trim();
+    final trimmedMessage = message.trimRight();
+    if (trimmedLevel.isEmpty || trimmedMessage.isEmpty) {
+      return;
+    }
+    final normalizedLevel = _normalizeLevel(trimmedLevel, source: source);
+    if (!_shouldLog(source: source, messageLevel: normalizedLevel)) {
+      return;
+    }
+    final timestamp = _formatTimestamp(DateTime.now());
+    if (normalizedLevel == _infoLevel) {
+      stdout.writeln('$timestamp $trimmedMessage');
+    }
+    final line = '$timestamp level=$normalizedLevel message=${_sanitize(trimmedMessage)}';
+    _appendSync(_resolvePath(source), line, allowParentCreate: _allowParentCreate(source));
   }
 
-  static void logGuiBackground({required String level, required String message}) {
-    unawaited(logGui(level: level, message: message).catchError((Object _, StackTrace _) {}));
+  static void logAgentSync({required String level, required String message}) {
+    logSync(source: _agentSource, level: level, message: message);
+  }
+
+  static void logGuiSync({required String level, required String message}) {
+    logSync(source: _guiSource, level: level, message: message);
   }
 
   static String _resolvePath(String source) {
@@ -135,21 +153,74 @@ class LogWriter {
     return _normalizeSource(source) != _guiSource;
   }
 
-  static String _normalizeLevel(String level) {
+  static String _normalizeLevel(String level, {String? source}) {
     final normalized = level.trim().toLowerCase();
+    if (normalized == 'console') {
+      _failObsoleteConsoleLevel(level, source: source);
+    }
     return switch (normalized) {
       'fatal' => 'fatal',
-      'critical' => 'fatal',
       'error' => 'error',
       'warn' => 'warn',
-      'warning' => 'warn',
       'info' => 'info',
-      'console' => 'info',
       'debug' => 'debug',
-      'dbug' => 'debug',
       'trace' => 'trace',
-      _ => 'info',
+      _ => _failInvalidLogLevel(level, source: source),
     };
+  }
+
+  static Never _failObsoleteConsoleLevel(String level, {String? source}) {
+    final resolvedSource = _normalizeSource(source ?? _agentSource);
+    final timestamp = _formatTimestamp(DateTime.now());
+    final errorLine = '$timestamp level=fatal message=${_sanitize('LogWriter fatal: obsolete log level "$level" is not allowed. Use "info" instead.')}';
+    final stackLine = '$timestamp level=fatal message=${_sanitize(StackTrace.current.toString())}';
+    try {
+      final path = _resolvePath(resolvedSource);
+      final allowParentCreate = _allowParentCreate(resolvedSource);
+      _appendSync(path, errorLine, allowParentCreate: allowParentCreate);
+      _appendSync(path, stackLine, allowParentCreate: allowParentCreate);
+    } catch (_) {}
+    stderr.writeln('LogWriter fatal: obsolete log level "$level" is not allowed. Use "info" instead.');
+    stderr.writeln(StackTrace.current.toString());
+    exit(1);
+  }
+
+  static Never _failInvalidLogLevel(String level, {String? source}) {
+    final resolvedSource = _normalizeSource(source ?? _agentSource);
+    final timestamp = _formatTimestamp(DateTime.now());
+    final errorLine = '$timestamp level=fatal message=${_sanitize('LogWriter fatal: invalid log level "$level". Allowed: fatal,error,warn,info,debug,trace.')}';
+    final stackLine = '$timestamp level=fatal message=${_sanitize(StackTrace.current.toString())}';
+    try {
+      final path = _resolvePath(resolvedSource);
+      final allowParentCreate = _allowParentCreate(resolvedSource);
+      _appendSync(path, errorLine, allowParentCreate: allowParentCreate);
+      _appendSync(path, stackLine, allowParentCreate: allowParentCreate);
+    } catch (_) {}
+    stderr.writeln('LogWriter fatal: invalid log level "$level". Allowed: fatal,error,warn,info,debug,trace.');
+    stderr.writeln(StackTrace.current.toString());
+    exit(1);
+  }
+
+  static void _appendSync(String path, String line, {required bool allowParentCreate}) {
+    final file = File(path);
+    if (allowParentCreate) {
+      file.parent.createSync(recursive: true);
+    } else if (!file.parent.existsSync()) {
+      return;
+    }
+    final raf = file.openSync(mode: FileMode.append);
+    try {
+      raf.lockSync(FileLock.exclusive);
+      final length = raf.lengthSync();
+      raf.setPositionSync(length);
+      raf.writeStringSync('$line\n');
+      raf.flushSync();
+    } finally {
+      try {
+        raf.unlockSync();
+      } catch (_) {}
+      raf.closeSync();
+    }
   }
 
   static String _formatTimestamp(DateTime value) {

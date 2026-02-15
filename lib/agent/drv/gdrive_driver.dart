@@ -1320,7 +1320,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   Future<void> _appendApiLogLine(String line) async {
     try {
       await _configureAgentLogPath();
-      LogWriter.logAgentBackground(level: 'debug', message: 'driver=gdrive $line');
+      LogWriter.logAgentSync(level: 'debug', message: 'driver=gdrive $line');
     } catch (_) {}
   }
 

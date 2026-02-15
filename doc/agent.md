@@ -295,7 +295,10 @@ The agent supports optional native SFTP via FFI:
 - Log records are routed by source: `agent` writes to `VirtBackup/logs/agent.log` and `gui` writes to `VirtBackup/logs/gui.log` under the configured backup base path.
 - Backup/restore worker isolates write their logs directly to `LogWriter` (`source=agent`) and do not route log lines through the HTTP server event channel.
 - Backup writer loop diagnostics (`writer debug: ...`) are emitted at `debug` level via `LogWriter` and not forwarded as `info` progress lines.
-- Agent log filtering reads `log_level` from `agent.yaml` (default `info` when missing/empty); GUI log filtering reads `log_level` from SharedPreferences (default `info` when missing/empty).
+- Agent log filtering reads `log_level` from `agent.yaml` (default `info` when missing/empty); GUI log filtering reads `log_level` from SharedPreferences (default `info` when missing/empty). Accepted levels are strict: `fatal`, `error`, `warn`, `info`, `debug`, `trace`.
+- `console` is an obsolete log level. `LogWriter` now treats any use of `console` as a fatal configuration/code error, writes the error + stack dump to the corresponding source log, prints the same stack dump to `stderr`, and exits with code `1`.
+- Logging now uses synchronous wrappers (`logAgentSync` / `logGuiSync`) to keep stdout and persisted log files aligned without background fire-and-forget behavior.
+- Unknown/alias levels (for example `critical`, `warning`, `dbug`) are treated as fatal logging errors and cause a stack dump + process exit (`1`).
 - Log records include `timestamp`, `level`, and `message`; source is used only for routing and is not included in the line payload.
 - Driver-originated logs are prefixed in `message` with `driver=<driverId>` (for example `driver=sftp` or `driver=gdrive`) to simplify filtering.
 - Log writes go through a centralized sequential queue writer with file locking to avoid interleaved/corrupted lines when multiple producers log concurrently.

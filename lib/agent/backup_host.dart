@@ -9,14 +9,11 @@ import 'package:ffi/ffi.dart';
 
 import 'package:virtbackup/agent/backup.dart';
 import 'package:virtbackup/agent/logging_config.dart';
+import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/models.dart';
 
 class BackupAgentHost {
-  BackupAgentHost({LogInfo? onInfo, LogError? onError, bool logSshOutput = false}) : _onInfo = onInfo, _onError = onError, _logSshOutput = logSshOutput;
-
-  final LogInfo? _onInfo;
-  final LogError? _onError;
-  final bool _logSshOutput;
+  BackupAgentHost();
   int _sftpRangeBytesSinceLog = 0;
   DateTime _sftpRangeLastLog = DateTime.now();
   int _sftpDownloadBytesSinceLog = 0;
@@ -63,22 +60,14 @@ class BackupAgentHost {
     );
   }
 
-  void logInfo(String message) {
-    _logInfo(message);
-  }
-
   void _logNativeSftpStatusOnce() {
     if (_nativeSftpLogged) {
       return;
     }
     _nativeSftpLogged = true;
     if (_nativeSftp != null) {
-      _logInfo('native sftp: loaded');
+      LogWriter.logAgentSync(level: 'info', message: 'native sftp: loaded');
     }
-  }
-
-  void logError(String message, Object error, StackTrace stackTrace) {
-    _logError(message, error, stackTrace);
   }
 
   Future<void> _beginLargeTransferSession(ServerConfig server) async {
@@ -197,7 +186,7 @@ class BackupAgentHost {
     }
     final elapsedMs = _lastSftpUploadAt!.difference(_firstSftpUploadAt!).inMilliseconds;
     final elapsedSec = elapsedMs / 1000.0;
-    _logInfo('SFTP upload window: ${elapsedSec.toStringAsFixed(2)}s');
+    LogWriter.logAgentSync(level: 'info', message: 'SFTP upload window: ${elapsedSec.toStringAsFixed(2)}s');
     _firstSftpUploadAt = null;
     _lastSftpUploadAt = null;
   }
@@ -241,7 +230,7 @@ class BackupAgentHost {
     }
     final domstateResult = await _runSshCommandForServer(server, 'virsh domstate "${vm.name}"');
     final state = domstateResult.stdout.trim().toLowerCase();
-    _logInfo('Cleanup overlays for ${vm.name}: domstate=${state.isEmpty ? 'unknown' : state}');
+    LogWriter.logAgentSync(level: 'info', message: 'Cleanup overlays for ${vm.name}: domstate=${state.isEmpty ? 'unknown' : state}');
     if (state == 'running') {
       await _pivotAllDisks(server, vm, activeDisks);
       return;
@@ -280,7 +269,7 @@ class BackupAgentHost {
       final user = server.sshUser.trim();
       final password = server.sshPassword;
       const command = 'virsh event --all --loop';
-      _logInfo('SSH event listener [$user@$host:$port]: $command');
+      LogWriter.logAgentSync(level: 'info', message: 'SSH event listener [$user@$host:$port]: $command');
       final socket = await SSHSocket.connect(host, port);
       final client = SSHClient(socket, username: user, onPasswordRequest: () => password, algorithms: _sshAlgorithms);
       final session = await client.execute(command);
@@ -297,9 +286,7 @@ class BackupAgentHost {
               if (trimmed.isEmpty) {
                 return;
               }
-              if (_logSshOutput) {
-                _logInfo('virsh event: $trimmed');
-              }
+              LogWriter.logAgentSync(level: 'info', message: 'virsh event: $trimmed');
               onEvent(trimmed);
             },
             onError: (Object error, StackTrace stackTrace) {
@@ -316,9 +303,7 @@ class BackupAgentHost {
               if (trimmed.isEmpty) {
                 return;
               }
-              if (_logSshOutput) {
-                _logInfo('virsh event stderr: $trimmed');
-              }
+              LogWriter.logAgentSync(level: 'info', message: 'virsh event stderr: $trimmed');
             },
             onError: (Object error, StackTrace stackTrace) {
               onError?.call(error, stackTrace);
@@ -326,17 +311,19 @@ class BackupAgentHost {
           );
       session.done
           .then((_) {
-            _logInfo('VM event listener stopped.');
+            LogWriter.logAgentSync(level: 'info', message: 'VM event listener stopped.');
             stopVmEventListener(server.id);
             onStopped?.call();
           })
           .catchError((Object error, StackTrace stackTrace) {
-            _logError('VM event listener failed.', error, stackTrace);
+            LogWriter.logAgentSync(level: 'info', message: 'VM event listener failed. $error');
+            LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
             stopVmEventListener(server.id);
             onError?.call(error, stackTrace);
           });
     } catch (error, stackTrace) {
-      _logError('VM event listener start failed.', error, stackTrace);
+      LogWriter.logAgentSync(level: 'info', message: 'VM event listener start failed. $error');
+      LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
       await stopVmEventListener(server.id);
       onError?.call(error, stackTrace);
     } finally {
@@ -353,20 +340,12 @@ class BackupAgentHost {
     _eventStarting.remove(serverId);
   }
 
-  void _logInfo(String message) {
-    _onInfo?.call(message);
-  }
-
-  void _logError(String message, Object error, StackTrace stackTrace) {
-    _onError?.call(message, error, stackTrace);
-  }
-
   Future<SshCommandResult> _runSshCommandForServer(ServerConfig server, String command) async {
     final host = server.sshHost.trim();
     final port = int.tryParse(server.sshPort.trim()) ?? 22;
     final user = server.sshUser.trim();
     final password = server.sshPassword;
-    _logInfo('SSH exec [$user@$host:$port]: $command');
+    LogWriter.logAgentSync(level: 'info', message: 'SSH exec [$user@$host:$port]: $command');
     final socket = await SSHSocket.connect(host, port);
     final client = SSHClient(socket, username: user, onPasswordRequest: () => password, algorithms: _sshAlgorithms);
     try {
@@ -375,18 +354,14 @@ class BackupAgentHost {
       final stderrText = await utf8.decodeStream(session.stderr);
       final exitCode = session.exitCode;
       await session.done;
-      if (_logSshOutput) {
-        _logInfo('SSH exit code: ${exitCode ?? 0}');
-      }
+      LogWriter.logAgentSync(level: 'trace', message: 'SSH exit code: ${exitCode ?? 0}');
       final trimmedStdout = stdoutText.trim();
       final trimmedStderr = stderrText.trim();
-      if (_logSshOutput) {
-        if (trimmedStdout.isNotEmpty) {
-          _logInfo('SSH stdout: $trimmedStdout');
-        }
-        if (trimmedStderr.isNotEmpty) {
-          _logInfo('SSH stderr: $trimmedStderr');
-        }
+      if (trimmedStdout.isNotEmpty) {
+        LogWriter.logAgentSync(level: 'trace', message: 'SSH stdout: $trimmedStdout');
+      }
+      if (trimmedStderr.isNotEmpty) {
+        LogWriter.logAgentSync(level: 'info', message: 'SSH stderr: $trimmedStderr');
       }
       return SshCommandResult(stdout: stdoutText, stderr: stderrText, exitCode: exitCode);
     } finally {
@@ -408,7 +383,7 @@ class BackupAgentHost {
     final user = server.sshUser.trim();
     final password = server.sshPassword;
     final command = '"$remoteHashblocksPath" --read "$remotePath" --block-size $blockSize';
-    _logInfo('SSH exec [$user@$host:$port]: $command');
+    LogWriter.logAgentSync(level: 'info', message: 'SSH exec [$user@$host:$port]: $command');
     final socket = await SSHSocket.connect(host, port);
     final client = SSHClient(socket, username: user, onPasswordRequest: () => password, algorithms: _sshAlgorithms);
     var brokenPipe = false;
@@ -422,7 +397,7 @@ class BackupAgentHost {
           final message = error.toString();
           if (message.toLowerCase().contains('broken pipe')) {
             brokenPipe = true;
-            _logInfo('hashblocks control broken pipe, stopping session');
+            LogWriter.logAgentSync(level: 'info', message: 'hashblocks control broken pipe, stopping session');
             session.close();
             return;
           }
@@ -539,7 +514,7 @@ class BackupAgentHost {
         final elapsedMs = now.difference(_sftpRangeLastLog).inMilliseconds;
         if (elapsedMs >= agentLogInterval.inMilliseconds) {
           final mbPerSec = (_sftpRangeBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
-          _logInfo('SFTP range speed: ${mbPerSec.toStringAsFixed(1)}MB/s');
+          LogWriter.logAgentSync(level: 'info', message: 'SFTP range speed: ${mbPerSec.toStringAsFixed(1)}MB/s');
           _sftpRangeBytesSinceLog = 0;
           _sftpRangeLastLog = now;
         }
@@ -550,7 +525,7 @@ class BackupAgentHost {
         completed = true;
         return;
       }
-      _logInfo('SFTP short read for $remotePath offset=$currentOffset expected=$remaining got=0; retrying once');
+      LogWriter.logAgentSync(level: 'info', message: 'SFTP short read for $remotePath offset=$currentOffset expected=$remaining got=0; retrying once');
       _releaseNativeReadLease(lease, keepOpen: false);
       lease = null;
       await _reconnectNativeSftpSession(server);
@@ -573,7 +548,7 @@ class BackupAgentHost {
         final elapsedMs = now.difference(_sftpRangeLastLog).inMilliseconds;
         if (elapsedMs >= agentLogInterval.inMilliseconds) {
           final mbPerSec = (_sftpRangeBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
-          _logInfo('SFTP range speed: ${mbPerSec.toStringAsFixed(1)}MB/s');
+          LogWriter.logAgentSync(level: 'info', message: 'SFTP range speed: ${mbPerSec.toStringAsFixed(1)}MB/s');
           _sftpRangeBytesSinceLog = 0;
           _sftpRangeLastLog = now;
         }
@@ -594,7 +569,7 @@ class BackupAgentHost {
   Future<String?> _ensureHashblocksOnServer(ServerConfig server) async {
     final localPath = _findLocalHashblocks();
     if (localPath == null) {
-      _logInfo('hashblocks not found next to agent; falling back to Dart dedup.');
+      LogWriter.logAgentSync(level: 'info', message: 'hashblocks not found next to agent; falling back to Dart dedup.');
       return null;
     }
     const remotePath = '/var/tmp/hashblocks';
@@ -603,7 +578,7 @@ class BackupAgentHost {
     } catch (_) {}
     await _uploadLocalFileViaSftp(server, localPath, remotePath);
     await _runSshCommandForServer(server, 'chmod +x "$remotePath"');
-    _logInfo('hashblocks uploaded to $remotePath');
+    LogWriter.logAgentSync(level: 'info', message: 'hashblocks uploaded to $remotePath');
     return remotePath;
   }
 
@@ -679,7 +654,7 @@ class BackupAgentHost {
         final activeIsVirtbackup = _sourcePathLooksLikeOverlay(activeSource);
         final inactiveIsVirtbackup = _sourcePathLooksLikeOverlay(inactiveSource);
         if (!activeIsVirtbackup && !inactiveIsVirtbackup) {
-          _logInfo('Skipping cleanup for ${vm.name}: non-virtbackup snapshot detected on $target ($activeSource).');
+          LogWriter.logAgentSync(level: 'info', message: 'Skipping cleanup for ${vm.name}: non-virtbackup snapshot detected on $target ($activeSource).');
           continue;
         }
         final command = await _blockCommitCommand(server, vm, target, verbose: false, top: activeIsVirtbackup ? activeSource : null, base: activeIsVirtbackup ? inactiveSource : null);
@@ -725,7 +700,8 @@ class BackupAgentHost {
       }
       return false;
     } catch (error, stackTrace) {
-      _logError('Overlay check failed for ${vm.name}.', error, stackTrace);
+      LogWriter.logAgentSync(level: 'info', message: 'Overlay check failed for ${vm.name}. $error');
+      LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
       return false;
     }
   }
@@ -739,7 +715,7 @@ class BackupAgentHost {
     final stateResult = await _runSshCommandForServer(server, 'virsh domstate "${vm.name}"');
     final state = stateResult.stdout.trim().toLowerCase();
     if (state != 'running') {
-      _logInfo('Snapshot commit for ${vm.name}: domstate=$state, using qemu-img commit path.');
+      LogWriter.logAgentSync(level: 'info', message: 'Snapshot commit for ${vm.name}: domstate=$state, using qemu-img commit path.');
       await _cleanupStoppedVmOverlays(server, vm, disks);
       return;
     }
@@ -762,7 +738,7 @@ class BackupAgentHost {
         continue;
       }
       if (activeSource.isNotEmpty && !activeIsVirtbackup) {
-        _logInfo('Skipping commit for ${vm.name}: active disk for $target is not virtbackup ($activeSource).');
+        LogWriter.logAgentSync(level: 'info', message: 'Skipping commit for ${vm.name}: active disk for $target is not virtbackup ($activeSource).');
         continue;
       }
       final command = await _blockCommitCommand(server, vm, target, verbose: false);
@@ -781,10 +757,10 @@ class BackupAgentHost {
       }
       final backingPath = await _findBackingFile(server, overlayPath);
       if (backingPath == null || backingPath.isEmpty) {
-        _logInfo('Cleanup ${vm.name}: no backing file for $overlayPath');
+        LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: no backing file for $overlayPath');
         continue;
       }
-      _logInfo('Cleanup ${vm.name}: commit $overlayPath -> $backingPath');
+      LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: commit $overlayPath -> $backingPath');
       await _runSshCommandForServer(server, 'qemu-img commit "$overlayPath"');
       updatedXml = updatedXml.replaceAll(overlayPath, backingPath);
       overlaysToDelete.add(overlayPath);
@@ -796,7 +772,7 @@ class BackupAgentHost {
       final remoteXml = '/var/tmp/virtbackup/cleanup-${_sanitizeFileName(vm.name)}.xml';
       await _runSshCommandForServer(server, 'mkdir -p "/var/tmp/virtbackup"');
       await _uploadLocalFileViaSftp(server, localXml.path, remoteXml);
-      _logInfo('Cleanup ${vm.name}: redefining domain using $remoteXml');
+      LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: redefining domain using $remoteXml');
       await _runSshCommandForServer(server, 'virsh define "$remoteXml"');
       try {
         await localXml.delete();
@@ -806,7 +782,7 @@ class BackupAgentHost {
       } catch (_) {}
     }
     for (final overlayPath in overlaysToDelete) {
-      _logInfo('Cleanup ${vm.name}: removing overlay $overlayPath');
+      LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: removing overlay $overlayPath');
       await _runSshCommandForServer(server, 'rm -f "$overlayPath"');
     }
   }
@@ -846,12 +822,13 @@ class BackupAgentHost {
           continue;
         }
         if (_sourcePathLooksLikeOverlay(candidatePath)) {
-          _logInfo('Cleanup ${vm.name}: resolved overlay for $target -> $candidatePath');
+          LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: resolved overlay for $target -> $candidatePath');
           return candidatePath;
         }
       }
     } catch (error, stackTrace) {
-      _logError('Cleanup overlay resolution failed for ${vm.name}.', error, stackTrace);
+      LogWriter.logAgentSync(level: 'info', message: 'Cleanup overlay resolution failed for ${vm.name}. $error');
+      LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
     }
     return trimmed;
   }
@@ -876,7 +853,7 @@ class BackupAgentHost {
     final flags = args.isEmpty ? '' : ' ${args.join(' ')}';
     final topInfo = top == null || top.isEmpty ? '' : ' top=$top';
     final baseInfo = base == null || base.isEmpty ? '' : ' base=$base';
-    _logInfo('Blockcommit domstate=${state.isEmpty ? 'unknown' : state} target=$target flags=${args.join(' ')}$topInfo$baseInfo');
+    LogWriter.logAgentSync(level: 'info', message: 'Blockcommit domstate=${state.isEmpty ? 'unknown' : state} target=$target flags=${args.join(' ')}$topInfo$baseInfo');
     return 'virsh blockcommit "${vm.name}" "$target"$flags';
   }
 
@@ -885,7 +862,7 @@ class BackupAgentHost {
     final port = int.tryParse(server.sshPort.trim()) ?? 22;
     final user = server.sshUser.trim();
     final password = server.sshPassword;
-    _logInfo('SFTP download [$user@$host:$port]: $remotePath');
+    LogWriter.logAgentSync(level: 'info', message: 'SFTP download [$user@$host:$port]: $remotePath');
     final socket = await SSHSocket.connect(host, port);
     final client = SSHClient(socket, username: user, onPasswordRequest: () => password, algorithms: _sshAlgorithms);
     RandomAccessFile? raf;
@@ -901,7 +878,7 @@ class BackupAgentHost {
       if (remoteSize == null || remoteSize <= 0) {
         throw 'Remote file size is unknown for $remotePath';
       }
-      _logInfo('SFTP size: $remoteSize bytes');
+      LogWriter.logAgentSync(level: 'info', message: 'SFTP size: $remoteSize bytes');
       remoteFile = await sftp.open(remotePath);
       raf = await file.open(mode: FileMode.write);
       var bytesSinceFlush = 0;
@@ -911,7 +888,7 @@ class BackupAgentHost {
       stallTimer = Timer.periodic(const Duration(seconds: 15), (_) {
         final secondsWithoutData = DateTime.now().difference(lastDataReceivedAt).inSeconds;
         if (secondsWithoutData >= 15) {
-          _logInfo('Backup stream stalled: no data for ${secondsWithoutData}s');
+          LogWriter.logAgentSync(level: 'info', message: 'Backup stream stalled: no data for ${secondsWithoutData}s');
         }
       });
       speedTimer = Timer.periodic(agentLogInterval, (_) {});
@@ -938,7 +915,7 @@ class BackupAgentHost {
           if (elapsedMs >= 5000) {
             final mbPerSec = (_sftpDownloadBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
             final totalMb = totalDownloaded / (1024 * 1024);
-            _logInfo('SFTP download speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
+            LogWriter.logAgentSync(level: 'info', message: 'SFTP download speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
             _sftpDownloadBytesSinceLog = 0;
             _sftpDownloadLastLog = now;
           }
@@ -966,7 +943,7 @@ class BackupAgentHost {
           final elapsedSinceWatchdog = nowWatchdog.difference(lastWatchdogTick);
           if (elapsedSinceWatchdog.inSeconds >= 15) {
             final mb = bytesSinceWatchdog / (1024 * 1024);
-            _logInfo('Backup stream progress: ${mb.toStringAsFixed(1)} MB in ${elapsedSinceWatchdog.inSeconds}s');
+            LogWriter.logAgentSync(level: 'info', message: 'Backup stream progress: ${mb.toStringAsFixed(1)} MB in ${elapsedSinceWatchdog.inSeconds}s');
             lastWatchdogTick = nowWatchdog;
             bytesSinceWatchdog = 0;
           }
@@ -974,7 +951,7 @@ class BackupAgentHost {
       } on StateError catch (error) {
         final message = error.message.toString();
         if (message.contains('Cannot add event after closing')) {
-          _logInfo('SFTP download stream closed early.');
+          LogWriter.logAgentSync(level: 'info', message: 'SFTP download stream closed early.');
         } else {
           rethrow;
         }
@@ -984,7 +961,7 @@ class BackupAgentHost {
         await raf.writeFrom(tailBlock);
       }
       await raf.flush();
-      _logInfo('SFTP download completed for $remotePath');
+      LogWriter.logAgentSync(level: 'info', message: 'SFTP download completed for $remotePath');
     } finally {
       speedTimer?.cancel();
       stallTimer?.cancel();
@@ -1028,7 +1005,7 @@ class BackupAgentHost {
           if (elapsedMs >= agentLogInterval.inMilliseconds) {
             final mbPerSec = (_sftpStreamBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
             final totalMb = total / (1024 * 1024);
-            _logInfo('SFTP stream speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
+            LogWriter.logAgentSync(level: 'info', message: 'SFTP stream speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
             _sftpStreamBytesSinceLog = 0;
             _sftpStreamLastLog = now;
           }
@@ -1045,7 +1022,7 @@ class BackupAgentHost {
     final port = int.tryParse(server.sshPort.trim()) ?? 22;
     final user = server.sshUser.trim();
     final password = server.sshPassword;
-    _logInfo('SFTP stream [$user@$host:$port]: $remotePath');
+    LogWriter.logAgentSync(level: 'info', message: 'SFTP stream [$user@$host:$port]: $remotePath');
     final socket = await SSHSocket.connect(host, port);
     final client = SSHClient(socket, username: user, onPasswordRequest: () => password, algorithms: _sshAlgorithms);
     Timer? stallTimer;
@@ -1060,7 +1037,7 @@ class BackupAgentHost {
       if (remoteSize == null || remoteSize <= 0) {
         throw 'Remote file size is unknown for $remotePath';
       }
-      _logInfo('SFTP size: $remoteSize bytes');
+      LogWriter.logAgentSync(level: 'info', message: 'SFTP size: $remoteSize bytes');
       remoteFile = await sftp.open(remotePath);
       var bytesSinceWatchdog = 0;
       var lastWatchdogTick = DateTime.now();
@@ -1068,7 +1045,7 @@ class BackupAgentHost {
       stallTimer = Timer.periodic(const Duration(seconds: 15), (_) {
         final secondsWithoutData = DateTime.now().difference(lastDataReceivedAt).inSeconds;
         if (secondsWithoutData >= 15) {
-          _logInfo('Backup stream stalled: no data for ${secondsWithoutData}s');
+          LogWriter.logAgentSync(level: 'info', message: 'Backup stream stalled: no data for ${secondsWithoutData}s');
         }
       });
       speedTimer = Timer.periodic(agentLogInterval, (_) {});
@@ -1093,7 +1070,7 @@ class BackupAgentHost {
           if (elapsedMs >= 5000) {
             final mbPerSec = (_sftpStreamBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
             final totalMb = totalDownloaded / (1024 * 1024);
-            _logInfo('SFTP stream speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
+            LogWriter.logAgentSync(level: 'info', message: 'SFTP stream speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
             _sftpStreamBytesSinceLog = 0;
             _sftpStreamLastLog = now;
           }
@@ -1102,7 +1079,7 @@ class BackupAgentHost {
           final elapsedSinceWatchdog = nowWatchdog.difference(lastWatchdogTick);
           if (elapsedSinceWatchdog.inSeconds >= 15) {
             final mb = bytesSinceWatchdog / (1024 * 1024);
-            _logInfo('Backup stream progress: ${mb.toStringAsFixed(1)} MB in ${elapsedSinceWatchdog.inSeconds}s');
+            LogWriter.logAgentSync(level: 'info', message: 'Backup stream progress: ${mb.toStringAsFixed(1)} MB in ${elapsedSinceWatchdog.inSeconds}s');
             lastWatchdogTick = nowWatchdog;
             bytesSinceWatchdog = 0;
           }
@@ -1110,12 +1087,12 @@ class BackupAgentHost {
       } on StateError catch (error) {
         final message = error.message.toString();
         if (message.contains('Cannot add event after closing')) {
-          _logInfo('SFTP stream closed early.');
+          LogWriter.logAgentSync(level: 'info', message: 'SFTP stream closed early.');
         } else {
           rethrow;
         }
       }
-      _logInfo('SFTP stream completed for $remotePath');
+      LogWriter.logAgentSync(level: 'info', message: 'SFTP stream completed for $remotePath');
     } finally {
       speedTimer?.cancel();
       stallTimer?.cancel();
@@ -1136,7 +1113,7 @@ class BackupAgentHost {
     final user = server.sshUser.trim();
     final password = server.sshPassword;
     final localFile = File(localPath);
-    _logInfo('SFTP upload [$user@$host:$port]: $localPath -> $remotePath');
+    LogWriter.logAgentSync(level: 'info', message: 'SFTP upload [$user@$host:$port]: $localPath -> $remotePath');
     if (!await localFile.exists()) {
       throw 'Local file not found: $localPath';
     }
@@ -1159,7 +1136,7 @@ class BackupAgentHost {
         if (elapsedMs >= agentLogInterval.inMilliseconds) {
           final mbPerSec = (_sftpUploadBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
           final totalMb = totalUploaded / (1024 * 1024);
-          _logInfo('SFTP upload speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
+          LogWriter.logAgentSync(level: 'info', message: 'SFTP upload speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
           _sftpUploadBytesSinceLog = 0;
           _sftpUploadLastLog = now;
         }
@@ -1226,7 +1203,7 @@ class BackupAgentHost {
       if (elapsedMs >= agentLogInterval.inMilliseconds) {
         final mbPerSec = (_sftpUploadBytesSinceLog / (elapsedMs / 1000)) / (1024 * 1024);
         final totalMb = totalUploaded / (1024 * 1024);
-        _logInfo('SFTP upload speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
+        LogWriter.logAgentSync(level: 'info', message: 'SFTP upload speed: ${mbPerSec.toStringAsFixed(1)}MB/s total=${totalMb.toStringAsFixed(1)}MB');
         _sftpUploadBytesSinceLog = 0;
         _sftpUploadLastLog = now;
       }

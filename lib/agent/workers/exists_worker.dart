@@ -48,7 +48,7 @@ class _ExistsWorker {
 
   void throwIfError() {
     if (_error != null) {
-      LogWriter.logAgentBackground(level: 'info', message: 'exists worker abort: $_error');
+      LogWriter.logAgentSync(level: 'info', message: 'exists worker abort: $_error');
       Error.throwWithStackTrace(_error!, _errorStack ?? StackTrace.current);
     }
   }
@@ -92,7 +92,7 @@ class _ExistsWorker {
     } catch (error, stackTrace) {
       _error = error;
       _errorStack = stackTrace;
-      LogWriter.logAgentBackground(level: 'info', message: 'exists worker failed: $error');
+      LogWriter.logAgentSync(level: 'info', message: 'exists worker failed: $error');
     }
   }
 

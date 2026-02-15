@@ -87,11 +87,11 @@ class _SftpWorker {
       },
     );
     if (blockOffset <= 0) {
-      LogWriter.logAgentBackground(level: 'info', message: 'SFTP range returned no data offset=$rangeStartOffset length=$blockLength');
+      LogWriter.logAgentSync(level: 'info', message: 'SFTP range returned no data offset=$rangeStartOffset length=$blockLength');
       return;
     }
     if (blockOffset < blockLength) {
-      LogWriter.logAgentBackground(level: 'info', message: 'SFTP short read offset=$rangeStartOffset expected=$blockLength got=$blockOffset');
+      LogWriter.logAgentSync(level: 'info', message: 'SFTP short read offset=$rangeStartOffset expected=$blockLength got=$blockOffset');
     }
     final payload = directPayload ?? (blockOffset == blockLength ? blockBuffer : Uint8List.sublistView(blockBuffer, 0, blockOffset));
     await enqueueWriteBlock(expectedHash, payload);
