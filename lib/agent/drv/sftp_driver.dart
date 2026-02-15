@@ -27,13 +27,11 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   static const int _defaultConcurrency = 8;
   static const int _nativeTransferChunkSize = 16 * 1024 * 1024;
   static const int _blobCacheReservedSessions = 1;
-  // Safety switch: disable all remote uploads for SFTP driver.
   static const String _remoteAppFolderName = 'VirtBackup';
   final int _maxConcurrentWrites;
   final _SftpPool _pool;
   final _SftpPool _blobCachePool = _SftpPool(maxSessions: _blobCacheReservedSessions);
   final _NativeSftpPool _nativePool;
-  final Map<String, _NativeSftpReadHandle> _nativeReadHandles = {};
   bool _agentLogConfigured = false;
 
   String get _host => _settings.sftpHost.trim();
@@ -43,28 +41,31 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   String get _basePath => _settings.sftpBasePath.trim();
 
   static int _resolveUploadConcurrency(AppSettings settings) {
-    final destination = _resolveSftpDestination(settings);
+    final destination = _resolveConcurrencyDestination(settings);
     return destination?.uploadConcurrency ?? _defaultConcurrency;
   }
 
   static int _resolveDownloadConcurrency(AppSettings settings) {
-    final destination = _resolveSftpDestination(settings);
+    final destination = _resolveConcurrencyDestination(settings);
     return destination?.downloadConcurrency ?? _defaultConcurrency;
   }
 
-  static BackupDestination? _resolveSftpDestination(AppSettings settings) {
+  static BackupDestination? _resolveConcurrencyDestination(AppSettings settings) {
     final selectedId = settings.backupDestinationId?.trim() ?? '';
     if (selectedId.isNotEmpty) {
       for (final destination in settings.destinations) {
-        if (destination.id == selectedId && destination.driverId == 'sftp') {
+        if (destination.id == selectedId) {
           return destination;
         }
       }
     }
     for (final destination in settings.destinations) {
-      if (destination.driverId == 'sftp' && destination.enabled) {
+      if (destination.enabled) {
         return destination;
       }
+    }
+    if (settings.destinations.isNotEmpty) {
+      return settings.destinations.first;
     }
     return null;
   }
@@ -393,7 +394,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     }
     final remotePath = _remoteBlobPath(hash);
     final remoteTemp = '$remotePath.inprogress.${DateTime.now().microsecondsSinceEpoch}';
-    final data = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+    final data = Uint8List.fromList(bytes);
     return _writeBlobWithTiming(hash: hash, remoteTemp: remoteTemp, remotePath: remotePath, data: data);
   }
 
@@ -431,7 +432,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Stream<List<int>> openBlobStream(String hash, {int? length}) async* {
-    LogWriter.logAgentSync(level: 'trace', message: 'driver=sftp action=driver_call status=invoke durationMs=0 method=CALL target=openBlobStream detail=hash=$hash length=${length ?? -1}');
+    LogWriter.logAgentSync(level: 'debug', message: 'driver=sftp action=driver_call status=invoke durationMs=0 method=CALL target=openBlobStream detail=hash=$hash length=${length ?? -1}');
     if (hash.length < 2) {
       return;
     }
@@ -744,7 +745,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   @override
   Future<void> closeConnections() async {
     LogWriter.logAgentSync(level: 'debug', message: 'driver=sftp action=driver_call status=invoke durationMs=0 method=CALL target=closeConnections');
-    _closeNativeReadHandles();
     _pool.closeAll();
     _blobCachePool.closeAll();
     _nativePool.closeAll();
@@ -767,158 +767,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       throw 'Native SFTP connect failed.';
     }
     return _NativeSftpSession(bindings: bindings, session: session);
-  }
-
-  String _nativeReadHandleKey(String remotePath) => remotePath;
-
-  _NativeSftpReadLease? _acquireNativeReadLease(_NativeSftpBindings bindings, Pointer<Void> session, String remotePath) {
-    final key = _nativeReadHandleKey(remotePath);
-    final cached = _nativeReadHandles[key];
-    if (cached != null && cached.session != session) {
-      _nativeReadHandles.remove(key);
-      if (cached.file != nullptr) {
-        bindings.closeFile(cached.file);
-      }
-    }
-    final refreshed = _nativeReadHandles[key];
-    if (refreshed != null && !refreshed.inUse) {
-      refreshed.inUse = true;
-      return _NativeSftpReadLease(file: refreshed.file, cacheKey: key);
-    }
-    final opened = bindings.openRead(session, remotePath);
-    if (opened == nullptr) {
-      return null;
-    }
-    if (refreshed == null) {
-      _nativeReadHandles[key] = _NativeSftpReadHandle(file: opened, session: session, inUse: true);
-      return _NativeSftpReadLease(file: opened, cacheKey: key);
-    }
-    return _NativeSftpReadLease(file: opened);
-  }
-
-  void _releaseNativeReadLease(_NativeSftpReadLease? lease, {required bool keepOpen}) {
-    if (lease == null || _nativeSftp == null) {
-      return;
-    }
-    final key = lease.cacheKey;
-    if (key == null) {
-      if (lease.file != nullptr) {
-        _nativeSftp.closeFile(lease.file);
-      }
-      return;
-    }
-    final entry = _nativeReadHandles[key];
-    if (entry == null) {
-      return;
-    }
-    if (keepOpen) {
-      entry.inUse = false;
-      return;
-    }
-    _nativeReadHandles.remove(key);
-    if (entry.file != nullptr) {
-      _nativeSftp.closeFile(entry.file);
-    }
-  }
-
-  void _closeNativeReadHandles() {
-    if (_nativeSftp == null) {
-      _nativeReadHandles.clear();
-      return;
-    }
-    for (final entry in _nativeReadHandles.values) {
-      if (entry.file != nullptr) {
-        _nativeSftp.closeFile(entry.file);
-      }
-    }
-    _nativeReadHandles.clear();
-  }
-
-  Stream<List<int>> _openBlobStreamNative(String remotePath, {int? length}) async* {
-    final bindings = _nativeSftp;
-    if (bindings == null) {
-      throw StateError('Native SFTP is required for SFTP blob reads.');
-    }
-    final totalStopwatch = Stopwatch()..start();
-    final openStopwatch = Stopwatch()..start();
-    final readStopwatch = Stopwatch();
-    var openMs = 0;
-    var firstByteMs = -1;
-    var readAllMs = 0;
-    var totalBytes = 0;
-    var status = 'ok';
-    Object? failure;
-    final lease = await _nativePool.lease(_connectNative);
-    var invalidateLease = false;
-    _NativeSftpReadLease? readLease;
-    Pointer<Uint8>? buffer;
-    var offset = 0;
-    try {
-      readLease = _acquireNativeReadLease(bindings, lease.session, remotePath);
-      if (readLease == null) {
-        status = 'missing';
-        throw _NativeBlobMissing();
-      }
-      buffer = calloc<Uint8>(_nativeTransferChunkSize);
-      openStopwatch.stop();
-      openMs = openStopwatch.elapsedMilliseconds;
-      readStopwatch.start();
-      while (true) {
-        if (length != null && offset >= length) {
-          break;
-        }
-        final toRead = length == null ? _nativeTransferChunkSize : min(_nativeTransferChunkSize, length - offset);
-        if (toRead <= 0) {
-          break;
-        }
-        final read = bindings.read(readLease.file, offset, buffer, toRead);
-        if (read < 0) {
-          throw 'Native SFTP read failed: $remotePath';
-        }
-        if (read == 0) {
-          break;
-        }
-        if (firstByteMs < 0) {
-          firstByteMs = totalStopwatch.elapsedMilliseconds;
-        }
-        offset += read;
-        totalBytes += read;
-        yield Uint8List.fromList(buffer.asTypedList(read));
-      }
-      readStopwatch.stop();
-      readAllMs = readStopwatch.elapsedMilliseconds;
-    } on _NativeBlobMissing {
-      _releaseNativeReadLease(readLease, keepOpen: false);
-      rethrow;
-    } catch (error) {
-      status = 'error';
-      failure = error;
-      if (readStopwatch.isRunning) {
-        readStopwatch.stop();
-      }
-      readAllMs = readStopwatch.elapsedMilliseconds;
-      invalidateLease = true;
-      _releaseNativeReadLease(readLease, keepOpen: false);
-      rethrow;
-    } finally {
-      if (buffer != null) {
-        calloc.free(buffer);
-      }
-      if (!invalidateLease) {
-        _releaseNativeReadLease(readLease, keepOpen: true);
-      }
-      if (invalidateLease) {
-        lease.invalidate();
-      } else {
-        lease.release();
-      }
-      LogWriter.logAgentSync(
-        level: 'trace',
-        message:
-            'driver=sftp action=open_blob_stream status=$status durationMs=${totalStopwatch.elapsedMilliseconds} '
-            'method=READ detail=path:$remotePath openMs=$openMs firstByteMs=$firstByteMs readAllMs=$readAllMs bytes=$totalBytes length=${length ?? -1}${failure == null ? '' : ' error=$failure'}',
-      );
-    }
   }
 
   Future<void> _nativeWriteAll(String remotePath, Uint8List data, {required bool truncate}) async {
@@ -981,6 +829,96 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     }
   }
 
+  Stream<List<int>> _openBlobStreamNative(String remotePath, {int? length}) async* {
+    final bindings = _nativeSftp;
+    if (bindings == null) {
+      throw StateError('Native SFTP is required for SFTP blob reads.');
+    }
+    final totalStopwatch = Stopwatch()..start();
+    final openStopwatch = Stopwatch()..start();
+    final readStopwatch = Stopwatch();
+    var openMs = 0;
+    var firstByteMs = -1;
+    var readAllMs = 0;
+    var totalBytes = 0;
+    var status = 'ok';
+    Object? failure;
+    final lease = await _nativePool.lease(_connectNative);
+    var invalidateLease = false;
+    Pointer<Void>? file;
+    Pointer<Uint8>? buffer;
+    var offset = 0;
+    try {
+      file = bindings.openRead(lease.session, remotePath);
+      if (file == nullptr) {
+        final exists = await _withSftp('native read open stat', (sftp) async => _remoteExists(sftp, remotePath));
+        if (!exists) {
+          status = 'missing';
+          throw _NativeBlobMissing();
+        }
+        throw 'Native SFTP openRead failed: $remotePath';
+      }
+      openStopwatch.stop();
+      openMs = openStopwatch.elapsedMilliseconds;
+      final chunkLength = length == null ? _nativeTransferChunkSize : min(_nativeTransferChunkSize, length);
+      buffer = calloc<Uint8>(chunkLength);
+      readStopwatch.start();
+      while (true) {
+        if (length != null && offset >= length) {
+          break;
+        }
+        final toRead = length == null ? chunkLength : min(chunkLength, length - offset);
+        if (toRead <= 0) {
+          break;
+        }
+        final read = bindings.read(file, offset, buffer, toRead);
+        if (read < 0) {
+          throw 'Native SFTP read failed: $remotePath';
+        }
+        if (read == 0) {
+          break;
+        }
+        if (firstByteMs < 0) {
+          firstByteMs = totalStopwatch.elapsedMilliseconds;
+        }
+        offset += read;
+        totalBytes += read;
+        yield Uint8List.fromList(buffer.asTypedList(read));
+      }
+      readStopwatch.stop();
+      readAllMs = readStopwatch.elapsedMilliseconds;
+    } on _NativeBlobMissing {
+      rethrow;
+    } catch (error) {
+      status = 'error';
+      failure = error;
+      if (readStopwatch.isRunning) {
+        readStopwatch.stop();
+      }
+      readAllMs = readStopwatch.elapsedMilliseconds;
+      invalidateLease = true;
+      rethrow;
+    } finally {
+      if (file != null && file != nullptr) {
+        bindings.closeFile(file);
+      }
+      if (buffer != null) {
+        calloc.free(buffer);
+      }
+      if (invalidateLease) {
+        lease.invalidate();
+      } else {
+        lease.release();
+      }
+      LogWriter.logAgentSync(
+        level: 'trace',
+        message:
+            'driver=sftp action=open_blob_stream status=$status durationMs=${totalStopwatch.elapsedMilliseconds} '
+            'method=READ detail=path:$remotePath openMs=$openMs firstByteMs=$firstByteMs readAllMs=$readAllMs bytes=$totalBytes length=${length ?? -1}${failure == null ? '' : ' error=$failure'}',
+      );
+    }
+  }
+
   Future<void> _writeBlobWithTiming({required String hash, required String remoteTemp, required String remotePath, required Uint8List data}) async {
     final label = 'write blob $hash';
     return _withRetry(label, () async {
@@ -994,7 +932,16 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       var renameMs = 0;
       try {
         final writeStopwatch = Stopwatch()..start();
-        await _nativeWriteAll(remoteTemp, data, truncate: true);
+        if (_nativeSftp != null) {
+          await _nativeWriteAll(remoteTemp, data, truncate: true);
+        } else {
+          final remoteFile = await lease.sftp.open(remoteTemp, mode: SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate);
+          try {
+            await remoteFile.writeBytes(data);
+          } finally {
+            await remoteFile.close();
+          }
+        }
         writeStopwatch.stop();
         writeMs = writeStopwatch.elapsedMilliseconds;
 
@@ -1014,7 +961,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
                     'driver=sftp action=upload_rename status=code4_recovered durationMs=$renameMs '
                     'method=RENAME detail=hash:$hash from:$remoteTemp to:$remotePath bytes:${data.length}',
               );
-              renameStopwatch.stop();
               LogWriter.logAgentSync(level: 'trace', message: 'driver=sftp action=upload_rename status=200 durationMs=$renameMs method=RENAME');
               LogWriter.logAgentSync(
                 level: 'trace',
@@ -1142,10 +1088,9 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         _pool.invalidateIdle();
         _blobCachePool.invalidateIdle();
         _nativePool.invalidateIdle();
-        _closeNativeReadHandles();
         attempt += 1;
         LogWriter.logAgentSync(
-          level: 'error',
+          level: 'debug',
           message: 'driver=sftp action=retry status=retry durationMs=0 target=$label method=RETRY detail=attempt:$attempt delaySec:$delaySeconds closeIdle:true error=$error',
         );
         await Future.delayed(Duration(seconds: delaySeconds));
@@ -1190,6 +1135,10 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       try {
         await sftp.rename(tmpRemote, remotePath);
       } catch (_) {
+        if (await _remoteExists(sftp, remotePath)) {
+          await _tryRemoveRemoteFile(sftp, tmpRemote);
+          return;
+        }
         await _tryRemoveRemoteFile(sftp, tmpRemote);
         rethrow;
       }
@@ -1215,23 +1164,23 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     final remoteGz = _remoteJoin(folderPath, nameGz);
     final remotePlain = _remoteJoin(folderPath, namePlain);
 
-    List<int>? bytes;
+    String? remotePath;
     String fileName = nameGz;
-    try {
-      bytes = await _downloadRemoteFile(sftp, remoteGz);
-    } catch (_) {
-      try {
-        bytes = await _downloadRemoteFile(sftp, remotePlain);
-        fileName = namePlain;
-      } catch (_) {
-        return null;
-      }
+    if (await _remoteExists(sftp, remoteGz)) {
+      remotePath = remoteGz;
+      fileName = nameGz;
+    } else if (await _remoteExists(sftp, remotePlain)) {
+      remotePath = remotePlain;
+      fileName = namePlain;
+    } else {
+      return null;
     }
 
     final localDir = Directory('${vmDir.path}${Platform.pathSeparator}$diskId');
     await localDir.create(recursive: true);
     final localFile = File('${localDir.path}${Platform.pathSeparator}$fileName');
     if (!await localFile.exists()) {
+      final bytes = await _downloadRemoteFile(sftp, remotePath);
       await localFile.writeAsBytes(bytes, flush: true);
     }
     return localFile;
@@ -1316,12 +1265,19 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     }
   }
 
+  Future<bool> _remoteExists(SftpClient sftp, String remotePath) async {
+    try {
+      await sftp.stat(remotePath);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _tryRemoveRemoteFile(SftpClient sftp, String remotePath) async {
     try {
       await sftp.remove(remotePath);
-    } catch (error) {
-      LogWriter.logAgentSync(level: 'error', message: 'driver=sftp action=remove status=error durationMs=0 method=REMOVE detail=path:$remotePath error=$error');
-    }
+    } catch (_) {}
   }
 
   String _remoteDirName(String remotePath) {
@@ -1579,21 +1535,6 @@ class _SftpLeaseMetrics {
 }
 
 class _NativeBlobMissing implements Exception {}
-
-class _NativeSftpReadHandle {
-  _NativeSftpReadHandle({required this.file, required this.session, required this.inUse});
-
-  final Pointer<Void> file;
-  final Pointer<Void> session;
-  bool inUse;
-}
-
-class _NativeSftpReadLease {
-  _NativeSftpReadLease({required this.file, this.cacheKey});
-
-  final Pointer<Void> file;
-  final String? cacheKey;
-}
 
 class _NativeSftpBindings {
   _NativeSftpBindings(DynamicLibrary lib)

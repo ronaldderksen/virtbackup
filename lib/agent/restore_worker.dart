@@ -686,6 +686,7 @@ Stream<List<int>> _blobStream(
     void schedule() {
       while (inFlight.length < maxConcurrent && nextIndex < blocks.length) {
         final index = nextIndex;
+        debug.markScheduled(index);
         inFlight[index] = startFetch(index).then((data) {
           debug.markReady(index);
           return data;
@@ -705,6 +706,7 @@ Stream<List<int>> _blobStream(
       }
       final data = await future;
       inFlight.remove(nextEmit);
+      debug.markInFlightDone(nextEmit);
       debug.markEmitted(index: data.index, bytes: data.bytes.length);
       if (data.bytes.isNotEmpty) {
         yield data.bytes;
@@ -750,6 +752,7 @@ Stream<List<int>> _blobStream(
     void schedule() {
       while (inFlight.length < maxConcurrent && nextIndex < blocks.length) {
         final index = nextIndex;
+        debug.markScheduled(index);
         inFlight[index] = startFetchLocal(index).then((data) {
           debug.markReady(index);
           return data;
@@ -769,6 +772,7 @@ Stream<List<int>> _blobStream(
       }
       final data = await future;
       inFlight.remove(nextEmit);
+      debug.markInFlightDone(nextEmit);
       debug.markEmitted(index: data.index, bytes: data.bytes.length);
       if (data.bytes.isNotEmpty) {
         yield data.bytes;
@@ -964,6 +968,7 @@ class _RestorePipelineDebug {
   final String mode;
   DateTime _lastLogAt = DateTime.now();
   final Map<int, DateTime> _readyAt = <int, DateTime>{};
+  final Map<int, DateTime> _inFlightStartedAt = <int, DateTime>{};
   int _fetchCount = 0;
   int _fetchMsTotal = 0;
   int _fetchMsMax = 0;
@@ -986,6 +991,14 @@ class _RestorePipelineDebug {
 
   void markReady(int index) {
     _readyAt[index] = DateTime.now();
+  }
+
+  void markScheduled(int index) {
+    _inFlightStartedAt[index] = DateTime.now();
+  }
+
+  void markInFlightDone(int index) {
+    _inFlightStartedAt.remove(index);
   }
 
   void markEmitted({required int index, required int bytes}) {
@@ -1013,11 +1026,35 @@ class _RestorePipelineDebug {
     final fetchAvgMs = _fetchCount == 0 ? 0 : (_fetchMsTotal / _fetchCount).round();
     final holAvgMs = _holCount == 0 ? 0 : (_holMsTotal / _holCount).round();
     final sourceSummary = _sourceCounts.entries.map((entry) => '${entry.key}:${entry.value}').join(',');
+    int readyMin = -1;
+    int readyMax = -1;
+    for (final index in _readyAt.keys) {
+      if (readyMin < 0 || index < readyMin) {
+        readyMin = index;
+      }
+      if (readyMax < 0 || index > readyMax) {
+        readyMax = index;
+      }
+    }
+    int oldestInFlightIndex = -1;
+    int oldestInFlightAgeMs = 0;
+    for (final entry in _inFlightStartedAt.entries) {
+      final ageMs = now.difference(entry.value).inMilliseconds;
+      if (ageMs > oldestInFlightAgeMs) {
+        oldestInFlightAgeMs = ageMs;
+        oldestInFlightIndex = entry.key;
+      }
+    }
+    final nextEmitStartedAt = _inFlightStartedAt[nextEmit];
+    final nextEmitAgeMs = nextEmitStartedAt == null ? -1 : now.difference(nextEmitStartedAt).inMilliseconds;
+    final readyAhead = readyMin >= 0 && readyMin >= nextEmit ? (readyMin - nextEmit) : -1;
     LogWriter.logAgentSync(
       level: 'trace',
       message:
           'restore pipeline debug: mode=$mode nextEmit=$nextEmit nextIndex=$nextIndex inFlight=$inFlight '
-          'ready=${_readyAt.length} emitted=$_emitCount emittedMBps=${emitMbPerSec.toStringAsFixed(1)} '
+          'ready=${_readyAt.length} readyMin=$readyMin readyMax=$readyMax readyAhead=$readyAhead '
+          'oldestInFlightIndex=$oldestInFlightIndex oldestInFlightAgeMs=$oldestInFlightAgeMs nextEmitAgeMs=$nextEmitAgeMs '
+          'emitted=$_emitCount emittedMBps=${emitMbPerSec.toStringAsFixed(1)} '
           'fetchCount=$_fetchCount fetchAvgMs=$fetchAvgMs fetchMaxMs=$_fetchMsMax '
           'holCount=$_holCount holAvgMs=$holAvgMs holMaxMs=$_holMsMax sources=$sourceSummary',
     );

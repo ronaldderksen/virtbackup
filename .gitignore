@@ -50,6 +50,6 @@ app.*.map.json
 *.so
 *.dylib
 
-# test tool
 /tools/loop.sh
 /TODO/
+/tmp
