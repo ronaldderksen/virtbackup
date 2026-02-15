@@ -309,7 +309,6 @@ The agent supports optional native SFTP via FFI:
 - The writer timestamps records when they are enqueued; on slow storage the queue can lag while preserving record order.
 - On each process startup, `agent.log` and `gui.log` are rotated to `<name>.log.1` and a fresh log file is started.
 - `level=info` records are also echoed to stdout by the writer so terminal output and persisted logs stay aligned.
-- SFTP debug logs include `action=sftp_timing` records with `leaseWaitMs`, `connectMs`, `opMs`, `leaseSource`, and `queued` to separate pool wait/connect time from operation time.
 - Google Drive HTTP calls are logged as operation records with timestamp, action (`mkdir`, `list`, `upload`, `download`, `move`, `trash`, `auth.refresh`), status, duration, and request details.
 - Google Drive upload HTTP clients are leased from a bounded pool so upload retries/concurrency cannot fan out into unbounded concurrent connections.
 - Google Drive folder creation is guarded by a local folder lock and checks for existing folders before creating; when duplicate folder names are detected, the driver performs a strict merge into a primary folder and fails the operation if duplicates cannot be fully resolved.
