@@ -294,6 +294,7 @@ The agent supports optional native SFTP via FFI:
 - All Google Drive API calls retry up to 5 times with exponential backoff starting at 2 seconds; each retry recreates the HTTP client connection, and a persistent failure aborts the backup with a clean error.
 - Log records are routed by source: `agent` writes to `VirtBackup/logs/agent.log` and `gui` writes to `VirtBackup/logs/gui.log` under the configured backup base path.
 - Backup/restore worker isolates write their logs directly to `LogWriter` (`source=agent`) and do not route log lines through the HTTP server event channel.
+- Backup writer loop diagnostics (`writer debug: ...`) are emitted at `debug` level via `LogWriter` and not forwarded as `info` progress lines.
 - Agent log filtering reads `log_level` from `agent.yaml` (default `info` when missing/empty); GUI log filtering reads `log_level` from SharedPreferences (default `info` when missing/empty).
 - Log records include `timestamp`, `level`, and `message`; source is used only for routing and is not included in the line payload.
 - Driver-originated logs are prefixed in `message` with `driver=<driverId>` (for example `driver=sftp` or `driver=gdrive`) to simplify filtering.
@@ -313,6 +314,9 @@ The agent supports optional native SFTP via FFI:
 - For non-filesystem destinations, `uploadConcurrency` (backup) and `downloadConcurrency` (restore) are persisted in `agent.yaml`.
 - On agent startup, missing `uploadConcurrency`/`downloadConcurrency` keys on non-filesystem destinations are auto-added as `8` and written back immediately.
 - Restore read concurrency uses destination `downloadConcurrency` from `agent.yaml`; if not present, it defaults to `8`.
+- `SftpBackupDriver` resolves concurrency from the selected SFTP destination (`uploadConcurrency`/`downloadConcurrency`, default `8`) and uses that for SFTP/native session pools.
+- `SftpBackupDriver` requires native SFTP for blob data paths; no dartssh blob read/write fallback is used.
+- `SftpBackupDriver` native blob transfers use fixed 16 MiB chunks.
 - Remote destination cache folders under `<filesystem path>/VirtBackup/cache/` are keyed by destination id (not by driver id).
 - Restore behavior for non-filesystem destinations:
   - `useBlobs: true`: restore tries local blobs from `destinations[id=filesystem].params.path` first; if present, remote download is skipped.
