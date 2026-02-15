@@ -77,6 +77,25 @@ class GoogleOAuthClientLocator {
     return File('${Directory.current.path}${sep}etc${sep}google_oauth_client.json');
   }
 
+  List<File> _flutterAssetClientFiles() {
+    final sep = Platform.pathSeparator;
+    final exeDir = _executableDir().path;
+    final currentDir = Directory.current.path;
+    final candidates = <File>[];
+    if (Platform.isMacOS) {
+      candidates.add(File('$exeDir$sep..${sep}Frameworks${sep}App.framework${sep}Resources${sep}flutter_assets${sep}etc${sep}google_oauth_client.json'));
+    }
+    if (Platform.isLinux) {
+      candidates.add(File('$exeDir$sep..${sep}data${sep}flutter_assets${sep}etc${sep}google_oauth_client.json'));
+    }
+    if (Platform.isWindows) {
+      candidates.add(File('$exeDir${sep}data${sep}flutter_assets${sep}etc${sep}google_oauth_client.json'));
+    }
+    candidates.add(File('$currentDir${sep}flutter_assets${sep}etc${sep}google_oauth_client.json'));
+    final unique = <String>{};
+    return candidates.where((file) => unique.add(file.path)).toList();
+  }
+
   List<File> candidateFiles({Directory? settingsDir}) {
     final candidates = <File>[];
     if (overrideFile != null) {
@@ -84,6 +103,7 @@ class GoogleOAuthClientLocator {
     }
     candidates.add(_etcClientFile());
     candidates.add(_cwdEtcClientFile());
+    candidates.addAll(_flutterAssetClientFiles());
     return candidates;
   }
 
@@ -98,8 +118,7 @@ class GoogleOAuthClientLocator {
       }
       return config;
     }
-    final expectedExePath = _etcClientFile().path;
-    final expectedCwdPath = _cwdEtcClientFile().path;
-    throw 'Google OAuth client config not found. Expected $expectedExePath or $expectedCwdPath.';
+    final expected = <String>[_etcClientFile().path, _cwdEtcClientFile().path, ..._flutterAssetClientFiles().map((file) => file.path)];
+    throw 'Google OAuth client config not found. Expected one of: ${expected.join(' | ')}.';
   }
 }

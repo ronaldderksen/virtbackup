@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
 
 import 'package:file_selector/file_selector.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +12,7 @@ import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:virtbackup/agent/settings_store.dart';
+import 'package:virtbackup/common/google_oauth_client.dart';
 import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/models.dart';
 import 'package:virtbackup/common/settings.dart';
@@ -46,6 +50,14 @@ class _AgentEndpoint {
       useLocalToken: json['useLocalToken'] == true,
     );
   }
+}
+
+class _OAuthCallbackResult {
+  _OAuthCallbackResult({required this.code, required this.state, required this.error});
+
+  final String? code;
+  final String? state;
+  final String? error;
 }
 
 class BackupServerSetupScreen extends StatefulWidget {
@@ -95,6 +107,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _isRestoring = false;
   bool _isSanityChecking = false;
   bool _isSendingNtfymeTest = false;
+  bool _isGdriveConnecting = false;
   final Map<String, bool> _vmHasOverlayByName = {};
   final Map<String, Map<String, bool>> _overlayByServerId = {};
   final Map<String, DateTime> _lastRefreshByServerId = {};
@@ -183,6 +196,23 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     await _loadAgentEndpoints();
     await _applySelectedAgent();
     await _loadAgentSettings();
+  }
+
+  Future<GoogleOAuthInstalledClient> _resolveGdriveOAuthClient() async {
+    final store = await AppSettingsStore.fromAgentDefaultPath();
+    final settingsDir = store.file.parent;
+    final sep = Platform.pathSeparator;
+    final overrideFile = File('${settingsDir.path}${sep}etc${sep}google_oauth_client.json');
+    final locator = GoogleOAuthClientLocator(overrideFile: overrideFile);
+    try {
+      return await locator.load(requireSecret: false);
+    } catch (error) {
+      final candidates = locator.candidateFiles().map((file) => file.path).toList();
+      _logInfo('Google Drive OAuth client config load failed: $error');
+      _logInfo('Google Drive OAuth candidates: ${candidates.join(' | ')}');
+      _logInfo('Google Drive OAuth preferred path: ${overrideFile.path}');
+      rethrow;
+    }
   }
 
   Future<void> _loadAgentEndpoints() async {
@@ -1725,6 +1755,218 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
+  bool _isDestinationGdriveConnected(String refreshToken) {
+    return refreshToken.trim().isNotEmpty;
+  }
+
+  Future<void> _startGdriveDestinationOAuth({
+    required String scope,
+    required String existingRefreshToken,
+    required void Function({required String accessToken, required String refreshToken, required String accountEmail, required int? expiresAtMs}) onConnected,
+    bool forceConsent = false,
+  }) async {
+    if (_isGdriveConnecting) {
+      return;
+    }
+    GoogleOAuthInstalledClient oauth;
+    try {
+      oauth = await _resolveGdriveOAuthClient();
+    } catch (error) {
+      _showSnackBarError('Google Drive OAuth client config is missing or invalid: $error');
+      return;
+    }
+    final clientId = oauth.clientId.trim();
+    final clientSecret = oauth.clientSecret.trim();
+    if (clientId.isEmpty) {
+      _showSnackBarError('Google Drive client ID is not configured.');
+      return;
+    }
+    final trimmedScope = scope.trim();
+    if (trimmedScope.isEmpty) {
+      _showSnackBarError('Google Drive scope is required.');
+      return;
+    }
+    _logInfo('Google Drive OAuth client_id: $clientId');
+    _updateUi(() {
+      _isGdriveConnecting = true;
+    });
+
+    HttpServer? server;
+    try {
+      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final redirectUri = 'http://127.0.0.1:${server.port}/oauth/callback';
+      final codeVerifier = _generateOAuthVerifier();
+      final codeChallenge = _generateOAuthChallenge(codeVerifier);
+      final state = _generateOAuthState();
+      final shouldPrompt = forceConsent || existingRefreshToken.trim().isEmpty;
+      final query = <String, String>{
+        'client_id': clientId,
+        'redirect_uri': redirectUri,
+        'response_type': 'code',
+        'scope': _buildGdriveOAuthScope(trimmedScope),
+        'access_type': 'offline',
+        'include_granted_scopes': 'true',
+        'state': state,
+        'code_challenge': codeChallenge,
+        'code_challenge_method': 'S256',
+      };
+      if (shouldPrompt) {
+        query['prompt'] = 'consent';
+      }
+      final authUri = Uri.https('accounts.google.com', '/o/oauth2/v2/auth', query);
+      final callback = _waitForOAuthCallback(server);
+      final launched = await launchUrl(authUri, mode: LaunchMode.externalApplication);
+      if (!launched) {
+        throw 'Unable to open the browser for Google Drive sign-in.';
+      }
+      final result = await callback.timeout(
+        const Duration(minutes: 5),
+        onTimeout: () {
+          throw 'Google Drive sign-in timed out.';
+        },
+      );
+      if (result.error != null && result.error!.isNotEmpty) {
+        throw 'Google Drive sign-in failed: ${result.error}';
+      }
+      if (result.state != state) {
+        throw 'Google Drive sign-in state mismatch.';
+      }
+      final code = result.code;
+      if (code == null || code.isEmpty) {
+        throw 'Google Drive sign-in did not return a code.';
+      }
+      final tokenResponse = await http.post(
+        Uri.parse('https://oauth2.googleapis.com/token'),
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: {
+          'client_id': clientId,
+          if (clientSecret.isNotEmpty) 'client_secret': clientSecret,
+          'code': code,
+          'code_verifier': codeVerifier,
+          'redirect_uri': redirectUri,
+          'grant_type': 'authorization_code',
+        },
+      );
+      if (tokenResponse.statusCode != 200) {
+        throw 'Token exchange failed: ${tokenResponse.body}';
+      }
+      final decoded = jsonDecode(tokenResponse.body);
+      if (decoded is! Map) {
+        throw 'Token exchange failed: invalid response.';
+      }
+      final accessToken = decoded['access_token']?.toString() ?? '';
+      final returnedRefreshToken = decoded['refresh_token']?.toString() ?? '';
+      final refreshToken = returnedRefreshToken.isNotEmpty ? returnedRefreshToken : existingRefreshToken.trim();
+      if (refreshToken.isEmpty) {
+        throw 'No refresh token received. Disconnect and connect again.';
+      }
+      final expiresAtMs = _calculateExpiresAt(decoded['expires_in'])?.toUtc().millisecondsSinceEpoch;
+      var accountEmail = '';
+      if (accessToken.isNotEmpty) {
+        try {
+          final userinfo = await http.get(Uri.parse('https://openidconnect.googleapis.com/v1/userinfo'), headers: {'Authorization': 'Bearer $accessToken'});
+          if (userinfo.statusCode == 200) {
+            final userJson = jsonDecode(userinfo.body);
+            if (userJson is Map) {
+              accountEmail = userJson['email']?.toString() ?? '';
+            }
+          }
+        } catch (_) {}
+      }
+      onConnected(accessToken: accessToken, refreshToken: refreshToken, accountEmail: accountEmail, expiresAtMs: expiresAtMs);
+      if (mounted) {
+        _showSnackBarInfo('Google Drive connected.');
+      }
+    } catch (error, stackTrace) {
+      _logError('Google Drive OAuth failed.', error, stackTrace);
+      if (mounted) {
+        _showSnackBarError('Google Drive sign-in failed: $error');
+      }
+    } finally {
+      try {
+        await server?.close(force: true);
+      } catch (_) {}
+      _updateUi(() {
+        _isGdriveConnecting = false;
+      });
+    }
+  }
+
+  String _buildGdriveOAuthScope(String scope) {
+    return '$scope openid email';
+  }
+
+  Future<_OAuthCallbackResult> _waitForOAuthCallback(HttpServer server) {
+    final completer = Completer<_OAuthCallbackResult>();
+    server.listen((request) async {
+      if (request.uri.path != '/oauth/callback') {
+        request.response.statusCode = 404;
+        await request.response.close();
+        return;
+      }
+      final params = request.uri.queryParameters;
+      final code = params['code'];
+      final state = params['state'];
+      final error = params['error'];
+      request.response.statusCode = 200;
+      request.response.headers.contentType = ContentType.html;
+      request.response.write('<html><body><h3>You can close this window and return to VirtBackup.</h3></body></html>');
+      await request.response.close();
+      if (!completer.isCompleted) {
+        completer.complete(_OAuthCallbackResult(code: code, state: state, error: error));
+      }
+      await server.close(force: true);
+    });
+    return completer.future;
+  }
+
+  String _generateOAuthVerifier() {
+    final bytes = _randomBytes(32);
+    return base64Url.encode(bytes).replaceAll('=', '');
+  }
+
+  String _generateOAuthChallenge(String verifier) {
+    final digest = sha256.convert(utf8.encode(verifier)).bytes;
+    return base64Url.encode(digest).replaceAll('=', '');
+  }
+
+  String _generateOAuthState() {
+    final bytes = _randomBytes(16);
+    return base64Url.encode(bytes).replaceAll('=', '');
+  }
+
+  Uint8List _randomBytes(int length) {
+    final random = Random.secure();
+    final bytes = Uint8List(length);
+    for (var i = 0; i < length; i++) {
+      bytes[i] = random.nextInt(256);
+    }
+    return bytes;
+  }
+
+  DateTime? _calculateExpiresAt(Object? expiresIn) {
+    if (expiresIn is num) {
+      return DateTime.now().toUtc().add(Duration(seconds: expiresIn.toInt()));
+    }
+    final parsed = int.tryParse(expiresIn?.toString() ?? '');
+    if (parsed == null || parsed <= 0) {
+      return null;
+    }
+    return DateTime.now().toUtc().add(Duration(seconds: parsed));
+  }
+
+  String _formatGdriveExpiryFromEpochMs(int? expiresAtMs) {
+    if (expiresAtMs == null || expiresAtMs <= 0) {
+      return 'Unknown';
+    }
+    final instant = DateTime.fromMillisecondsSinceEpoch(expiresAtMs, isUtc: true).toLocal();
+    final paddedMonth = instant.month.toString().padLeft(2, '0');
+    final paddedDay = instant.day.toString().padLeft(2, '0');
+    final paddedHour = instant.hour.toString().padLeft(2, '0');
+    final paddedMinute = instant.minute.toString().padLeft(2, '0');
+    return '${instant.year}-$paddedMonth-$paddedDay $paddedHour:$paddedMinute';
+  }
+
   Future<void> _saveAllAgentSettings() async {
     if (!_hasAnyChanges()) {
       return;
@@ -1795,6 +2037,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
               final gdriveAccessController = TextEditingController(text: params['accessToken']?.toString() ?? '');
               final gdriveRefreshController = TextEditingController(text: params['refreshToken']?.toString() ?? '');
               final gdriveEmailController = TextEditingController(text: params['accountEmail']?.toString() ?? '');
+              var gdriveExpiresAtMs = params['expiresAt'] is num ? (params['expiresAt'] as num).toInt() : int.tryParse((params['expiresAt'] ?? '').toString());
+              var gdriveDisconnected = false;
               final formKey = GlobalKey<FormState>();
               final result = await showDialog<BackupDestination>(
                 context: context,
@@ -1918,6 +2162,62 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                       controller: gdriveEmailController,
                                       decoration: const InputDecoration(labelText: 'Account email'),
                                     ),
+                                    const SizedBox(height: 12),
+                                    Row(
+                                      children: [
+                                        FilledButton.icon(
+                                          onPressed: _isGdriveConnecting
+                                              ? null
+                                              : () async {
+                                                  await _startGdriveDestinationOAuth(
+                                                    scope: gdriveScopeController.text.trim(),
+                                                    existingRefreshToken: gdriveRefreshController.text,
+                                                    onConnected: ({required accessToken, required refreshToken, required accountEmail, required expiresAtMs}) {
+                                                      gdriveAccessController.text = accessToken;
+                                                      gdriveRefreshController.text = refreshToken;
+                                                      gdriveEmailController.text = accountEmail;
+                                                      gdriveExpiresAtMs = expiresAtMs;
+                                                      gdriveDisconnected = false;
+                                                      if (context.mounted) {
+                                                        setStateDestination(() {});
+                                                      }
+                                                    },
+                                                  );
+                                                  if (context.mounted) {
+                                                    setStateDestination(() {});
+                                                  }
+                                                },
+                                          icon: const Icon(Icons.link_outlined),
+                                          label: Text(_isGdriveConnecting ? 'Connecting...' : 'Connect in browser'),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        TextButton.icon(
+                                          onPressed: _isDestinationGdriveConnected(gdriveRefreshController.text) && !_isGdriveConnecting
+                                              ? () {
+                                                  gdriveAccessController.clear();
+                                                  gdriveRefreshController.clear();
+                                                  gdriveEmailController.clear();
+                                                  gdriveExpiresAtMs = null;
+                                                  gdriveDisconnected = true;
+                                                  setStateDestination(() {});
+                                                }
+                                              : null,
+                                          icon: const Icon(Icons.link_off_outlined),
+                                          label: const Text('Disconnect'),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    if (_isDestinationGdriveConnected(gdriveRefreshController.text)) ...[
+                                      Text(
+                                        'Connected account: ${gdriveEmailController.text.trim().isEmpty ? 'Unknown' : gdriveEmailController.text.trim()}',
+                                        style: Theme.of(context).textTheme.bodyMedium,
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text('Access token expires: ${_formatGdriveExpiryFromEpochMs(gdriveExpiresAtMs)}', style: Theme.of(context).textTheme.bodySmall),
+                                    ] else ...[
+                                      Text('Not connected. Backups will fail until you connect Google Drive.', style: Theme.of(context).textTheme.bodyMedium),
+                                    ],
                                   ],
                                 ],
                               ),
@@ -1938,14 +2238,40 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                 destinationParams['host'] = sftpHostController.text.trim();
                                 destinationParams['port'] = int.tryParse(sftpPortController.text.trim()) ?? 22;
                                 destinationParams['username'] = sftpUserController.text.trim();
-                                destinationParams['password'] = sftpPasswordController.text;
+                                final sftpPassword = sftpPasswordController.text;
+                                destinationParams['password'] = sftpPassword;
+                                if (sftpPassword.isEmpty) {
+                                  final encryptedPassword = params['passwordEnc']?.toString() ?? '';
+                                  if (encryptedPassword.isNotEmpty) {
+                                    destinationParams['passwordEnc'] = encryptedPassword;
+                                  }
+                                }
                                 destinationParams['basePath'] = sftpBasePathController.text.trim();
                               } else if (driverId == 'gdrive') {
+                                final accessToken = gdriveAccessController.text.trim();
+                                final refreshToken = gdriveRefreshController.text.trim();
                                 destinationParams['rootPath'] = gdriveRootController.text.trim();
                                 destinationParams['scope'] = gdriveScopeController.text.trim();
-                                destinationParams['accessToken'] = gdriveAccessController.text.trim();
-                                destinationParams['refreshToken'] = gdriveRefreshController.text.trim();
+                                destinationParams['accessToken'] = accessToken;
+                                destinationParams['refreshToken'] = refreshToken;
                                 destinationParams['accountEmail'] = gdriveEmailController.text.trim();
+                                if (gdriveExpiresAtMs != null) {
+                                  destinationParams['expiresAt'] = gdriveExpiresAtMs;
+                                }
+                                if (!gdriveDisconnected) {
+                                  if (accessToken.isEmpty) {
+                                    final encryptedAccessToken = params['accessTokenEnc']?.toString() ?? '';
+                                    if (encryptedAccessToken.isNotEmpty) {
+                                      destinationParams['accessTokenEnc'] = encryptedAccessToken;
+                                    }
+                                  }
+                                  if (refreshToken.isEmpty) {
+                                    final encryptedRefreshToken = params['refreshTokenEnc']?.toString() ?? '';
+                                    if (encryptedRefreshToken.isNotEmpty) {
+                                      destinationParams['refreshTokenEnc'] = encryptedRefreshToken;
+                                    }
+                                  }
+                                }
                               }
                               Navigator.of(context).pop(
                                 BackupDestination(
@@ -2162,6 +2488,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     if (!mounted) {
       return;
     }
+    _logInfo('snackbar: $message');
     final messenger = ScaffoldMessenger.of(context);
     messenger.clearSnackBars();
     messenger.showSnackBar(SnackBar(content: Text(message), duration: duration ?? const Duration(seconds: 4)));

@@ -279,6 +279,7 @@ The agent supports optional native SFTP via FFI:
 - The token is generated on first run and stored next to `agent.yaml` as `agent.token` with owner-only permissions.
 - The GUI reads the token from disk and attaches it to all agent requests.
 - SSH passwords are encrypted at rest in `agent.yaml` using AES-GCM with a key derived from the token.
+- Settings writes are staged to `agent.yaml.tmp`, read back with the normal settings loader, and only then promoted to `agent.yaml`.
 - Encrypted values are stored as `sshPasswordEnc` and decrypted into memory on load.
 - Ntfy me notifications are sent by the agent when backup/restore jobs finish (success or failure).
 - The agent posts JSON to `https://ntfyme.net/msg` with topic `virtbackup-job`.
@@ -289,7 +290,9 @@ The agent supports optional native SFTP via FFI:
 - The GUI can store multiple agent addresses and switch between them.
 - For `127.0.0.1`, the GUI always uses the local `agent.token` file; other agents require a token entered in the GUI (token is mandatory).
 - Google Drive OAuth refresh/access tokens are stored encrypted in destination params (`destinations[*].params.accessTokenEnc`, `destinations[*].params.refreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.
+- Google OAuth client config (`etc/google_oauth_client.json`) is bundled as a Flutter asset; lookup checks override path, `etc/` near executable/current dir, and bundled `flutter_assets/etc/google_oauth_client.json`.
 - SFTP password is stored encrypted in destination params (`destinations[*].params.passwordEnc`) using the same AES-GCM key derivation as SSH passwords.
+- Destination editor saves preserve existing `passwordEnc`/`accessTokenEnc`/`refreshTokenEnc` when plaintext fields are left empty; explicit Google Drive disconnect clears those tokens.
 - The Google Drive storage driver (`driverId: gdrive`) stores data as individual blob files using the same directory layout as the filesystem driver.
 - All Google Drive API calls retry up to 5 times with exponential backoff starting at 2 seconds; each retry recreates the HTTP client connection, and a persistent failure aborts the backup with a clean error.
 - Log records are routed by source: `agent` writes to `VirtBackup/logs/agent.log` and `gui` writes to `VirtBackup/logs/gui.log` under the configured backup base path.
@@ -302,6 +305,7 @@ The agent supports optional native SFTP via FFI:
 - Log records include `timestamp`, `level`, and `message`; source is used only for routing and is not included in the line payload.
 - Driver-originated logs are prefixed in `message` with `driver=<driverId>` (for example `driver=sftp` or `driver=gdrive`) to simplify filtering.
 - Log writes go through a centralized sequential queue writer with file locking to avoid interleaved/corrupted lines when multiple producers log concurrently.
+- GUI snackbar messages are logged at `info` level (prefixed with `snackbar:`) so user-visible notifications are traceable in `gui.log`.
 - The writer timestamps records when they are enqueued; on slow storage the queue can lag while preserving record order.
 - On each process startup, `agent.log` and `gui.log` are rotated to `<name>.log.1` and a fresh log file is started.
 - `level=info` records are also echoed to stdout by the writer so terminal output and persisted logs stay aligned.
@@ -310,6 +314,7 @@ The agent supports optional native SFTP via FFI:
 - Google Drive upload HTTP clients are leased from a bounded pool so upload retries/concurrency cannot fan out into unbounded concurrent connections.
 - Google Drive folder creation is guarded by a local folder lock and checks for existing folders before creating; when duplicate folder names are detected, the driver performs a strict merge into a primary folder and fails the operation if duplicates cannot be fully resolved.
 - Storage destinations are configured at root-level `destinations` in `agent.yaml` (not under `backup`), each with its own `id`, `driverId`, and `params`.
+- In the GUI Destination editor, `driverId: gdrive` supports OAuth connect via browser (PKCE); the returned tokens are stored in that destination's `params`.
 - Destination option `disableFresh: true` forces `fresh` off for that destination; backup requests with `fresh: true` continue and are logged.
 - `fresh` cleanup never deletes filesystem destination blobs (`destinations[id=filesystem].params.path/VirtBackup/blobs`).
 - For non-filesystem destinations, `storeBlobs` and `useBlobs` are persisted in `agent.yaml`.

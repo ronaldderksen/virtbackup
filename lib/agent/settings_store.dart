@@ -44,7 +44,21 @@ class AppSettingsStore {
     _encryptGdriveTokensInMap(data, token);
     _encryptSftpPasswordInMap(data, token);
     final encoded = _ensureTrailingNewline(_toYaml(data));
-    await _file.writeAsString(encoded);
+    final tempFile = File('${_file.path}.tmp');
+    var replaced = false;
+    try {
+      await tempFile.writeAsString(encoded);
+      await AppSettingsStore.setFilePermissions(tempFile, ownerOnly: true);
+      await _loadFromYamlFile(tempFile, token: token);
+      await tempFile.rename(_file.path);
+      replaced = true;
+    } finally {
+      if (!replaced && await tempFile.exists()) {
+        try {
+          await tempFile.delete();
+        } catch (_) {}
+      }
+    }
     await AppSettingsStore.setFilePermissions(_file, ownerOnly: true);
   }
 
@@ -194,9 +208,9 @@ class AppSettingsStore {
         buffer.write(indentStr);
         buffer.write(entry.key);
         buffer.write(':');
-        if (_isScalar(entry.value)) {
+        if (_isScalar(entry.value) || _isInlineCollection(entry.value)) {
           buffer.write(' ');
-          buffer.writeln(_encodeScalar(entry.value));
+          buffer.writeln(_encodeYaml(entry.value, indent: indent + 1));
         } else {
           buffer.writeln();
           buffer.writeln(_encodeYaml(entry.value, indent: indent + 1));
@@ -212,9 +226,9 @@ class AppSettingsStore {
       for (final item in value) {
         buffer.write(indentStr);
         buffer.write('-');
-        if (_isScalar(item)) {
+        if (_isScalar(item) || _isInlineCollection(item)) {
           buffer.write(' ');
-          buffer.writeln(_encodeScalar(item));
+          buffer.writeln(_encodeYaml(item, indent: indent + 1));
         } else {
           buffer.writeln();
           buffer.writeln(_encodeYaml(item, indent: indent + 1));
@@ -227,6 +241,16 @@ class AppSettingsStore {
 
   bool _isScalar(Object? value) {
     return value == null || value is String || value is num || value is bool;
+  }
+
+  bool _isInlineCollection(Object? value) {
+    if (value is Map) {
+      return value.isEmpty;
+    }
+    if (value is List) {
+      return value.isEmpty;
+    }
+    return false;
   }
 
   String _encodeScalar(Object? value) {
