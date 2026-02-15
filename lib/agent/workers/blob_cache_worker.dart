@@ -1,11 +1,10 @@
 part of '../backup.dart';
 
 class _BlobCacheWorker {
-  _BlobCacheWorker({required this.initialize, required this.processHash, required this.logInfo});
+  _BlobCacheWorker({required this.initialize, required this.processHash});
 
   final Future<void> Function() initialize;
   final Future<void> Function(String hash) processHash;
-  final void Function(String message) logInfo;
 
   final List<String> _queue = [];
   Completer<void>? _wakeWorker;
@@ -35,16 +34,16 @@ class _BlobCacheWorker {
 
   void throwIfError() {
     if (_error != null) {
-      logInfo('blob-cache worker abort: $_error');
+      LogWriter.logAgentBackground(level: 'info', message: 'blob-cache worker abort: $_error');
       Error.throwWithStackTrace(_error!, _errorStack ?? StackTrace.current);
     }
   }
 
   Future<void> run() async {
     try {
-      logInfo('blob-cache worker started');
+      LogWriter.logAgentBackground(level: 'info', message: 'blob-cache worker started');
       await initialize();
-      logInfo('blob-cache worker initial scan done');
+      LogWriter.logAgentBackground(level: 'info', message: 'blob-cache worker initial scan done');
 
       while (!_done || _queue.isNotEmpty || _inFlightTasks > 0) {
         while (_queue.isNotEmpty) {
@@ -56,7 +55,7 @@ class _BlobCacheWorker {
             } catch (error, stackTrace) {
               _error = error;
               _errorStack = stackTrace;
-              logInfo('blob-cache worker error: $error');
+              LogWriter.logAgentBackground(level: 'info', message: 'blob-cache worker error: $error');
             } finally {
               _inFlightTasks -= 1;
             }
@@ -70,7 +69,7 @@ class _BlobCacheWorker {
     } catch (error, stackTrace) {
       _error = error;
       _errorStack = stackTrace;
-      logInfo('blob-cache worker failed: $error');
+      LogWriter.logAgentBackground(level: 'info', message: 'blob-cache worker failed: $error');
     }
   }
 }

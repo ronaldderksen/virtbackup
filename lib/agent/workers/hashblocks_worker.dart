@@ -4,7 +4,6 @@ class _HashblocksWorker {
   _HashblocksWorker({
     required this.sink,
     required this.fileSize,
-    required this.logInfo,
     required this.ensureNotCanceled,
     required this.writeZeroRun,
     required this.parseZeroRange,
@@ -20,7 +19,6 @@ class _HashblocksWorker {
 
   final IOSink sink;
   final int fileSize;
-  final void Function(String message) logInfo;
   final void Function() ensureNotCanceled;
   final void Function(int start, int end) writeZeroRun;
   final (int, int)? Function(String line) parseZeroRange;
@@ -73,10 +71,10 @@ class _HashblocksWorker {
 
   void logStats({String? prefix}) {
     if (prefix == null || prefix.isEmpty) {
-      logInfo('hashblocks stats: lines=$totalLines existing=$existingBlocks missing=$missingBlocks zero=$zeroBlocks');
+      LogWriter.logAgentBackground(level: 'info', message: 'hashblocks stats: lines=$totalLines existing=$existingBlocks missing=$missingBlocks zero=$zeroBlocks');
       return;
     }
-    logInfo('$prefix lines=$totalLines existing=$existingBlocks missing=$missingBlocks zero=$zeroBlocks');
+    LogWriter.logAgentBackground(level: 'info', message: '$prefix lines=$totalLines existing=$existingBlocks missing=$missingBlocks zero=$zeroBlocks');
   }
 
   void markExisting() {

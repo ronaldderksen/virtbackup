@@ -7,7 +7,6 @@ class _ExistsWorker {
     required this.enqueueMissingRun,
     required this.handleBytes,
     required this.registerProgressBlocks,
-    required this.logInfo,
     required this.ensureNotCanceled,
     required this.onExisting,
     required this.onMissing,
@@ -18,7 +17,6 @@ class _ExistsWorker {
   final void Function(int startIndex, List<String> hashes) enqueueMissingRun;
   final void Function(int bytes) handleBytes;
   final void Function(int blocks) registerProgressBlocks;
-  final void Function(String message) logInfo;
   final void Function() ensureNotCanceled;
   final void Function() onExisting;
   final void Function() onMissing;
@@ -50,7 +48,7 @@ class _ExistsWorker {
 
   void throwIfError() {
     if (_error != null) {
-      logInfo('exists worker abort: $_error');
+      LogWriter.logAgentBackground(level: 'info', message: 'exists worker abort: $_error');
       Error.throwWithStackTrace(_error!, _errorStack ?? StackTrace.current);
     }
   }
@@ -94,7 +92,7 @@ class _ExistsWorker {
     } catch (error, stackTrace) {
       _error = error;
       _errorStack = stackTrace;
-      logInfo('exists worker failed: $error');
+      LogWriter.logAgentBackground(level: 'info', message: 'exists worker failed: $error');
     }
   }
 

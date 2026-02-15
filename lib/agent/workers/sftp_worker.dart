@@ -13,7 +13,6 @@ class _SftpWorker {
     required this.registerProgressBlocks,
     required this.enqueueWriteBlock,
     required this.ensureNotCanceled,
-    required this.logInfo,
   });
 
   final ServerConfig server;
@@ -27,7 +26,6 @@ class _SftpWorker {
   final void Function(int blocks) registerProgressBlocks;
   final Future<void> Function(String hash, Uint8List bytes) enqueueWriteBlock;
   final void Function() ensureNotCanceled;
-  final void Function(String message) logInfo;
 
   Future<void> fetchMissingRun(int startIndex, List<String> hashes) async {
     if (hashes.isEmpty) {
@@ -89,11 +87,11 @@ class _SftpWorker {
       },
     );
     if (blockOffset <= 0) {
-      logInfo('SFTP range returned no data offset=$rangeStartOffset length=$blockLength');
+      LogWriter.logAgentBackground(level: 'info', message: 'SFTP range returned no data offset=$rangeStartOffset length=$blockLength');
       return;
     }
     if (blockOffset < blockLength) {
-      logInfo('SFTP short read offset=$rangeStartOffset expected=$blockLength got=$blockOffset');
+      LogWriter.logAgentBackground(level: 'info', message: 'SFTP short read offset=$rangeStartOffset expected=$blockLength got=$blockOffset');
     }
     final payload = directPayload ?? (blockOffset == blockLength ? blockBuffer : Uint8List.sublistView(blockBuffer, 0, blockOffset));
     await enqueueWriteBlock(expectedHash, payload);

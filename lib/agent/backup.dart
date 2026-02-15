@@ -169,7 +169,7 @@ class BackupAgent {
       final serverFolderName = _dependencies.sanitizeFileName(server.id);
       await driver.ensureReady();
       final BlobDirectoryLister? blobLister = driver is BlobDirectoryLister ? driver as BlobDirectoryLister : null;
-      _blobDirectoryCache = blobLister == null ? null : _BlobDirectoryCache(driver: blobLister, createShard: (hash) => driver.ensureBlobDir(hash), logInfo: _logInfo);
+      _blobDirectoryCache = blobLister == null ? null : _BlobDirectoryCache(driver: blobLister, createShard: (hash) => driver.ensureBlobDir(hash));
       _startBlobCacheWorker();
       await driver.prepareBackup(serverFolderName, vmFolderName);
       final manifestsBase = driver.manifestsDir(serverFolderName, vmFolderName);
@@ -396,7 +396,7 @@ class BackupAgent {
     if (cache == null) {
       return;
     }
-    _blobCacheWorker = _BlobCacheWorker(initialize: cache.initialize, processHash: cache.prefetchHash, logInfo: _logInfo);
+    _blobCacheWorker = _BlobCacheWorker(initialize: cache.initialize, processHash: cache.prefetchHash);
     _blobCacheWorkerFuture = _blobCacheWorker!.run();
   }
 
@@ -980,7 +980,6 @@ class BackupAgent {
       scheduleWrite: (hash, bytes) => _scheduleWriteBlob(hash, bytes, driver),
       handlePhysicalBytes: _handlePhysicalBytes,
       onWriteCompletedBlocks: registerWriterCompletedBlocks,
-      logInfo: _logInfo,
       isWriteReady: () => cache?.isWriteReady() ?? true,
       waitForWriteReady: cache?.waitForWriteReady,
     );
@@ -1003,7 +1002,6 @@ class BackupAgent {
       registerProgressBlocks: registerProgressBlocks,
       enqueueWriteBlock: (hash, bytes) async => writerWorker.enqueue(hash, bytes),
       ensureNotCanceled: _ensureNotCanceled,
-      logInfo: _logInfo,
     );
 
     const maxMissingRun = 1;
@@ -1014,7 +1012,6 @@ class BackupAgent {
       enqueueMissingRun: enqueueMissingRun,
       handleBytes: _handleBytes,
       registerProgressBlocks: registerProgressBlocks,
-      logInfo: _logInfo,
       ensureNotCanceled: _ensureNotCanceled,
       onExisting: () {
         hasSeenExistingOrMissing = true;
@@ -1029,7 +1026,6 @@ class BackupAgent {
     hashblocksWorker = _HashblocksWorker(
       sink: sink,
       fileSize: fileSize,
-      logInfo: _logInfo,
       ensureNotCanceled: _ensureNotCanceled,
       writeZeroRun: (start, end) => _writeZeroRun(sink, start, end),
       parseZeroRange: _parseZeroRange,
@@ -1354,11 +1350,10 @@ class _SpeedSample {
 }
 
 class _BlobDirectoryCache {
-  _BlobDirectoryCache({required BlobDirectoryLister driver, required this.createShard, required this.logInfo}) : _driver = driver;
+  _BlobDirectoryCache({required BlobDirectoryLister driver, required this.createShard}) : _driver = driver;
 
   final BlobDirectoryLister _driver;
   final Future<void> Function(String hash) createShard;
-  final void Function(String message) logInfo;
 
   Set<String>? _shardNames;
   Future<Set<String>>? _shardsInFlight;
@@ -1441,8 +1436,8 @@ class _BlobDirectoryCache {
   }
 
   Future<void> _initializeCore() async {
-    logInfo('blob-cache writeReady=false (initializing)');
-    logInfo('blob-cache write ready: false');
+    LogWriter.logAgentBackground(level: 'info', message: 'blob-cache writeReady=false (initializing)');
+    LogWriter.logAgentBackground(level: 'info', message: 'blob-cache write ready: false');
     LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: writeReady=false initialize-start');
     LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: write ready=false initialize-start');
     _writeReady = false;
@@ -1459,8 +1454,8 @@ class _BlobDirectoryCache {
       await _ensureShardCreated(shardKey: shardKey);
     }
     _writeReady = true;
-    logInfo('blob-cache writeReady=true (missingShardsCreated=${missingShards.length})');
-    logInfo('blob-cache write ready: true');
+    LogWriter.logAgentBackground(level: 'info', message: 'blob-cache writeReady=true (missingShardsCreated=${missingShards.length})');
+    LogWriter.logAgentBackground(level: 'info', message: 'blob-cache write ready: true');
     LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: writeReady=true missingShardsCreated=${missingShards.length}');
     LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: write ready=true missingShardsCreated=${missingShards.length}');
     _notifyWriteReady();
@@ -1515,14 +1510,14 @@ class _BlobDirectoryCache {
     }
     final createFuture = () async {
       if (shardKey == 'ff') {
-        logInfo('blob-cache shard create: ff start');
+        LogWriter.logAgentBackground(level: 'info', message: 'blob-cache shard create: ff start');
         LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: shard create ff start');
       }
       await createShard(shardKey);
       (_shardNames ??= <String>{}).add(shardKey);
       _blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{});
       if (shardKey == 'ff') {
-        logInfo('blob-cache shard create: ff ok');
+        LogWriter.logAgentBackground(level: 'info', message: 'blob-cache shard create: ff ok');
         LogWriter.logAgentBackground(level: 'debug', message: 'blob-cache: shard create ff ok');
       }
     }();

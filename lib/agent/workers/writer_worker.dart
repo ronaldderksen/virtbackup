@@ -11,7 +11,6 @@ class _WriterWorker {
     required this.scheduleWrite,
     required this.handlePhysicalBytes,
     required this.onWriteCompletedBlocks,
-    required this.logInfo,
     required this.isWriteReady,
     this.waitForWriteReady,
   });
@@ -25,7 +24,6 @@ class _WriterWorker {
   final Future<void> Function(String hash, Uint8List bytes) scheduleWrite;
   final void Function(int bytes) handlePhysicalBytes;
   final void Function(int blocks) onWriteCompletedBlocks;
-  final void Function(String message) logInfo;
   final bool Function() isWriteReady;
   final Future<void> Function()? waitForWriteReady;
 
@@ -71,7 +69,7 @@ class _WriterWorker {
 
   void throwIfError() {
     if (_writerError != null) {
-      logInfo('hashblocks writer abort: $_writerError');
+      LogWriter.logAgentBackground(level: 'info', message: 'hashblocks writer abort: $_writerError');
       Error.throwWithStackTrace(_writerError!, _writerStack ?? StackTrace.current);
     }
   }
@@ -106,7 +104,7 @@ class _WriterWorker {
         if (_writtenBlocks % 512 == 0) {
           final now = DateTime.now();
           if (_lastQueueStatsLogAt == null || now.difference(_lastQueueStatsLogAt!) >= logInterval) {
-            logInfo('hashblocks queue stats: queued=$_queuedBlocks written=$_writtenBlocks backlogBytes=${backlogBytes()}');
+            LogWriter.logAgentBackground(level: 'info', message: 'hashblocks queue stats: queued=$_queuedBlocks written=$_writtenBlocks backlogBytes=${backlogBytes()}');
             _lastQueueStatsLogAt = now;
           }
         }
@@ -195,7 +193,7 @@ class _WriterWorker {
     } catch (error, stackTrace) {
       _writerError = error;
       _writerStack = stackTrace;
-      logInfo('hashblocks writer error: $error');
+      LogWriter.logAgentBackground(level: 'info', message: 'hashblocks writer error: $error');
       if (_wakeWriter != null && !_wakeWriter!.isCompleted) {
         _wakeWriter!.complete();
       }
@@ -212,7 +210,10 @@ class _WriterWorker {
       return;
     }
     _lastLoopDebugLogAt = now;
-    logInfo('writer debug: reason=$reason queuedBlocks=$_queuedBlocks queuedBytes=$_queuedBytes inFlightWrites=$inFlightWrites inFlightBytes=$_inFlightBytes queueDepth=$_queuedBlocks');
+    LogWriter.logAgentBackground(
+      level: 'debug',
+      message: 'writer debug: reason=$reason queuedBlocks=$_queuedBlocks queuedBytes=$_queuedBytes inFlightWrites=$inFlightWrites inFlightBytes=$_inFlightBytes queueDepth=$_queuedBlocks',
+    );
   }
 
   String _shardKeyForHash(String hash) {
