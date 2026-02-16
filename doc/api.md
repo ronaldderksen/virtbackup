@@ -62,6 +62,16 @@ Response: array of available storage drivers and their capabilities/params.
 Response:
 ```json
 {
+  "backupPath":"/var",
+  "log_level":"info",
+  "backupDestinationId":"dest_filesystem_1739440000000000",
+  "connectionVerified":false,
+  "hashblocksLimitBufferMb":1024,
+  "blockSizeMB":1,
+  "dummyDriverTmpWrites":false,
+  "ntfymeToken":"",
+  "selectedServerId":"server-id",
+  "servers":[],
   "destinations":[
     {
       "id":"dest_filesystem_1739440000000000",
@@ -84,35 +94,7 @@ Response:
         "basePath":"/Backup"
       }
     }
-  ],
-  "backupDestinationId":"dest_filesystem_1739440000000000",
-  "restoreDestinationId":null,
-  "backup":{
-    "driverId":"filesystem",
-    "base_path":"/path/to/backups",
-    "gdrive":{
-      "scope":"https://www.googleapis.com/auth/drive.file",
-      "rootPath":"/",
-      "accessToken":"",
-      "refreshToken":"",
-      "accountEmail":"",
-      "expiresAt":"2026-02-06T12:00:00Z"
-    },
-    "sftp":{
-      "host":"my-sftp.example.com",
-      "port":22,
-      "username":"backup",
-      "password":"",
-      "basePath":"/Backup"
-    }
-  },
-  "hashblocksLimitBufferMb":1024,
-  "dummyDriverTmpWrites":false,
-  "ntfymeToken":"",
-  "connectionVerified":false,
-  "selectedServerId":"server-id",
-  "listenAll":false,
-  "servers":[]
+  ]
 }
 ```
 
@@ -189,6 +171,7 @@ Response (success):
 Body:
 ```json
 {
+  "destinationId":"dest_gdrive_1739440000000002",
   "accessToken":"<access token>",
   "refreshToken":"<refresh token>",
   "scope":"https://www.googleapis.com/auth/drive.file",
@@ -198,6 +181,7 @@ Body:
 ```
 
 Notes:
+- `destinationId` is required and must reference a destination with `driverId: "gdrive"`.
 - `refreshToken` is required.
 - `expiresAt` may be a Unix timestamp in seconds or milliseconds, or an ISO-8601 string.
 
@@ -209,6 +193,11 @@ Response:
 ### Clear Google OAuth tokens
 
 - `POST /oauth/google/clear`
+
+Body:
+```json
+{"destinationId":"dest_gdrive_1739440000000002"}
+```
 
 Response:
 ```json
@@ -356,7 +345,7 @@ Response:
 - `GET /restore/entries`
 
 Optional query:
-- `driverId=<id>`: list entries for a specific driver (otherwise uses the configured default driver).
+- `driverId=<id>`: list entries for a specific driver (otherwise uses the configured default destination driver).
 - `destinationId=<id>`: list entries for a specific destination (takes precedence over `driverId`).
 
 Response (array):

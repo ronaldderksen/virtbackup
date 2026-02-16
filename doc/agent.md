@@ -344,4 +344,4 @@ The agent supports optional native SFTP via FFI:
 - Destination `id: filesystem` is mandatory, always enabled, and cannot be removed.
 - `backup.base_path` is deprecated; `destinations[id=filesystem].params.path` is the source of truth and is what gets persisted.
 - Backup uses `backupDestinationId` to pick the active destination.
-- `restoreDestinationId` is reserved for restore destination selection; legacy restore paths can still use driver-based selection.
+- Restore destination selection is request-driven via `destinationId` (`POST /servers/{id}/restore/start`), otherwise the active/default destination is used.

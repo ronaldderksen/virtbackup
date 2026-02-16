@@ -32,41 +32,46 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   final _SftpPool _blobCachePool = _SftpPool(maxSessions: _blobCacheReservedSessions);
   final _NativeSftpPool _nativePool;
 
-  String get _host => _settings.sftpHost.trim();
-  int get _port => _settings.sftpPort;
-  String get _username => _settings.sftpUsername.trim();
-  String get _password => _settings.sftpPassword;
-  String get _basePath => _settings.sftpBasePath.trim();
+  Map<String, dynamic> get _params => _resolveSelectedSftpDestination(_settings).params;
+  String get _host => (_params['host'] ?? '').toString().trim();
+  int get _port => _parseRequiredPort(_params['port']);
+  String get _username => (_params['username'] ?? '').toString().trim();
+  String get _password => (_params['password'] ?? '').toString();
+  String get _basePath => (_params['basePath'] ?? '').toString().trim();
   int get _blockSizeMB => _settings.blockSizeMB;
 
   static int _resolveUploadConcurrency(AppSettings settings) {
-    final destination = _resolveConcurrencyDestination(settings);
-    return destination?.uploadConcurrency ?? _defaultConcurrency;
+    final destination = _resolveSelectedSftpDestination(settings);
+    return destination.uploadConcurrency ?? _defaultConcurrency;
   }
 
   static int _resolveDownloadConcurrency(AppSettings settings) {
-    final destination = _resolveConcurrencyDestination(settings);
-    return destination?.downloadConcurrency ?? _defaultConcurrency;
+    final destination = _resolveSelectedSftpDestination(settings);
+    return destination.downloadConcurrency ?? _defaultConcurrency;
   }
 
-  static BackupDestination? _resolveConcurrencyDestination(AppSettings settings) {
+  static BackupDestination _resolveSelectedSftpDestination(AppSettings settings) {
     final selectedId = settings.backupDestinationId?.trim() ?? '';
-    if (selectedId.isNotEmpty) {
-      for (final destination in settings.destinations) {
-        if (destination.id == selectedId) {
-          return destination;
-        }
-      }
+    if (selectedId.isEmpty) {
+      throw StateError('SFTP settings require backupDestinationId.');
     }
     for (final destination in settings.destinations) {
-      if (destination.enabled) {
+      if (destination.id == selectedId) {
+        if (destination.driverId != 'sftp') {
+          throw StateError('Selected destination "$selectedId" is not an SFTP destination.');
+        }
         return destination;
       }
     }
-    if (settings.destinations.isNotEmpty) {
-      return settings.destinations.first;
+    throw StateError('SFTP destination "$selectedId" not found.');
+  }
+
+  static int _parseRequiredPort(Object? value) {
+    final parsed = value is num ? value.toInt() : int.tryParse((value ?? '').toString().trim());
+    if (parsed == null || parsed <= 0 || parsed > 65535) {
+      throw StateError('SFTP port is invalid.');
     }
-    return null;
+    return parsed;
   }
 
   static Directory _cacheRootForSettings(AppSettings settings) {

@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:virtbackup/agent/settings_store.dart';
 import 'package:virtbackup/common/google_oauth_client.dart';
+import 'package:virtbackup/common/models.dart';
 import 'package:virtbackup/common/settings.dart';
 
 const int _defaultFileSizeBytes = 16 * 1024 * 1024;
@@ -21,8 +22,9 @@ Future<void> main(List<String> args) async {
 
   final store = await AppSettingsStore.fromAgentDefaultPath();
   final settings = await store.load();
+  final destination = _selectedGdriveDestination(settings);
   final oauth = await GoogleOAuthClientLocator().load(settingsDir: store.file.parent, requireSecret: true);
-  if (settings.gdriveRefreshToken.trim().isEmpty && settings.gdriveAccessToken.trim().isEmpty) {
+  if (_gdriveRefreshToken(settings).isEmpty && _gdriveAccessToken(settings).isEmpty) {
     stderr.writeln('No Google Drive tokens found in ${store.file.path}');
     exitCode = 1;
     return;
@@ -35,7 +37,7 @@ Future<void> main(List<String> args) async {
     var activeSettings = tokenResult.$2;
     final normalizedDest = parsed.destPath.trim().replaceAll('\\', '/');
     final useDriveRoot = normalizedDest.startsWith('/');
-    final driveRoot = await _ensureDriveRoot(settings, client, accessToken);
+    final driveRoot = await _ensureDriveRoot(destination, client, accessToken);
     final baseRoot = useDriveRoot ? driveRoot : await _ensureFolder(driveRoot, 'VirtBackup', client, accessToken);
     final relativeDest = useDriveRoot ? normalizedDest.substring(1) : normalizedDest;
     final destId = relativeDest.isEmpty ? baseRoot : await _ensureFolderPath(baseRoot, relativeDest, client, accessToken);
@@ -200,13 +202,13 @@ Uint8List _randomBytes(int length) {
 
 Future<(String, AppSettings)> _ensureAccessToken(AppSettings settings, AppSettingsStore store, http.Client client, GoogleOAuthInstalledClient oauth) async {
   final now = DateTime.now().toUtc();
-  final token = settings.gdriveAccessToken.trim();
-  final expiresAt = settings.gdriveExpiresAt;
+  final token = _gdriveAccessToken(settings);
+  final expiresAt = _gdriveExpiresAt(settings);
   if (token.isNotEmpty && expiresAt != null && expiresAt.isAfter(now.add(const Duration(minutes: 1)))) {
     return (token, settings);
   }
 
-  final refresh = settings.gdriveRefreshToken.trim();
+  final refresh = _gdriveRefreshToken(settings);
   if (refresh.isEmpty) {
     throw StateError('Google Drive refresh token missing; cannot refresh access token.');
   }
@@ -229,13 +231,13 @@ Future<(String, AppSettings)> _ensureAccessToken(AppSettings settings, AppSettin
     throw StateError('Token refresh failed: access_token missing.');
   }
   final newExpiresAt = _calculateExpiresAt(expiresIn);
-  final updated = settings.copyWith(gdriveAccessToken: accessToken, gdriveExpiresAt: newExpiresAt);
+  final updated = _withUpdatedGdriveTokens(settings: settings, accessToken: accessToken, expiresAt: newExpiresAt);
   await store.save(updated);
   return (accessToken, updated);
 }
 
 Future<(String, AppSettings)> _refreshAccessToken(AppSettings settings, AppSettingsStore store, http.Client client, GoogleOAuthInstalledClient oauth) async {
-  final refresh = settings.gdriveRefreshToken.trim();
+  final refresh = _gdriveRefreshToken(settings);
   if (refresh.isEmpty) {
     throw StateError('Google Drive refresh token missing; cannot refresh access token.');
   }
@@ -257,7 +259,7 @@ Future<(String, AppSettings)> _refreshAccessToken(AppSettings settings, AppSetti
     throw StateError('Token refresh failed: access_token missing.');
   }
   final newExpiresAt = _calculateExpiresAt(expiresIn);
-  final updated = settings.copyWith(gdriveAccessToken: accessToken, gdriveExpiresAt: newExpiresAt);
+  final updated = _withUpdatedGdriveTokens(settings: settings, accessToken: accessToken, expiresAt: newExpiresAt);
   await store.save(updated);
   return (accessToken, updated);
 }
@@ -283,13 +285,75 @@ Future<String> _ensureFolderPath(String rootId, String rawPath, http.Client clie
   return current;
 }
 
-Future<String> _ensureDriveRoot(AppSettings settings, http.Client client, String token) async {
+Future<String> _ensureDriveRoot(BackupDestination destination, http.Client client, String token) async {
   var current = 'root';
-  final rootPath = settings.gdriveRootPath.trim();
+  final rootPath = (destination.params['rootPath'] ?? '').toString().trim();
   if (rootPath.isEmpty) {
     return current;
   }
   return _ensureFolderPath(current, rootPath, client, token);
+}
+
+BackupDestination _selectedGdriveDestination(AppSettings settings) {
+  final selectedId = settings.backupDestinationId?.trim() ?? '';
+  if (selectedId.isEmpty) {
+    throw StateError('backupDestinationId is required.');
+  }
+  for (final destination in settings.destinations) {
+    if (destination.id != selectedId) {
+      continue;
+    }
+    if (destination.driverId != 'gdrive') {
+      throw StateError('Selected destination "$selectedId" is not a Google Drive destination.');
+    }
+    return destination;
+  }
+  throw StateError('Google Drive destination "$selectedId" not found.');
+}
+
+Map<String, dynamic> _selectedGdriveParams(AppSettings settings) {
+  return _selectedGdriveDestination(settings).params;
+}
+
+String _gdriveAccessToken(AppSettings settings) {
+  return (_selectedGdriveParams(settings)['accessToken'] ?? '').toString().trim();
+}
+
+String _gdriveRefreshToken(AppSettings settings) {
+  return (_selectedGdriveParams(settings)['refreshToken'] ?? '').toString().trim();
+}
+
+DateTime? _gdriveExpiresAt(AppSettings settings) {
+  return AppSettings.parseDateTimeOrNull(_selectedGdriveParams(settings)['expiresAt']);
+}
+
+AppSettings _withUpdatedGdriveTokens({required AppSettings settings, required String accessToken, required DateTime? expiresAt}) {
+  final destination = _selectedGdriveDestination(settings);
+  final params = Map<String, dynamic>.from(destination.params);
+  params['accessToken'] = accessToken;
+  if (expiresAt == null) {
+    params.remove('expiresAt');
+  } else {
+    params['expiresAt'] = expiresAt.toUtc().toIso8601String();
+  }
+  final updatedDestinations = settings.destinations.map((entry) {
+    if (entry.id != destination.id) {
+      return entry;
+    }
+    return BackupDestination(
+      id: entry.id,
+      name: entry.name,
+      driverId: entry.driverId,
+      enabled: entry.enabled,
+      params: params,
+      disableFresh: entry.disableFresh,
+      storeBlobs: entry.storeBlobs,
+      useBlobs: entry.useBlobs,
+      uploadConcurrency: entry.uploadConcurrency,
+      downloadConcurrency: entry.downloadConcurrency,
+    );
+  }).toList();
+  return settings.copyWith(destinations: updatedDestinations);
 }
 
 Future<String> _ensureFolder(String parentId, String name, http.Client client, String token) async {

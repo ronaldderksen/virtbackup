@@ -9,108 +9,52 @@ class AppSettings {
     required this.logLevel,
     required this.destinations,
     required this.backupDestinationId,
-    required this.restoreDestinationId,
-    required this.backupDriverId,
-    required this.sftpHost,
-    required this.sftpPort,
-    required this.sftpUsername,
-    required this.sftpPassword,
-    required this.sftpBasePath,
     required this.servers,
     required this.connectionVerified,
     required this.hashblocksLimitBufferMb,
     required this.blockSizeMB,
     required this.dummyDriverTmpWrites,
     required this.ntfymeToken,
-    required this.gdriveScope,
-    required this.gdriveRootPath,
-    required this.gdriveAccessToken,
-    required this.gdriveRefreshToken,
-    required this.gdriveAccountEmail,
-    required this.gdriveExpiresAt,
     this.selectedServerId,
-    this.listenAll = false,
   });
 
   final String backupPath;
   final String logLevel;
   final List<BackupDestination> destinations;
   final String? backupDestinationId;
-  final String? restoreDestinationId;
-  final String backupDriverId;
-  final String sftpHost;
-  final int sftpPort;
-  final String sftpUsername;
-  final String sftpPassword;
-  final String sftpBasePath;
   final List<ServerConfig> servers;
   final bool connectionVerified;
   final int hashblocksLimitBufferMb;
   final int blockSizeMB;
   final bool dummyDriverTmpWrites;
   final String ntfymeToken;
-  final String gdriveScope;
-  final String gdriveRootPath;
-  final String gdriveAccessToken;
-  final String gdriveRefreshToken;
-  final String gdriveAccountEmail;
-  final DateTime? gdriveExpiresAt;
   final String? selectedServerId;
-  final bool listenAll;
 
   AppSettings copyWith({
     String? backupPath,
     String? logLevel,
     List<BackupDestination>? destinations,
     String? backupDestinationId,
-    String? restoreDestinationId,
-    String? backupDriverId,
-    String? sftpHost,
-    int? sftpPort,
-    String? sftpUsername,
-    String? sftpPassword,
-    String? sftpBasePath,
     List<ServerConfig>? servers,
     bool? connectionVerified,
     int? hashblocksLimitBufferMb,
     int? blockSizeMB,
     bool? dummyDriverTmpWrites,
     String? ntfymeToken,
-    String? gdriveScope,
-    String? gdriveRootPath,
-    String? gdriveAccessToken,
-    String? gdriveRefreshToken,
-    String? gdriveAccountEmail,
-    DateTime? gdriveExpiresAt,
     String? selectedServerId,
-    bool? listenAll,
   }) {
     return AppSettings(
       backupPath: backupPath ?? this.backupPath,
       logLevel: logLevel ?? this.logLevel,
       destinations: destinations ?? this.destinations,
       backupDestinationId: backupDestinationId ?? this.backupDestinationId,
-      restoreDestinationId: restoreDestinationId ?? this.restoreDestinationId,
-      backupDriverId: backupDriverId ?? this.backupDriverId,
-      sftpHost: sftpHost ?? this.sftpHost,
-      sftpPort: sftpPort ?? this.sftpPort,
-      sftpUsername: sftpUsername ?? this.sftpUsername,
-      sftpPassword: sftpPassword ?? this.sftpPassword,
-      sftpBasePath: sftpBasePath ?? this.sftpBasePath,
       servers: servers ?? this.servers,
       connectionVerified: connectionVerified ?? this.connectionVerified,
       hashblocksLimitBufferMb: hashblocksLimitBufferMb ?? this.hashblocksLimitBufferMb,
       blockSizeMB: blockSizeMB ?? this.blockSizeMB,
       dummyDriverTmpWrites: dummyDriverTmpWrites ?? this.dummyDriverTmpWrites,
       ntfymeToken: ntfymeToken ?? this.ntfymeToken,
-      gdriveScope: gdriveScope ?? this.gdriveScope,
-      gdriveRootPath: gdriveRootPath ?? this.gdriveRootPath,
-      gdriveAccessToken: gdriveAccessToken ?? this.gdriveAccessToken,
-      gdriveRefreshToken: gdriveRefreshToken ?? this.gdriveRefreshToken,
-      gdriveAccountEmail: gdriveAccountEmail ?? this.gdriveAccountEmail,
-      gdriveExpiresAt: gdriveExpiresAt ?? this.gdriveExpiresAt,
       selectedServerId: selectedServerId ?? this.selectedServerId,
-      listenAll: listenAll ?? this.listenAll,
     );
   }
 
@@ -118,29 +62,15 @@ class AppSettings {
     return {
       'backupPath': backupPath,
       'log_level': logLevel,
-      'destinations': destinations.map((destination) => destination.toMap()).toList(),
       'backupDestinationId': backupDestinationId,
-      'restoreDestinationId': restoreDestinationId,
-      'backupDriverId': backupDriverId,
-      'sftpHost': sftpHost,
-      'sftpPort': sftpPort,
-      'sftpUsername': sftpUsername,
-      'sftpPassword': sftpPassword,
-      'sftpBasePath': sftpBasePath,
       'connectionVerified': connectionVerified,
       'hashblocksLimitBufferMb': hashblocksLimitBufferMb,
       'blockSizeMB': blockSizeMB,
       'dummyDriverTmpWrites': dummyDriverTmpWrites,
       'ntfymeToken': ntfymeToken,
-      'gdriveScope': gdriveScope,
-      'gdriveRootPath': gdriveRootPath,
-      'gdriveAccessToken': gdriveAccessToken,
-      'gdriveRefreshToken': gdriveRefreshToken,
-      'gdriveAccountEmail': gdriveAccountEmail,
-      'gdriveExpiresAt': gdriveExpiresAt?.toUtc().toIso8601String(),
       'selectedServerId': selectedServerId,
-      'listenAll': listenAll,
       'servers': servers.map((server) => server.toMap()).toList(),
+      'destinations': destinations.map((destination) => destination.toMap()).toList(),
     };
   }
 
@@ -148,21 +78,7 @@ class AppSettings {
     final destinations = _ensureFilesystemDestination(_parseDestinations(json));
     final resolvedBackupPath = _filesystemPathFromDestinations(destinations);
     final backupDestinationId = json['backupDestinationId']?.toString().trim();
-    final restoreDestinationId = json['restoreDestinationId']?.toString().trim();
     final selectedBackupDestination = _resolveDestination(destinations: destinations, requestedId: backupDestinationId);
-    final selectedSftp = _resolveDestinationByDriver(destinations, 'sftp');
-    final selectedGdrive = _resolveDestinationByDriver(destinations, 'gdrive');
-    final sftpHost = json['sftpHost']?.toString();
-    final sftpPort = json['sftpPort'];
-    final sftpUsername = json['sftpUsername']?.toString();
-    final sftpPassword = json['sftpPassword']?.toString();
-    final sftpBasePath = json['sftpBasePath']?.toString();
-    final gdriveScope = json['gdriveScope']?.toString();
-    final gdriveRootPath = json['gdriveRootPath']?.toString();
-    final gdriveAccessToken = json['gdriveAccessToken']?.toString();
-    final gdriveRefreshToken = json['gdriveRefreshToken']?.toString();
-    final gdriveAccountEmail = json['gdriveAccountEmail']?.toString();
-    final gdriveExpiresAt = _parseDateTime(json['gdriveExpiresAt']);
 
     final serversJson = json['servers'];
     final servers = <ServerConfig>[];
@@ -173,33 +89,18 @@ class AppSettings {
         }
       }
     }
+
     return AppSettings(
       backupPath: resolvedBackupPath,
       logLevel: ((json['log_level'] ?? '').toString().trim().isEmpty ? 'info' : json['log_level'].toString().trim()),
       destinations: destinations,
       backupDestinationId: backupDestinationId == null || backupDestinationId.isEmpty ? selectedBackupDestination?.id : backupDestinationId,
-      restoreDestinationId: restoreDestinationId == null || restoreDestinationId.isEmpty ? null : restoreDestinationId,
-      backupDriverId: (json['backupDriverId']?.toString().trim().isNotEmpty ?? false)
-          ? json['backupDriverId'].toString().trim()
-          : (selectedBackupDestination?.driverId.isNotEmpty == true ? selectedBackupDestination!.driverId : 'filesystem'),
       connectionVerified: json['connectionVerified'] == true,
       hashblocksLimitBufferMb: _parseHashblocksLimitBufferMb(json['hashblocksLimitBufferMb']),
       blockSizeMB: _parseBlockSizeMB(json['blockSizeMB']),
       dummyDriverTmpWrites: json['dummyDriverTmpWrites'] == true,
       ntfymeToken: (json['ntfymeToken'] ?? '').toString(),
-      gdriveScope: gdriveScope ?? (selectedGdrive?.params['scope'] ?? 'https://www.googleapis.com/auth/drive.file').toString(),
-      gdriveRootPath: gdriveRootPath ?? (selectedGdrive?.params['rootPath'] ?? '/').toString(),
-      gdriveAccessToken: gdriveAccessToken ?? (selectedGdrive?.params['accessToken'] ?? '').toString(),
-      gdriveRefreshToken: gdriveRefreshToken ?? (selectedGdrive?.params['refreshToken'] ?? '').toString(),
-      gdriveAccountEmail: gdriveAccountEmail ?? (selectedGdrive?.params['accountEmail'] ?? '').toString(),
-      gdriveExpiresAt: gdriveExpiresAt ?? _parseDateTime(selectedGdrive?.params['expiresAt']),
-      sftpHost: sftpHost ?? (selectedSftp?.params['host'] ?? '').toString(),
-      sftpPort: sftpPort == null ? _parsePort(selectedSftp?.params['port']) : _parsePort(sftpPort),
-      sftpUsername: sftpUsername ?? (selectedSftp?.params['username'] ?? '').toString(),
-      sftpPassword: sftpPassword ?? (selectedSftp?.params['password'] ?? '').toString(),
-      sftpBasePath: sftpBasePath ?? (selectedSftp?.params['basePath'] ?? '').toString(),
       selectedServerId: json['selectedServerId']?.toString(),
-      listenAll: json['listenAll'] == true,
       servers: servers,
     );
   }
@@ -209,27 +110,13 @@ class AppSettings {
     logLevel: 'info',
     destinations: const <BackupDestination>[],
     backupDestinationId: null,
-    restoreDestinationId: null,
-    backupDriverId: 'filesystem',
-    sftpHost: '',
-    sftpPort: 22,
-    sftpUsername: '',
-    sftpPassword: '',
-    sftpBasePath: '',
-    servers: [],
+    servers: <ServerConfig>[],
     connectionVerified: false,
     hashblocksLimitBufferMb: 1024,
     blockSizeMB: 1,
     dummyDriverTmpWrites: false,
     ntfymeToken: '',
-    gdriveScope: 'https://www.googleapis.com/auth/drive.file',
-    gdriveRootPath: '/',
-    gdriveAccessToken: '',
-    gdriveRefreshToken: '',
-    gdriveAccountEmail: '',
-    gdriveExpiresAt: null,
     selectedServerId: null,
-    listenAll: true,
   );
 
   static List<BackupDestination> _parseDestinations(Map<String, dynamic> json) {
@@ -270,15 +157,6 @@ class AppSettings {
     return destinations.first;
   }
 
-  static BackupDestination? _resolveDestinationByDriver(List<BackupDestination> destinations, String driverId) {
-    for (final destination in destinations) {
-      if (destination.driverId == driverId) {
-        return destination;
-      }
-    }
-    return null;
-  }
-
   static List<BackupDestination> _ensureFilesystemDestination(List<BackupDestination> input) {
     final destinations = List<BackupDestination>.from(input);
     var filesystemIndex = -1;
@@ -296,6 +174,7 @@ class AppSettings {
         break;
       }
     }
+
     final normalizedPath = existingPath ?? '';
     final filesystemDestination = BackupDestination(
       id: filesystemDestinationId,
@@ -346,15 +225,7 @@ class AppSettings {
     return parsed;
   }
 
-  static int _parsePort(Object? value) {
-    final parsed = value is num ? value.toInt() : int.tryParse(value?.toString().trim() ?? '');
-    if (parsed == null || parsed <= 0 || parsed > 65535) {
-      return 22;
-    }
-    return parsed;
-  }
-
-  static DateTime? _parseDateTime(Object? value) {
+  static DateTime? parseDateTimeOrNull(Object? value) {
     if (value == null) {
       return null;
     }
@@ -371,9 +242,5 @@ class AppSettings {
       return null;
     }
     return DateTime.tryParse(text);
-  }
-
-  static DateTime? parseDateTimeOrNull(Object? value) {
-    return _parseDateTime(value);
   }
 }

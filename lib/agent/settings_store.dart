@@ -126,9 +126,11 @@ class AppSettingsStore {
       return AppSettings.empty();
     }
     final normalized = _normalizeYaml(decoded);
+    final updatedLegacyKeys = _removeLegacyRootKeys(normalized);
+    final updatedRootOrder = _reorderRootKeys(normalized);
     final updatedDestinations = _ensureDestinationDefaults(normalized);
     final updatedBlockSize = _ensureBlockSizeMb(normalized);
-    final updated = updatedDestinations || updatedBlockSize;
+    final updated = updatedLegacyKeys || updatedRootOrder || updatedDestinations || updatedBlockSize;
     if (updated) {
       final encoded = _ensureTrailingNewline(_toYaml(normalized));
       await file.writeAsString(encoded);
@@ -189,6 +191,77 @@ class AppSettingsStore {
       return true;
     }
     return false;
+  }
+
+  bool _removeLegacyRootKeys(Map<String, dynamic> data) {
+    const legacyRootKeys = <String>{
+      'restoreDestinationId',
+      'backupDriverId',
+      'sftpHost',
+      'sftpPort',
+      'sftpUsername',
+      'sftpPassword',
+      'sftpBasePath',
+      'gdriveScope',
+      'gdriveRootPath',
+      'gdriveAccessToken',
+      'gdriveRefreshToken',
+      'gdriveAccountEmail',
+      'gdriveExpiresAt',
+      'listenAll',
+    };
+    var changed = false;
+    for (final key in legacyRootKeys) {
+      changed = data.remove(key) != null || changed;
+    }
+    return changed;
+  }
+
+  bool _reorderRootKeys(Map<String, dynamic> data) {
+    const preferredOrder = <String>[
+      'backupPath',
+      'log_level',
+      'backupDestinationId',
+      'connectionVerified',
+      'hashblocksLimitBufferMb',
+      'blockSizeMB',
+      'dummyDriverTmpWrites',
+      'ntfymeToken',
+      'selectedServerId',
+      'servers',
+      'destinations',
+    ];
+    final originalKeys = data.keys.toList();
+    final ordered = <String, dynamic>{};
+    for (final key in preferredOrder) {
+      if (data.containsKey(key)) {
+        ordered[key] = data[key];
+      }
+    }
+    for (final entry in data.entries) {
+      if (ordered.containsKey(entry.key)) {
+        continue;
+      }
+      ordered[entry.key] = entry.value;
+    }
+    final orderedKeys = ordered.keys.toList();
+    final sameOrder = originalKeys.length == orderedKeys.length;
+    if (sameOrder) {
+      var equal = true;
+      for (var i = 0; i < originalKeys.length; i += 1) {
+        if (originalKeys[i] != orderedKeys[i]) {
+          equal = false;
+          break;
+        }
+      }
+      if (equal) {
+        return false;
+      }
+    }
+    data
+      ..clear()
+      ..addAll(ordered);
+    return true;
   }
 
   Map<String, dynamic> _normalizeYaml(YamlMap map) {
@@ -366,93 +439,18 @@ class AppSettingsStore {
 
   void _encryptGdriveTokensInMap(Map<String, dynamic> data, String token) {
     _encryptDestinationGdriveTokens(data, token);
-    final backup = data['backup'];
-    if (backup is! Map) {
-      return;
-    }
-    final gdrive = backup['gdrive'];
-    if (gdrive is! Map) {
-      return;
-    }
-    final accessToken = gdrive['accessToken']?.toString() ?? '';
-    if (accessToken.isNotEmpty) {
-      gdrive['accessTokenEnc'] = _encryptPassword(accessToken, token);
-      gdrive['accessToken'] = '';
-    } else {
-      gdrive.remove('accessTokenEnc');
-    }
-
-    final refreshToken = gdrive['refreshToken']?.toString() ?? '';
-    if (refreshToken.isNotEmpty) {
-      gdrive['refreshTokenEnc'] = _encryptPassword(refreshToken, token);
-      gdrive['refreshToken'] = '';
-    } else {
-      gdrive.remove('refreshTokenEnc');
-    }
   }
 
   void _decryptGdriveTokensInMap(Map<String, dynamic> data, String? token) {
     _decryptDestinationGdriveTokens(data, token);
-    final backup = data['backup'];
-    if (backup is! Map) {
-      return;
-    }
-    final gdrive = backup['gdrive'];
-    if (gdrive is! Map) {
-      return;
-    }
-    final accessEnc = gdrive['accessTokenEnc']?.toString();
-    if (accessEnc != null && accessEnc.isNotEmpty) {
-      gdrive['accessToken'] = (token == null || token.isEmpty) ? '' : _decryptPassword(accessEnc, token);
-    } else if (gdrive['accessToken'] == null) {
-      gdrive['accessToken'] = '';
-    }
-
-    final refreshEnc = gdrive['refreshTokenEnc']?.toString();
-    if (refreshEnc != null && refreshEnc.isNotEmpty) {
-      gdrive['refreshToken'] = (token == null || token.isEmpty) ? '' : _decryptPassword(refreshEnc, token);
-    } else if (gdrive['refreshToken'] == null) {
-      gdrive['refreshToken'] = '';
-    }
   }
 
   void _encryptSftpPasswordInMap(Map<String, dynamic> data, String token) {
     _encryptDestinationSftpPasswords(data, token);
-    final backup = data['backup'];
-    if (backup is! Map) {
-      return;
-    }
-    final sftp = backup['sftp'];
-    if (sftp is! Map) {
-      return;
-    }
-    final password = sftp['password']?.toString() ?? '';
-    if (password.isEmpty) {
-      sftp.remove('passwordEnc');
-      return;
-    }
-    sftp['passwordEnc'] = _encryptPassword(password, token);
-    sftp['password'] = '';
   }
 
   void _decryptSftpPasswordInMap(Map<String, dynamic> data, String? token) {
     _decryptDestinationSftpPasswords(data, token);
-    final backup = data['backup'];
-    if (backup is! Map) {
-      return;
-    }
-    final sftp = backup['sftp'];
-    if (sftp is! Map) {
-      return;
-    }
-    final enc = sftp['passwordEnc']?.toString();
-    if (enc != null && enc.isNotEmpty) {
-      sftp['password'] = (token == null || token.isEmpty) ? '' : _decryptPassword(enc, token);
-      return;
-    }
-    if (sftp['password'] == null) {
-      sftp['password'] = '';
-    }
   }
 
   void _encryptDestinationGdriveTokens(Map<String, dynamic> data, String token) {
