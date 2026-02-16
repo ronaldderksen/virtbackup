@@ -783,6 +783,9 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       }
       final chunkLength = length == null ? _nativeTransferChunkSize : min(_nativeTransferChunkSize, length);
       buffer = calloc<Uint8>(chunkLength);
+      final emitChunkLength = length == null ? _nativeTransferChunkSize : min(_nativeTransferChunkSize, length);
+      var emitBuffer = Uint8List(emitChunkLength);
+      var emitOffset = 0;
       while (true) {
         if (length != null && offset >= length) {
           break;
@@ -799,7 +802,24 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
           break;
         }
         offset += read;
-        yield Uint8List.fromList(buffer.asTypedList(read));
+        final source = buffer.asTypedList(read);
+        var sourceOffset = 0;
+        while (sourceOffset < read) {
+          final remainingSource = read - sourceOffset;
+          final remainingTarget = emitBuffer.length - emitOffset;
+          final toCopy = remainingSource < remainingTarget ? remainingSource : remainingTarget;
+          emitBuffer.setRange(emitOffset, emitOffset + toCopy, source, sourceOffset);
+          emitOffset += toCopy;
+          sourceOffset += toCopy;
+          if (emitOffset == emitBuffer.length) {
+            yield emitBuffer;
+            emitBuffer = Uint8List(emitChunkLength);
+            emitOffset = 0;
+          }
+        }
+      }
+      if (emitOffset > 0) {
+        yield Uint8List.fromList(emitBuffer.sublist(0, emitOffset));
       }
     } on _NativeBlobMissing {
       rethrow;

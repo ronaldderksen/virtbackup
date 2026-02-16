@@ -324,6 +324,7 @@ The agent supports optional native SFTP via FFI:
 - `SftpBackupDriver` resolves concurrency from the selected SFTP destination (`uploadConcurrency`/`downloadConcurrency`, default `8`) and uses that for SFTP/native session pools.
 - `SftpBackupDriver` requires native SFTP for blob data paths; no dartssh blob read/write fallback is used.
 - `SftpBackupDriver` native blob transfers use fixed 16 MiB chunks.
+- Native FFI `vb_sftp_read` uses a fill loop and keeps reading until the requested length is satisfied or EOF is reached, reducing Dart/FFI roundtrips on short libssh2 reads.
 - Remote destination cache folders under `<filesystem path>/VirtBackup/cache/` are keyed by destination id (not by driver id).
 - Restore behavior for non-filesystem destinations:
   - `useBlobs: true`: restore tries local blobs from `destinations[id=filesystem].params.path` first; if present, remote download is skipped.

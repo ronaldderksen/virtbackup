@@ -350,12 +350,22 @@ int vb_sftp_read(void *file_ptr, long long offset, unsigned char *buffer, int le
   if (file->last_offset != offset) {
     libssh2_sftp_seek64(file->handle, (libssh2_uint64_t)offset);
   }
-  ssize_t n = libssh2_sftp_read(file->handle, (char *)buffer, length);
-  if (n < 0) {
-    return -1;
+  int total = 0;
+  while (total < length) {
+    ssize_t n = libssh2_sftp_read(file->handle, (char *)buffer + total, length - total);
+    if (n < 0) {
+      if (total > 0) {
+        break;
+      }
+      return -1;
+    }
+    if (n == 0) {
+      break;
+    }
+    total += (int)n;
   }
-  file->last_offset = offset + (long long)n;
-  return (int)n;
+  file->last_offset = offset + (long long)total;
+  return total;
 }
 
 int vb_sftp_write(void *file_ptr, const unsigned char *buffer, int length) {
