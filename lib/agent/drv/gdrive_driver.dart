@@ -363,217 +363,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }
 
   @override
-  Stream<File> listXmlFiles() async* {
-    _logInfo('gdrive: listing xml files');
-    final manifestsRootId = await _ensureFolderByPath(['manifests']);
-    final serverFolders = await _listChildFolders(manifestsRootId);
-    for (final serverFolder in serverFolders) {
-      final vmFolders = await _listChildFolders(serverFolder.id);
-      for (final vmFolder in vmFolders) {
-        final xmlFiles = await _listFiles(vmFolder.id, nameContains: '__domain.xml');
-        for (final file in xmlFiles) {
-          if (file.name.endsWith('.inprogress')) {
-            continue;
-          }
-          final localPath =
-              '${_cacheRoot.path}${Platform.pathSeparator}manifests${Platform.pathSeparator}${serverFolder.name}${Platform.pathSeparator}${vmFolder.name}${Platform.pathSeparator}${file.name}';
-          final localFile = File(localPath);
-          if (!await localFile.exists()) {
-            await localFile.parent.create(recursive: true);
-            final bytes = await _downloadFile(file.id);
-            await localFile.writeAsBytes(bytes, flush: true);
-          }
-          yield localFile;
-        }
-      }
-    }
-  }
-
-  @override
-  RestoreLocation? restoreLocationFromXml(File xmlFile) {
-    final vmDir = xmlFile.parent;
-    final serverDir = vmDir.parent;
-    final serverId = baseName(serverDir.path);
-    final vmName = baseName(vmDir.path);
-    if (serverId.isEmpty || vmName.isEmpty) {
-      return null;
-    }
-    return RestoreLocation(vmDir: vmDir, serverId: serverId, vmName: vmName);
-  }
-
-  Future<void> ensureXmlOnDrive(File xmlFile) async {
-    final location = restoreLocationFromXml(xmlFile);
-    if (location == null) {
-      return;
-    }
-    final fileName = baseName(xmlFile.path);
-    final folderId = await _ensureManifestFolder(location.serverId, location.vmName);
-    final files = await _listFiles(folderId, nameEquals: fileName);
-    if (files.isEmpty) {
-      throw 'Restore XML not found on Drive: $fileName';
-    }
-    final bytes = await _downloadFile(files.first.id);
-    await xmlFile.parent.create(recursive: true);
-    await xmlFile.writeAsBytes(bytes, flush: true);
-  }
-
-  @override
-  Future<File?> findManifestForTimestamp(Directory vmDir, String timestamp, String diskBaseName) async {
-    final diskId = sanitizeFileName(diskBaseName);
-    await for (final entity in vmDir.list(followLinks: false)) {
-      if (entity is! Directory && entity is! Link) {
-        continue;
-      }
-      final name = baseName(entity.path);
-      if (name != diskId && name != diskBaseName) {
-        continue;
-      }
-      final manifest = await _findManifestFileForTimestamp(entity.path, timestamp);
-      if (manifest != null) {
-        return manifest;
-      }
-    }
-    final location = _resolveServerVm(vmDir);
-    if (location != null) {
-      final downloaded = await _downloadManifestIfMissing(location.serverId, location.vmName, diskId, timestamp);
-      if (downloaded != null) {
-        return downloaded;
-      }
-    }
-    return null;
-  }
-
-  @override
-  Future<Directory?> findDiskDirForTimestamp(Directory vmDir, String timestamp, String diskBaseName) async {
-    final diskId = sanitizeFileName(diskBaseName);
-    await for (final entity in vmDir.list(followLinks: false)) {
-      if (entity is! Directory && entity is! Link) {
-        continue;
-      }
-      final name = baseName(entity.path);
-      if (name != diskId && name != diskBaseName) {
-        continue;
-      }
-      final diskDir = entity is Directory ? entity : Directory(entity.path);
-      final manifest = await _findManifestFileForTimestamp(diskDir.path, timestamp);
-      final chainFile = findChainFileForTimestamp(vmDir, diskDir, timestamp, diskBaseName);
-      if (manifest != null || chainFile != null) {
-        return diskDir;
-      }
-    }
-    final location = _resolveServerVm(vmDir);
-    if (location != null) {
-      final diskId = sanitizeFileName(diskBaseName);
-      final diskFolderId = await _ensureDiskManifestFolder(location.serverId, location.vmName, diskId);
-      final downloaded = await _downloadManifestFromFolder(diskFolderId, vmDir, diskId, timestamp);
-      if (downloaded != null) {
-        return Directory('${vmDir.path}${Platform.pathSeparator}$diskId');
-      }
-    }
-    return null;
-  }
-
-  @override
-  File? findChainFileForTimestamp(Directory vmDir, Directory? diskDir, String timestamp, String diskBaseName) {
-    final diskId = sanitizeFileName(diskBaseName);
-    final vmChainFile = File('${vmDir.path}${Platform.pathSeparator}${timestamp}__$diskId.chain');
-    if (vmChainFile.existsSync()) {
-      return vmChainFile;
-    }
-    return null;
-  }
-
-  Future<File?> ensureChainFile(Directory vmDir, String timestamp, String diskBaseName) async {
-    final existing = findChainFileForTimestamp(vmDir, null, timestamp, diskBaseName);
-    if (existing != null) {
-      return existing;
-    }
-    final location = _resolveServerVm(vmDir);
-    if (location == null) {
-      return null;
-    }
-    final diskId = sanitizeFileName(diskBaseName);
-    final vmChainFile = File('${vmDir.path}${Platform.pathSeparator}${timestamp}__$diskId.chain');
-    return _downloadChainIfMissing(location.serverId, location.vmName, diskId, timestamp, vmChainFile);
-  }
-
-  @override
-  Future<List<File>> listManifestsForTimestamp(Directory vmDir, String timestamp) async {
-    final manifests = <File>[];
-    await for (final entity in vmDir.list(followLinks: false)) {
-      if (entity is! Directory && entity is! Link) {
-        continue;
-      }
-      final manifest = await _findManifestFileForTimestamp(entity.path, timestamp);
-      if (manifest != null) {
-        manifests.add(manifest);
-      }
-    }
-    if (manifests.isNotEmpty) {
-      return manifests;
-    }
-    final location = _resolveServerVm(vmDir);
-    if (location != null) {
-      final vmFolderId = await _ensureManifestFolder(location.serverId, location.vmName);
-      final diskFolders = await _listChildFolders(vmFolderId);
-      for (final diskFolder in diskFolders) {
-        final diskId = diskFolder.name;
-        final downloaded = await _downloadManifestFromFolder(diskFolder.id, vmDir, diskId, timestamp);
-        if (downloaded != null) {
-          manifests.add(downloaded);
-        }
-      }
-    }
-    return manifests;
-  }
-
-  @override
-  Future<File?> findManifestBySourcePath(Directory vmDir, String timestamp, String sourcePath, Future<String?> Function(File manifest) readSourcePath) async {
-    await for (final entity in vmDir.list(followLinks: false)) {
-      if (entity is! Directory && entity is! Link) {
-        continue;
-      }
-      final manifest = await _findManifestFileForTimestamp(entity.path, timestamp);
-      if (manifest == null) {
-        continue;
-      }
-      final storedPath = await readSourcePath(manifest);
-      if (storedPath != null && storedPath.trim() == sourcePath.trim()) {
-        return manifest;
-      }
-    }
-    final location = _resolveServerVm(vmDir);
-    if (location != null) {
-      final vmFolderId = await _ensureManifestFolder(location.serverId, location.vmName);
-      final diskFolders = await _listChildFolders(vmFolderId);
-      for (final diskFolder in diskFolders) {
-        final diskId = diskFolder.name;
-        final downloaded = await _downloadManifestFromFolder(diskFolder.id, vmDir, diskId, timestamp);
-        if (downloaded == null) {
-          continue;
-        }
-        final storedPath = await readSourcePath(downloaded);
-        if (storedPath != null && storedPath.trim() == sourcePath.trim()) {
-          return downloaded;
-        }
-      }
-    }
-    return null;
-  }
-
-  @override
-  Future<File?> findManifestForChainEntry(Directory vmDir, String timestamp, String diskId, String sourcePath, Future<String?> Function(File manifest) readSourcePath) async {
-    final byDiskId = await findManifestForTimestamp(vmDir, timestamp, diskId);
-    if (byDiskId != null) {
-      final storedPath = await readSourcePath(byDiskId);
-      if (storedPath != null && storedPath.trim() == sourcePath.trim()) {
-        return byDiskId;
-      }
-    }
-    return findManifestBySourcePath(vmDir, timestamp, sourcePath, readSourcePath);
-  }
-
-  @override
   String baseName(String path) {
     final parts = path.split(RegExp(r'[\\/]')).where((part) => part.isNotEmpty).toList();
     return parts.isEmpty ? path : parts.last;
@@ -830,17 +619,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   Future<List<_DriveFileRef>> _listChildFolders(String parentId) async {
     final query = "mimeType='$_driveFolderMime' and '$parentId' in parents and trashed=false";
-    return _listFilesRaw(query, fields: 'nextPageToken,files(id,name,parents)');
-  }
-
-  Future<List<_DriveFileRef>> _listFiles(String parentId, {String? nameContains, String? nameEquals}) async {
-    var query = "'$parentId' in parents and trashed=false";
-    if (nameContains != null && nameContains.isNotEmpty) {
-      query += " and name contains '${_escapeQuery(nameContains)}'";
-    }
-    if (nameEquals != null && nameEquals.isNotEmpty) {
-      query += " and name='${_escapeQuery(nameEquals)}'";
-    }
     return _listFilesRaw(query, fields: 'nextPageToken,files(id,name,parents)');
   }
 
@@ -1182,54 +960,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return '${blobsDir().path}${Platform.pathSeparator}$shard${Platform.pathSeparator}$hash';
   }
 
-  _ServerVmLocation? _resolveServerVm(Directory vmDir) {
-    final vmName = baseName(vmDir.path);
-    final serverId = baseName(vmDir.parent.path);
-    if (vmName.isEmpty || serverId.isEmpty) {
-      return null;
-    }
-    return _ServerVmLocation(serverId: serverId, vmName: vmName);
-  }
-
-  Future<File?> _downloadManifestIfMissing(String serverId, String vmName, String diskId, String timestamp) async {
-    final folderId = await _ensureDiskManifestFolder(serverId, vmName, diskId);
-    return _downloadManifestFromFolder(folderId, manifestsDir(serverId, vmName), diskId, timestamp);
-  }
-
-  Future<File?> _downloadManifestFromFolder(String folderId, Directory vmDir, String diskId, String timestamp) async {
-    final nameGz = '$timestamp.manifest.gz';
-    final namePlain = '$timestamp.manifest';
-    final file = await _findFileByName(folderId, nameGz) ?? await _findFileByName(folderId, namePlain);
-    if (file == null) {
-      return null;
-    }
-    final localDir = Directory('${vmDir.path}${Platform.pathSeparator}$diskId');
-    await localDir.create(recursive: true);
-    final localPath = '${localDir.path}${Platform.pathSeparator}${file.name}';
-    final localFile = File(localPath);
-    if (!await localFile.exists()) {
-      final bytes = await _downloadFile(file.id);
-      await localFile.writeAsBytes(bytes, flush: true);
-    }
-    return localFile;
-  }
-
-  Future<File?> _downloadChainIfMissing(String serverId, String vmName, String diskId, String timestamp, File localFile) async {
-    if (await localFile.exists()) {
-      return localFile;
-    }
-    final folderId = await _ensureManifestFolder(serverId, vmName);
-    final name = '${timestamp}__$diskId.chain';
-    final file = await _findFileByName(folderId, name);
-    if (file == null) {
-      return null;
-    }
-    await localFile.parent.create(recursive: true);
-    final bytes = await _downloadFile(file.id);
-    await localFile.writeAsBytes(bytes, flush: true);
-    return localFile;
-  }
-
   Future<_DriveFileRef?> _findFileByName(String parentId, String name, {bool includeSize = false}) async {
     final fields = includeSize ? 'nextPageToken,files(id,name,parents,size)' : 'nextPageToken,files(id,name,parents)';
     final files = await _listFilesRaw("'$parentId' in parents and name='${_escapeQuery(name)}' and trashed=false", fields: fields);
@@ -1251,18 +981,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         await entity.delete();
       } catch (_) {}
     }
-  }
-
-  Future<File?> _findManifestFileForTimestamp(String directoryPath, String timestamp) async {
-    final manifest = File('$directoryPath${Platform.pathSeparator}$timestamp.manifest');
-    if (await manifest.exists()) {
-      return manifest;
-    }
-    final gzManifest = File('$directoryPath${Platform.pathSeparator}$timestamp.manifest.gz');
-    if (await gzManifest.exists()) {
-      return gzManifest;
-    }
-    return null;
   }
 
   Future<void> _gzipManifest(File source, File target) async {
@@ -1514,11 +1232,4 @@ class _DriveHttpException implements Exception {
   final String message;
   final int statusCode;
   final String body;
-}
-
-class _ServerVmLocation {
-  _ServerVmLocation({required this.serverId, required this.vmName});
-
-  final String serverId;
-  final String vmName;
 }

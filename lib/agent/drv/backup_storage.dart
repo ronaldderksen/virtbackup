@@ -68,14 +68,6 @@ abstract class BackupDriver {
   File manifestGzFile(String serverId, String vmName, String diskId, String timestamp);
   File blobFile(String hash);
 
-  Stream<File> listXmlFiles();
-  RestoreLocation? restoreLocationFromXml(File xmlFile);
-  Future<File?> findManifestForTimestamp(Directory vmDir, String timestamp, String diskBaseName);
-  Future<Directory?> findDiskDirForTimestamp(Directory vmDir, String timestamp, String diskBaseName);
-  File? findChainFileForTimestamp(Directory vmDir, Directory? diskDir, String timestamp, String diskBaseName);
-  Future<List<File>> listManifestsForTimestamp(Directory vmDir, String timestamp);
-  Future<File?> findManifestBySourcePath(Directory vmDir, String timestamp, String sourcePath, Future<String?> Function(File manifest) readSourcePath);
-  Future<File?> findManifestForChainEntry(Directory vmDir, String timestamp, String diskId, String sourcePath, Future<String?> Function(File manifest) readSourcePath);
   String baseName(String path);
   String sanitizeFileName(String name);
   Future<void> cleanupInProgressFiles();
@@ -106,12 +98,4 @@ class DriverManifestWrite {
 
   final IOSink sink;
   final Future<void> Function() commit;
-}
-
-class RestoreLocation {
-  const RestoreLocation({required this.vmDir, required this.serverId, required this.vmName});
-
-  final Directory vmDir;
-  final String serverId;
-  final String vmName;
 }

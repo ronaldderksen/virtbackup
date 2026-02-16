@@ -885,10 +885,32 @@ class AgentHttpServer {
     }
     final settings = resolvedDestination?.settings ?? _agentSettings;
     final driver = _driverForSettings(driverInfo.id, backupPath, settings: settings);
-    final xmlFiles = await _findXmlFiles(driver);
+    final manifestsRoot = driver.manifestsDir('__scan__', '__scan__').parent.parent;
+    final manifestFiles = await _findManifestFiles(manifestsRoot);
+    final grouped = <String, List<File>>{};
+    for (final manifest in manifestFiles) {
+      final relative = _relativePath(fromDir: manifestsRoot, toPath: manifest.path);
+      if (relative.isEmpty) {
+        continue;
+      }
+      final parts = relative.split(RegExp(r'[\\/]')).where((part) => part.isNotEmpty).toList();
+      if (parts.length < 3) {
+        continue;
+      }
+      final serverId = parts[0].trim();
+      final vmName = parts[1].trim();
+      final fileName = _baseName(manifest.path);
+      final vmDir = Directory('${manifestsRoot.path}${Platform.pathSeparator}$serverId${Platform.pathSeparator}$vmName');
+      final timestamp = _extractTimestampFromManifestFileName(fileName);
+      if (serverId.isEmpty || vmName.isEmpty || timestamp.isEmpty) {
+        continue;
+      }
+      final key = '$serverId|$vmName|$timestamp|${vmDir.path}';
+      grouped.putIfAbsent(key, () => <File>[]).add(manifest);
+    }
     final entries = <RestoreEntry>[];
-    for (final xmlFile in xmlFiles) {
-      final entry = await _buildRestoreEntryFromXmlFile(xmlFile, driver);
+    for (final group in grouped.entries) {
+      final entry = await _buildRestoreEntryFromManifestGroup(group.key, group.value, driver);
       if (entry != null) {
         entries.add(entry);
       }
@@ -897,58 +919,67 @@ class AgentHttpServer {
     return entries;
   }
 
-  Future<List<File>> _findXmlFiles(drv.BackupDriver driver) async {
-    final xmlFiles = <File>[];
-    await for (final file in driver.listXmlFiles()) {
-      xmlFiles.add(file);
+  Future<List<File>> _findManifestFiles(Directory manifestsRoot) async {
+    if (!await manifestsRoot.exists()) {
+      return <File>[];
     }
-    return xmlFiles;
+    final manifests = <File>[];
+    await for (final entity in manifestsRoot.list(recursive: true, followLinks: false)) {
+      if (entity is! File) {
+        continue;
+      }
+      final name = _baseName(entity.path);
+      if (name.endsWith('.manifest') || name.endsWith('.manifest.gz')) {
+        manifests.add(entity);
+      }
+    }
+    return manifests;
   }
 
-  Future<RestoreEntry?> _buildRestoreEntryFromXmlFile(File xmlFile, drv.BackupDriver driver) async {
+  String _relativePath({required Directory fromDir, required String toPath}) {
+    final from = fromDir.absolute.path;
+    final target = File(toPath).absolute.path;
+    if (target == from) {
+      return '';
+    }
+    final normalizedFrom = from.endsWith(Platform.pathSeparator) ? from : '$from${Platform.pathSeparator}';
+    if (!target.startsWith(normalizedFrom)) {
+      return '';
+    }
+    return target.substring(normalizedFrom.length);
+  }
+
+  Future<RestoreEntry?> _buildRestoreEntryFromManifestGroup(String key, List<File> manifests, drv.BackupDriver driver) async {
     try {
-      final xmlContent = await xmlFile.readAsString();
-      final vmName = _extractVmNameFromXml(xmlContent);
-      final diskBasenames = _extractDiskBasenamesFromXml(xmlContent);
-      final fileName = _baseName(xmlFile.path);
-      final timestamp = _extractTimestampFromFileName(fileName);
-      if (timestamp.isEmpty) {
+      final parts = key.split('|');
+      if (parts.length < 4) {
         return null;
       }
-      final location = driver.restoreLocationFromXml(xmlFile);
-      if (location == null) {
-        return null;
-      }
-      final vmDir = location.vmDir;
-      final serverId = location.serverId;
-      final diskNamesForTimestamp = await _collectDiskNamesForTimestamp(driver, vmDir, timestamp);
+      final serverId = parts[0];
+      final vmName = parts[1];
+      final timestamp = parts[2];
+      final vmDirPath = parts.sublist(3).join('|');
+      final vmDir = Directory(vmDirPath);
+      final diskBasenames = <String>[];
       final requiredDiskIds = <String>{};
-      for (final diskBase in diskBasenames) {
-        final diskDir = await driver.findDiskDirForTimestamp(vmDir, timestamp, diskBase);
-        File? chainFile = driver.findChainFileForTimestamp(vmDir, diskDir, timestamp, diskBase);
-        if (chainFile == null && driver is GdriveBackupDriver) {
-          chainFile = await driver.ensureChainFile(vmDir, timestamp, diskBase);
-        }
-        if (chainFile != null) {
-          final chainEntries = await _readChainEntries(chainFile);
-          if (chainEntries.isNotEmpty) {
-            for (final entry in chainEntries) {
-              requiredDiskIds.add(entry.diskId);
-            }
-            continue;
+      for (final manifest in manifests) {
+        final sourcePath = await _readManifestField(manifest, 'source_path');
+        if (sourcePath != null && sourcePath.trim().isNotEmpty) {
+          final base = sourcePath.split(RegExp(r'[\\/]')).last.trim();
+          if (base.isNotEmpty) {
+            diskBasenames.add(base);
           }
         }
-        requiredDiskIds.add(diskBase);
-      }
-      final missing = <String>[];
-      for (final diskId in requiredDiskIds) {
-        if (!_diskExistsForTimestamp(driver, diskId, diskNamesForTimestamp)) {
-          missing.add(diskId);
+        final diskId = await _readManifestField(manifest, 'disk_id');
+        if (diskId != null && diskId.trim().isNotEmpty) {
+          requiredDiskIds.add(diskId.trim());
         }
       }
+      final diskNamesForTimestamp = await _collectDiskNamesForTimestamp(vmDir, timestamp);
+      final missing = requiredDiskIds.where((diskId) => !_diskExistsForTimestamp(diskId, diskNamesForTimestamp)).toList();
       final serverName = _agentSettings.servers.firstWhere((server) => server.id == serverId, orElse: () => _missingServer()).name;
       return RestoreEntry(
-        xmlPath: xmlFile.path,
+        xmlPath: '${vmDir.path}${Platform.pathSeparator}${timestamp}__domain.xml',
         vmName: vmName,
         timestamp: timestamp,
         diskBasenames: diskBasenames,
@@ -957,43 +988,38 @@ class AgentHttpServer {
         sourceServerName: serverName.isEmpty ? serverId : serverName,
       );
     } catch (error, stackTrace) {
-      _hostLogError('Failed to parse restore XML: ${xmlFile.path}', error, stackTrace);
+      _hostLogError('Failed to parse restore entry from manifests: $key', error, stackTrace);
       return null;
     }
   }
 
-  List<String> _extractDiskBasenamesFromXml(String xml) {
-    final basenames = <String>[];
-    final diskBlocks = RegExp("<disk[^>]*device=['\\\"]disk['\\\"][^>]*>(.*?)</disk>", dotAll: true).allMatches(xml);
-    for (final diskBlock in diskBlocks) {
-      final blockContent = diskBlock.group(1) ?? '';
-      final sourceMatch = RegExp("<source[^>]*file=['\\\"]([^'\\\"]+)['\\\"]").firstMatch(blockContent);
-      if (sourceMatch == null) {
-        continue;
-      }
-      final sourcePath = sourceMatch.group(1) ?? '';
-      if (sourcePath.isEmpty) {
-        continue;
-      }
-      final baseName = sourcePath.split(RegExp(r'[\\/]')).last.trim();
-      if (baseName.isEmpty) {
-        continue;
-      }
-      basenames.add(baseName);
+  String _extractTimestampFromManifestFileName(String name) {
+    var value = name.trim();
+    if (name.endsWith('.manifest.gz')) {
+      value = name.substring(0, name.length - '.manifest.gz'.length).trim();
+    } else if (name.endsWith('.manifest')) {
+      value = name.substring(0, name.length - '.manifest'.length).trim();
     }
-    return basenames;
+    if (value.isEmpty) {
+      return '';
+    }
+    final separator = value.indexOf('__');
+    if (separator <= 0) {
+      return value;
+    }
+    return value.substring(0, separator).trim();
   }
 
-  Future<List<String>> _collectDiskNamesForTimestamp(drv.BackupDriver driver, Directory vmDir, String timestamp) async {
+  Future<List<String>> _collectDiskNamesForTimestamp(Directory vmDir, String timestamp) async {
     final names = <String>[];
-    final manifests = await driver.listManifestsForTimestamp(vmDir, timestamp);
+    final manifests = await _listManifestFilesForTimestamp(vmDir, timestamp);
     for (final manifest in manifests) {
       final diskId = await _readManifestField(manifest, 'disk_id');
       if (diskId != null && diskId.isNotEmpty) {
         names.add(diskId);
         continue;
       }
-      final name = driver.baseName(manifest.parent.path);
+      final name = _baseName(manifest.parent.path);
       if (name.isNotEmpty) {
         names.add(name);
       }
@@ -1001,14 +1027,18 @@ class AgentHttpServer {
     return names;
   }
 
-  bool _diskExistsForTimestamp(drv.BackupDriver driver, String diskBaseName, List<String> diskNamesForTimestamp) {
-    final normalizedDisk = driver.sanitizeFileName(diskBaseName);
+  bool _diskExistsForTimestamp(String diskBaseName, List<String> diskNamesForTimestamp) {
+    final normalizedDisk = _sanitizeFileName(diskBaseName);
     for (final diskId in diskNamesForTimestamp) {
       if (diskId == diskBaseName || diskId == normalizedDisk || diskId.endsWith(diskBaseName) || diskId.endsWith(normalizedDisk)) {
         return true;
       }
     }
     return false;
+  }
+
+  String _sanitizeFileName(String name) {
+    return name.trim().replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
   }
 
   static const String _sftpRemoteAppFolderName = 'VirtBackup';
@@ -1565,18 +1595,14 @@ class AgentHttpServer {
   void _startSanityJob(String jobId, String xmlPath, String timestamp) {
     unawaited(() async {
       try {
-        final xmlFile = File(xmlPath);
-        if (!await xmlFile.exists()) {
-          throw 'XML not found: $xmlPath';
-        }
         final driverInfo = _driverCatalog[_agentSettings.backupDriverId] ?? _driverCatalog['filesystem']!;
         final backupPath = _agentSettings.backupPath.trim();
         if (driverInfo.usesPath && backupPath.isEmpty) {
           throw 'Backup path is not configured';
         }
         final driver = _driverForBackupPath(backupPath);
-        final location = driver.restoreLocationFromXml(xmlFile);
-        if (location == null) {
+        final vmDir = _vmDirFromXmlPath(xmlPath);
+        if (!await vmDir.exists()) {
           throw 'Cannot resolve restore location for $xmlPath';
         }
         if (driver is! drv.RemoteBlobDriver) {
@@ -1585,8 +1611,7 @@ class AgentHttpServer {
             throw 'Blobs directory not found: ${blobsDir.path}';
           }
         }
-        final vmDir = location.vmDir;
-        final manifests = await driver.listManifestsForTimestamp(vmDir, timestamp);
+        final manifests = await _listManifestFilesForTimestamp(vmDir, timestamp);
         if (manifests.isEmpty) {
           throw 'No manifests found for $timestamp';
         }
@@ -1772,13 +1797,36 @@ class AgentHttpServer {
   }
 
   Future<RestorePrecheckResult> _restorePrecheck(ServerConfig server, String xmlPath) async {
-    final xmlFile = File(xmlPath);
-    if (!await xmlFile.exists()) {
+    final driverInfo = _driverCatalog[_agentSettings.backupDriverId] ?? _driverCatalog['filesystem']!;
+    final backupPath = _agentSettings.backupPath.trim();
+    if (driverInfo.usesPath && backupPath.isEmpty) {
       return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
     }
-    final xmlContent = await xmlFile.readAsString();
-    final vmName = _extractVmNameFromXml(xmlContent);
-    final diskSourcePaths = _extractDiskSourcePathsFromXml(xmlContent);
+    final vmDir = _vmDirFromXmlPath(xmlPath);
+    if (!await vmDir.exists()) {
+      return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
+    }
+    final timestamp = _extractTimestampFromManifestXmlPath(xmlPath);
+    if (timestamp.isEmpty) {
+      return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
+    }
+    final manifests = await _listManifestFilesForTimestamp(vmDir, timestamp);
+    if (manifests.isEmpty) {
+      return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
+    }
+    final diskSourcePaths = <String>[];
+    for (final manifest in manifests) {
+      final sourcePath = await _readManifestField(manifest, 'source_path');
+      final trimmed = sourcePath?.trim() ?? '';
+      if (trimmed.isEmpty) {
+        continue;
+      }
+      diskSourcePaths.add(trimmed);
+    }
+    final vmName = _extractVmNameFromXmlPath(xmlPath);
+    if (vmName.isEmpty) {
+      return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
+    }
     final vmExistsResult = await _host.runSshCommand(server, 'virsh dominfo "$vmName"');
     final vmExists = (vmExistsResult.exitCode ?? 1) == 0;
     if (!vmExists) {
@@ -1867,21 +1915,26 @@ class AgentHttpServer {
     });
   }
 
-  String _extractTimestampFromFileName(String fileName) {
-    final parts = fileName.split('__');
-    if (parts.isEmpty) {
+  String _extractTimestampFromManifestXmlPath(String xmlPath) {
+    final base = _baseName(xmlPath).trim();
+    final separator = base.indexOf('__');
+    if (separator <= 0) {
       return '';
     }
-    return parts.first.trim();
+    return base.substring(0, separator).trim();
   }
 
-  String _extractVmNameFromXml(String xml) {
-    final match = RegExp(r'<name>([^<]+)</name>').firstMatch(xml);
-    if (match == null) {
-      return 'Unknown VM';
+  String _extractVmNameFromXmlPath(String xmlPath) {
+    final normalized = xmlPath.replaceAll('\\', '/');
+    final segments = normalized.split('/').where((segment) => segment.isNotEmpty).toList();
+    if (segments.length < 2) {
+      return '';
     }
-    final name = match.group(1)?.trim() ?? '';
-    return name.isEmpty ? 'Unknown VM' : name;
+    return segments[segments.length - 2].trim();
+  }
+
+  Directory _vmDirFromXmlPath(String xmlPath) {
+    return File(xmlPath).parent;
   }
 
   void _setJobContext(String jobId, {String? source, String? target, String? driverLabel}) {
@@ -2023,24 +2076,6 @@ class AgentHttpServer {
     }
   }
 
-  List<String> _extractDiskSourcePathsFromXml(String xml) {
-    final sourcePaths = <String>[];
-    final diskBlocks = RegExp("<disk[^>]*device=['\\\"]disk['\\\"][^>]*>(.*?)</disk>", dotAll: true).allMatches(xml);
-    for (final diskBlock in diskBlocks) {
-      final blockContent = diskBlock.group(1) ?? '';
-      final sourceMatch = RegExp("<source[^>]*file=['\\\"]([^'\\\"]+)['\\\"]").firstMatch(blockContent);
-      if (sourceMatch == null) {
-        continue;
-      }
-      final sourcePath = sourceMatch.group(1)?.trim() ?? '';
-      if (sourcePath.isEmpty) {
-        continue;
-      }
-      sourcePaths.add(sourcePath);
-    }
-    return sourcePaths;
-  }
-
   Future<String?> _readManifestField(File manifest, String field) async {
     try {
       final lines = await _readManifestLines(manifest);
@@ -2067,33 +2102,42 @@ class AgentHttpServer {
     return manifest.readAsLines();
   }
 
-  Future<List<_ChainEntry>> _readChainEntries(File chainFile) async {
-    if (!await chainFile.exists()) {
-      return const <_ChainEntry>[];
+  Future<List<File>> _listManifestFilesForTimestamp(Directory vmDir, String timestamp) async {
+    final manifests = <File>[];
+    if (!await vmDir.exists()) {
+      return manifests;
     }
-    final lines = await chainFile.readAsLines();
-    final entries = <_ChainEntry>[];
-    String? currentPath;
-    String? currentDiskId;
-    for (final line in lines) {
-      final trimmed = line.trim();
-      if (trimmed.isEmpty) {
+    await for (final entity in vmDir.list(recursive: true, followLinks: false)) {
+      if (entity is! File) {
         continue;
       }
-      if (trimmed.startsWith('- path:')) {
-        currentPath = trimmed.substring('- path:'.length).trim();
-      } else if (trimmed.startsWith('path:')) {
-        currentPath = trimmed.substring('path:'.length).trim();
-      } else if (trimmed.startsWith('disk_id:')) {
-        currentDiskId = trimmed.substring('disk_id:'.length).trim();
+      final name = _baseName(entity.path).trim();
+      final isManifest = name.endsWith('.manifest') || name.endsWith('.manifest.gz');
+      if (!isManifest) {
+        continue;
       }
-      if (currentPath != null && currentDiskId != null) {
-        entries.add(_ChainEntry(path: currentPath, diskId: currentDiskId));
-        currentPath = null;
-        currentDiskId = null;
+      if (!_manifestMatchesTimestamp(name, timestamp)) {
+        continue;
       }
+      manifests.add(entity);
     }
-    return entries;
+    manifests.sort((a, b) => a.path.compareTo(b.path));
+    return manifests;
+  }
+
+  bool _manifestMatchesTimestamp(String fileName, String timestamp) {
+    var value = fileName.trim();
+    if (value.endsWith('.manifest.gz')) {
+      value = value.substring(0, value.length - '.manifest.gz'.length).trim();
+    } else if (value.endsWith('.manifest')) {
+      value = value.substring(0, value.length - '.manifest'.length).trim();
+    } else {
+      return false;
+    }
+    if (value == timestamp) {
+      return true;
+    }
+    return value.startsWith('${timestamp}__');
   }
 
   double _smoothSpeed(double current, double instant) {
@@ -2207,11 +2251,4 @@ class _NtfymeResult {
 
   factory _NtfymeResult.success(int statusCode, String body) => _NtfymeResult._(true, statusCode: statusCode, body: body);
   factory _NtfymeResult.failure(String error, {int? statusCode, String? body}) => _NtfymeResult._(false, statusCode: statusCode, body: body, error: error);
-}
-
-class _ChainEntry {
-  const _ChainEntry({required this.path, required this.diskId});
-
-  final String path;
-  final String diskId;
 }

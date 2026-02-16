@@ -72,13 +72,13 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
   @override
   File manifestFile(String serverId, String vmName, String diskId, String timestamp, {required bool inProgress}) {
     final suffix = inProgress ? '.inprogress' : '';
-    final base = '${manifestsDir(serverId, vmName).path}${Platform.pathSeparator}$diskId';
+    final base = manifestsDir(serverId, vmName).path;
     return File('$base${Platform.pathSeparator}$timestamp.manifest$suffix');
   }
 
   @override
   File manifestGzFile(String serverId, String vmName, String diskId, String timestamp) {
-    final base = '${manifestsDir(serverId, vmName).path}${Platform.pathSeparator}$diskId';
+    final base = manifestsDir(serverId, vmName).path;
     return File('$base${Platform.pathSeparator}$timestamp.manifest.gz');
   }
 
@@ -89,130 +89,6 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
     }
     final shard = hash.substring(0, 2);
     return File('${blobsDir().path}${Platform.pathSeparator}$shard${Platform.pathSeparator}$hash');
-  }
-
-  @override
-  Stream<File> listXmlFiles() async* {
-    final root = _rootDir();
-    if (!await root.exists()) {
-      return;
-    }
-    await for (final entity in root.list(recursive: true, followLinks: false)) {
-      if (entity is! File) {
-        continue;
-      }
-      final name = baseName(entity.path);
-      if (name.endsWith('.xml') && !name.endsWith('.xml.inprogress')) {
-        yield entity;
-      }
-    }
-  }
-
-  @override
-  RestoreLocation? restoreLocationFromXml(File xmlFile) {
-    final vmDir = xmlFile.parent;
-    final serverDir = vmDir.parent;
-    final serverId = baseName(serverDir.path);
-    final vmName = baseName(vmDir.path);
-    if (serverId.isEmpty || vmName.isEmpty) {
-      return null;
-    }
-    return RestoreLocation(vmDir: vmDir, serverId: serverId, vmName: vmName);
-  }
-
-  @override
-  Future<File?> findManifestForTimestamp(Directory vmDir, String timestamp, String diskBaseName) async {
-    final diskId = sanitizeFileName(diskBaseName);
-    await for (final entity in vmDir.list(followLinks: false)) {
-      if (entity is! Directory && entity is! Link) {
-        continue;
-      }
-      final name = baseName(entity.path);
-      if (name != diskId && name != diskBaseName) {
-        continue;
-      }
-      final manifest = await _findManifestFileForTimestamp(entity.path, timestamp);
-      if (manifest != null) {
-        return manifest;
-      }
-    }
-    return null;
-  }
-
-  @override
-  Future<Directory?> findDiskDirForTimestamp(Directory vmDir, String timestamp, String diskBaseName) async {
-    final diskId = sanitizeFileName(diskBaseName);
-    await for (final entity in vmDir.list(followLinks: false)) {
-      if (entity is! Directory && entity is! Link) {
-        continue;
-      }
-      final name = baseName(entity.path);
-      if (name != diskId && name != diskBaseName) {
-        continue;
-      }
-      final diskDir = entity is Directory ? entity : Directory(entity.path);
-      final manifest = await _findManifestFileForTimestamp(diskDir.path, timestamp);
-      final chainFile = findChainFileForTimestamp(vmDir, diskDir, timestamp, diskBaseName);
-      if (manifest != null || chainFile != null) {
-        return diskDir;
-      }
-    }
-    return null;
-  }
-
-  @override
-  File? findChainFileForTimestamp(Directory vmDir, Directory? diskDir, String timestamp, String diskBaseName) {
-    final diskId = sanitizeFileName(diskBaseName);
-    final vmChainFile = File('${vmDir.path}${Platform.pathSeparator}${timestamp}__$diskId.chain');
-    if (vmChainFile.existsSync()) {
-      return vmChainFile;
-    }
-    return null;
-  }
-
-  @override
-  Future<List<File>> listManifestsForTimestamp(Directory vmDir, String timestamp) async {
-    final manifests = <File>[];
-    await for (final entity in vmDir.list(followLinks: false)) {
-      if (entity is! Directory && entity is! Link) {
-        continue;
-      }
-      final manifest = await _findManifestFileForTimestamp(entity.path, timestamp);
-      if (manifest != null) {
-        manifests.add(manifest);
-      }
-    }
-    return manifests;
-  }
-
-  @override
-  Future<File?> findManifestBySourcePath(Directory vmDir, String timestamp, String sourcePath, Future<String?> Function(File manifest) readSourcePath) async {
-    await for (final entity in vmDir.list(followLinks: false)) {
-      if (entity is! Directory && entity is! Link) {
-        continue;
-      }
-      final manifest = await _findManifestFileForTimestamp(entity.path, timestamp);
-      if (manifest == null) {
-        continue;
-      }
-      final storedPath = await readSourcePath(manifest);
-      if (storedPath != null && storedPath.trim() == sourcePath.trim()) {
-        return manifest;
-      }
-    }
-    return null;
-  }
-
-  @override
-  Future<File?> findManifestForChainEntry(Directory vmDir, String timestamp, String diskId, String sourcePath, Future<String?> Function(File manifest) readSourcePath) async {
-    final byDiskId = await findManifestForTimestamp(vmDir, timestamp, diskId);
-    if (byDiskId != null) {
-      final storedPath = await readSourcePath(byDiskId);
-      if (storedPath != null && storedPath.trim() == sourcePath.trim()) {
-        return byDiskId;
-      }
-    }
-    return findManifestBySourcePath(vmDir, timestamp, sourcePath, readSourcePath);
   }
 
   @override
@@ -398,17 +274,5 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
         await entity.delete();
       } catch (_) {}
     }
-  }
-
-  Future<File?> _findManifestFileForTimestamp(String directoryPath, String timestamp) async {
-    final manifest = File('$directoryPath${Platform.pathSeparator}$timestamp.manifest');
-    if (await manifest.exists()) {
-      return manifest;
-    }
-    final gzManifest = File('$directoryPath${Platform.pathSeparator}$timestamp.manifest.gz');
-    if (await gzManifest.exists()) {
-      return gzManifest;
-    }
-    return null;
   }
 }

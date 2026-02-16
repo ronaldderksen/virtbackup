@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -185,11 +186,6 @@ class BackupAgent {
       if (xml.isEmpty) {
         throw 'dumpxml returned empty output';
       }
-      final xmlWrite = driver.startXmlWrite(serverFolderName, vmFolderName, backupTimestamp);
-      xmlWrite.sink.write(xml);
-      await xmlWrite.sink.flush();
-      await xmlWrite.sink.close();
-      await xmlWrite.commit();
 
       final activeDisks = await _dependencies.loadVmDiskPaths(server, vm);
       final inactiveDisks = await _dependencies.loadVmDiskPaths(server, vm, inactive: true);
@@ -267,13 +263,6 @@ class BackupAgent {
 
       for (final plan in backupPlans) {
         _ensureNotCanceled();
-        if (plan.chain.length > 1) {
-          final chainWrite = driver.startChainWrite(serverFolderName, vmFolderName, backupTimestamp, plan.topDiskId);
-          chainWrite.sink.write(_formatChainMetadata(plan));
-          await chainWrite.sink.flush();
-          await chainWrite.sink.close();
-          await chainWrite.commit();
-        }
         for (final chainItem in plan.chain) {
           _ensureNotCanceled();
           final diskId = chainItem.diskId;
@@ -291,6 +280,8 @@ class BackupAgent {
             vmName: vm.name,
             sourcePath: sourcePath,
             server: server,
+            domainXml: xml,
+            chain: plan.chain,
           );
           if (!usedHashblocks) {
             _setProgress(_progress.copyWith(statusMessage: 'Backup ${_progress.completedDisks + 1} of ${_progress.totalDisks}: $diskId'));
@@ -304,6 +295,8 @@ class BackupAgent {
               vmName: vm.name,
               sourcePath: sourcePath,
               server: server,
+              domainXml: xml,
+              chain: plan.chain,
               streamRemoteFile: (onChunk) => _dependencies.streamRemoteFile(server, sourcePath, onChunk: onChunk),
             );
           }
@@ -679,6 +672,8 @@ class BackupAgent {
     required String vmName,
     required String sourcePath,
     required ServerConfig server,
+    required String domainXml,
+    required List<_DiskChainItem> chain,
     required Future<void> Function(Future<void> Function(List<int> chunk) onChunk) streamRemoteFile,
   }) async {
     _ensureNotCanceled();
@@ -698,6 +693,7 @@ class BackupAgent {
       sink.writeln('file_size: $fileSize');
     }
     sink.writeln('timestamp: ${DateTime.now().toUtc().toIso8601String()}');
+    _writeManifestEmbeddedMetadata(sink, domainXml: domainXml, chain: chain);
     sink.writeln('blocks:');
 
     var index = 0;
@@ -788,6 +784,8 @@ class BackupAgent {
         zeroRunStart = -1;
         zeroRunEnd = -1;
       }
+      sink.writeln('EOF');
+      sink.writeln();
     } finally {
       await _drainPendingWrites();
       await sink.flush();
@@ -807,6 +805,8 @@ class BackupAgent {
     required String vmName,
     required String sourcePath,
     required ServerConfig server,
+    required String domainXml,
+    required List<_DiskChainItem> chain,
   }) async {
     final remoteHashblocksPath = await _dependencies.ensureHashblocks(server);
     if (remoteHashblocksPath == null) {
@@ -825,6 +825,7 @@ class BackupAgent {
     sink.writeln('source_path: $sourcePath');
     sink.writeln('file_size: $fileSize');
     sink.writeln('timestamp: ${DateTime.now().toUtc().toIso8601String()}');
+    _writeManifestEmbeddedMetadata(sink, domainXml: domainXml, chain: chain);
     sink.writeln('blocks:');
 
     var hashblocksBytes = 0;
@@ -1139,6 +1140,8 @@ class BackupAgent {
       _logInfo(
         'hashblocks done: lines=${hashblocksWorker.totalLines} existing=${hashblocksWorker.existingBlocks} missing=${hashblocksWorker.missingBlocks} zero=${hashblocksWorker.zeroBlocks} speed=${doneMbPerSec.toStringAsFixed(1)}MB/s total=${doneTotalMb.toStringAsFixed(1)}MB',
       );
+      sink.writeln('EOF');
+      sink.writeln();
       await sink.flush();
       await sink.close();
       manifestClosed = true;
@@ -1333,16 +1336,34 @@ class BackupAgent {
     }
   }
 
-  String _formatChainMetadata(_DiskBackupPlan plan) {
-    final buffer = StringBuffer();
-    buffer.writeln('version: 1');
-    buffer.writeln('disk_id: ${plan.topDiskId}');
-    buffer.writeln('chain:');
-    for (final item in plan.chain) {
-      buffer.writeln('- path: ${item.sourcePath}');
-      buffer.writeln('  disk_id: ${item.diskId}');
+  void _writeManifestEmbeddedMetadata(IOSink sink, {required String domainXml, required List<_DiskChainItem> chain}) {
+    sink.writeln('meta:');
+    sink.writeln('  format: inline_v1');
+    sink.writeln('  domain_xml_encoding: base64+gzip');
+    sink.writeln('  chain_encoding: yaml');
+    sink.writeln('domain_xml_b64_gz: |');
+    final encodedXml = _encodeGzipBase64(domainXml);
+    for (var start = 0; start < encodedXml.length; start += 120) {
+      final end = start + 120 < encodedXml.length ? start + 120 : encodedXml.length;
+      sink.writeln('  ${encodedXml.substring(start, end)}');
     }
-    return buffer.toString();
+    sink.writeln('chain:');
+    if (chain.isEmpty) {
+      sink.writeln('  []');
+      return;
+    }
+    for (var index = 0; index < chain.length; index += 1) {
+      final item = chain[index];
+      sink.writeln('  - order: $index');
+      sink.writeln('    disk_id: ${item.diskId}');
+      sink.writeln('    path: ${item.sourcePath}');
+    }
+  }
+
+  String _encodeGzipBase64(String value) {
+    final bytes = utf8.encode(value);
+    final compressed = gzip.encode(bytes);
+    return base64.encode(compressed);
   }
 }
 

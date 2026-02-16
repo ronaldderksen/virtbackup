@@ -150,116 +150,67 @@ void restoreWorkerMain(Map<String, dynamic> init) {
       throw 'restore blob cache failed: filesystem destination path is empty';
     }
     final xmlFile = File(xmlPath);
-    if (!await xmlFile.exists()) {
-      sendResult(
-        AgentJobStatus(
-          id: jobId,
-          type: AgentJobType.restore,
-          state: AgentJobState.failure,
-          message: 'XML not found: $xmlPath',
-          totalUnits: 0,
-          completedUnits: 0,
-          bytesTransferred: 0,
-          speedBytesPerSec: 0,
-          physicalBytesTransferred: 0,
-          physicalSpeedBytesPerSec: 0,
-          totalBytes: 0,
-          sanityBytesTransferred: 0,
-          sanitySpeedBytesPerSec: 0,
-        ),
-      );
-      return;
-    }
 
     try {
       await host.beginLargeTransferSession(server);
-      final xmlContent = await xmlFile.readAsString();
-      final vmName = _extractVmNameFromXml(xmlContent);
+      final vmName = _extractVmNameFromXmlPath(xmlPath);
       if (vmName.isNotEmpty) {
         mainPort.send({'type': _typeContext, 'jobId': jobId, 'source': xmlPath, 'target': '${server.name}:$vmName'});
       }
-      final diskSourcePaths = _extractDiskSourcePathsFromXml(xmlContent);
-      if (diskSourcePaths.isEmpty) {
-        throw 'No disk sources found in XML.';
-      }
       final timestamp = _extractTimestampFromFileName(_baseName(xmlFile.path));
-      final location = metadataDriver.restoreLocationFromXml(xmlFile);
-      if (location == null) {
-        throw 'Cannot resolve restore location for $xmlPath';
+      final localDir = _vmDirFromXmlPath(xmlPath);
+      final manifests = await _listManifestFilesForTimestamp(localDir, timestamp);
+      if (manifests.isEmpty) {
+        throw 'No manifests found for $timestamp';
       }
-      if (metadataDriver is GdriveBackupDriver) {
-        await metadataDriver.ensureXmlOnDrive(xmlFile);
+      final manifestDataByPath = <String, _ManifestData>{};
+      for (final manifest in manifests) {
+        final data = await _readManifestData(manifest);
+        manifestDataByPath[manifest.path] = data;
       }
-
-      final localDir = location.vmDir;
-      final remoteDiskTargets = <_RestoreDiskTarget>[];
-      final chainRebases = <_ChainRebase>[];
-
-      for (final sourcePath in diskSourcePaths) {
-        ensureNotCanceled();
-        final diskBaseName = sourcePath.split(RegExp(r'[\\/]')).last.trim();
-        if (diskBaseName.isEmpty) {
+      String? xmlContent;
+      for (final data in manifestDataByPath.values) {
+        if (xmlContent == null) {
+          xmlContent = data.domainXml;
           continue;
         }
-        final diskDir = await metadataDriver.findDiskDirForTimestamp(localDir, timestamp, diskBaseName);
-        File? chainFile = metadataDriver.findChainFileForTimestamp(localDir, diskDir, timestamp, diskBaseName);
-        if (chainFile == null && metadataDriver is GdriveBackupDriver) {
-          chainFile = await metadataDriver.ensureChainFile(localDir, timestamp, diskBaseName);
-        }
-        final chainEntries = chainFile == null ? <_ChainEntry>[] : await _readChainEntries(chainFile);
-        if (chainEntries.isEmpty) {
-          final manifest = await metadataDriver.findManifestForTimestamp(localDir, timestamp, diskBaseName);
-          if (manifest == null) {
-            final diskId = metadataDriver.sanitizeFileName(diskBaseName);
-            final expectedPath = metadataDriver.manifestFile(location.serverId, location.vmName, diskId, timestamp, inProgress: false).path;
-            throw 'Manifest not found for $diskBaseName (expected $expectedPath)';
-          }
-          final manifestBlocks = await _readHashesFromManifest(manifest);
-          if (manifestBlocks.blocks.isEmpty) {
-            throw 'No blocks found in manifest for $diskBaseName';
-          }
-          remoteDiskTargets.add(
-            _RestoreDiskTarget(
-              manifest: manifest,
-              diskBaseName: diskBaseName,
-              remotePath: sourcePath,
-              blocks: manifestBlocks.blocks,
-              blockSize: manifestBlocks.blockSize,
-              blockSizeMB: manifestBlocks.blockSizeMB,
-              fileSize: manifestBlocks.fileSize,
-            ),
-          );
-        } else {
-          if (chainEntries.length > 1) {
-            for (var i = chainEntries.length - 1; i > 0; i -= 1) {
-              chainRebases.add(_ChainRebase(overlayPath: chainEntries[i - 1].path, backingPath: chainEntries[i].path));
-            }
-          }
-          for (final chainEntry in chainEntries.reversed) {
-            final manifest = await metadataDriver.findManifestForChainEntry(localDir, timestamp, chainEntry.diskId, chainEntry.path, (manifest) => _readManifestField(manifest, 'source_path'));
-            if (manifest == null) {
-              final diskId = metadataDriver.sanitizeFileName(chainEntry.diskId);
-              final expectedPath = metadataDriver.manifestFile(location.serverId, location.vmName, diskId, timestamp, inProgress: false).path;
-              throw 'Manifest not found for ${chainEntry.diskId} (expected $expectedPath)';
-            }
-            final manifestBlocks = await _readHashesFromManifest(manifest);
-            if (manifestBlocks.blocks.isEmpty) {
-              throw 'No blocks found in manifest for ${chainEntry.diskId}';
-            }
-            remoteDiskTargets.add(
-              _RestoreDiskTarget(
-                manifest: manifest,
-                diskBaseName: chainEntry.diskId,
-                remotePath: chainEntry.path,
-                blocks: manifestBlocks.blocks,
-                blockSize: manifestBlocks.blockSize,
-                blockSizeMB: manifestBlocks.blockSizeMB,
-                fileSize: manifestBlocks.fileSize,
-              ),
-            );
-          }
+        if (xmlContent != data.domainXml) {
+          throw 'Manifest metadata mismatch: embedded domain_xml differs within timestamp $timestamp';
         }
       }
+      if (xmlContent == null || xmlContent.isEmpty) {
+        throw 'Manifest metadata invalid: embedded domain_xml missing for timestamp $timestamp';
+      }
+
+      final remoteDiskTargets = <_RestoreDiskTarget>[];
+      final seenRemotePaths = <String>{};
+      for (final manifest in manifests) {
+        ensureNotCanceled();
+        final manifestData = manifestDataByPath[manifest.path]!;
+        if (manifestData.blocks.isEmpty) {
+          throw 'No blocks found in manifest ${manifest.path}';
+        }
+        final sourcePath = manifestData.sourcePath.trim();
+        if (sourcePath.isEmpty) {
+          throw 'Manifest metadata invalid: source_path missing in ${manifest.path}';
+        }
+        if (!seenRemotePaths.add(sourcePath)) {
+          continue;
+        }
+        final diskBaseName = manifestData.diskId.trim().isEmpty ? sourcePath.split(RegExp(r'[\\\\/]')).last.trim() : manifestData.diskId.trim();
+        remoteDiskTargets.add(
+          _RestoreDiskTarget(
+            manifest: manifest,
+            diskBaseName: diskBaseName,
+            remotePath: sourcePath,
+            blocks: manifestData.blocks,
+            blockSize: manifestData.blockSize,
+            blockSizeMB: manifestData.blockSizeMB,
+            fileSize: manifestData.fileSize,
+          ),
+        );
+      }
+      final chainRebases = _collectChainRebases(manifestDataByPath.values.toList(), remoteDiskTargets.map((item) => item.remotePath).toSet());
 
       if (decision == 'overwrite') {
         ensureNotCanceled();
@@ -499,18 +450,59 @@ void restoreWorkerMain(Map<String, dynamic> init) {
   });
 }
 
+Directory _vmDirFromXmlPath(String xmlPath) {
+  return File(xmlPath).parent;
+}
+
+Future<List<File>> _listManifestFilesForTimestamp(Directory vmDir, String timestamp) async {
+  final manifests = <File>[];
+  if (!await vmDir.exists()) {
+    return manifests;
+  }
+  await for (final entity in vmDir.list(recursive: true, followLinks: false)) {
+    if (entity is! File) {
+      continue;
+    }
+    final name = _baseName(entity.path).trim();
+    final isManifest = name.endsWith('.manifest') || name.endsWith('.manifest.gz');
+    if (!isManifest) {
+      continue;
+    }
+    if (!_manifestMatchesTimestamp(name, timestamp)) {
+      continue;
+    }
+    manifests.add(entity);
+  }
+  manifests.sort((a, b) => a.path.compareTo(b.path));
+  return manifests;
+}
+
+bool _manifestMatchesTimestamp(String fileName, String timestamp) {
+  var value = fileName.trim();
+  if (value.endsWith('.manifest.gz')) {
+    value = value.substring(0, value.length - '.manifest.gz'.length).trim();
+  } else if (value.endsWith('.manifest')) {
+    value = value.substring(0, value.length - '.manifest'.length).trim();
+  } else {
+    return false;
+  }
+  if (value == timestamp) {
+    return true;
+  }
+  return value.startsWith('${timestamp}__');
+}
+
 class _Canceled implements Exception {
   const _Canceled();
 }
 
-String _extractVmNameFromXml(String xmlContent) {
-  final match = RegExp(r'<name>([^<]+)</name>').firstMatch(xmlContent);
-  return match?.group(1)?.trim() ?? '';
-}
-
-List<String> _extractDiskSourcePathsFromXml(String xmlContent) {
-  final matches = RegExp(r"<source[^>]+file='([^']+)'").allMatches(xmlContent);
-  return matches.map((match) => match.group(1)?.trim() ?? '').where((value) => value.isNotEmpty).toList();
+String _extractVmNameFromXmlPath(String xmlPath) {
+  final path = xmlPath.replaceAll('\\', '/');
+  final parts = path.split('/').where((part) => part.isNotEmpty).toList();
+  if (parts.length < 2) {
+    return '';
+  }
+  return parts[parts.length - 2];
 }
 
 String _extractTimestampFromFileName(String name) {
@@ -530,70 +522,107 @@ String _sanitizeFileName(String name) {
   return name.trim().replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
 }
 
-Future<List<_ChainEntry>> _readChainEntries(File chainFile) async {
-  final text = await chainFile.readAsString();
-  final entries = <_ChainEntry>[];
-  for (final line in text.split('\n')) {
-    final trimmed = line.trim();
-    if (trimmed.isEmpty || !trimmed.contains('->')) {
-      continue;
-    }
-    final parts = trimmed.split('->').map((part) => part.trim()).toList();
-    if (parts.length < 2) {
-      continue;
-    }
-    entries.add(_ChainEntry(diskId: parts[0], path: parts[1]));
-  }
-  return entries;
-}
-
-Future<String?> _readManifestField(File manifest, String field) async {
-  if (!await manifest.exists()) {
-    return null;
-  }
-  final lines = await _readManifestLines(manifest);
-  for (final line in lines) {
-    final trimmed = line.trim();
-    if (trimmed.startsWith('$field:')) {
-      return trimmed.substring(field.length + 1).trim();
-    }
-    if (trimmed == 'blocks:') {
-      break;
-    }
-  }
-  return null;
-}
-
-Future<List<String>> _readManifestLines(File manifest) async {
-  if (manifest.path.endsWith('.gz')) {
-    final bytes = await manifest.readAsBytes();
-    final decoded = gzip.decode(bytes);
-    final content = utf8.decode(decoded);
-    return const LineSplitter().convert(content);
-  }
-  return manifest.readAsLines();
-}
-
-Future<_ManifestBlocks> _readHashesFromManifest(File manifest) async {
+Future<String> _readManifestContent(File manifest) async {
   if (!await manifest.exists()) {
     throw 'Manifest not found: ${manifest.path}';
   }
-  final lines = await _readManifestLines(manifest);
+  if (manifest.path.endsWith('.gz')) {
+    final bytes = await manifest.readAsBytes();
+    final decoded = gzip.decode(bytes);
+    return utf8.decode(decoded);
+  }
+  return manifest.readAsString();
+}
+
+Future<_ManifestData> _readManifestData(File manifest) async {
+  final content = await _readManifestContent(manifest);
+  if (!_hasValidManifestEof(content)) {
+    throw 'manifest incomplete';
+  }
+  final lines = const LineSplitter().convert(content);
   var blockSize = 0;
   int? fileSize;
+  String? sourcePath;
+  String? diskId;
+  var sawChain = false;
+  var sawDomainXml = false;
+  final domainXmlBuffer = StringBuffer();
+  var inDomainXml = false;
+  var inChain = false;
+  _ChainEntry? pendingChainEntry;
+  final chain = <_ChainEntry>[];
   var inBlocks = false;
   final blocks = <_BlockRef>[];
-  for (final raw in lines) {
-    final line = raw.trim();
-    if (line.isEmpty) {
+  for (final rawLine in lines) {
+    if (inDomainXml && !rawLine.startsWith('  ')) {
+      inDomainXml = false;
+    }
+    if (inDomainXml) {
+      domainXmlBuffer.write(rawLine.substring(2).trim());
       continue;
     }
+    final line = rawLine.trim();
+    if (line.isEmpty || line == 'EOF') {
+      continue;
+    }
+    final isTopLevel = !rawLine.startsWith(' ');
+    if (isTopLevel) {
+      inChain = false;
+    }
     if (!inBlocks) {
+      if (inChain) {
+        if (line.startsWith('- order:')) {
+          if (pendingChainEntry != null) {
+            if (pendingChainEntry.order < 0 || pendingChainEntry.diskId.trim().isEmpty || pendingChainEntry.path.trim().isEmpty) {
+              throw 'Manifest metadata invalid: malformed chain entry in ${manifest.path}';
+            }
+            chain.add(pendingChainEntry);
+          }
+          final order = int.tryParse(line.substring('- order:'.length).trim()) ?? -1;
+          pendingChainEntry = _ChainEntry(order: order, diskId: '', path: '');
+          continue;
+        }
+        if (line.startsWith('disk_id:')) {
+          final current = pendingChainEntry;
+          if (current == null) {
+            throw 'Manifest metadata invalid: chain disk_id without order in ${manifest.path}';
+          }
+          pendingChainEntry = _ChainEntry(order: current.order, diskId: line.substring('disk_id:'.length).trim(), path: current.path);
+          continue;
+        }
+        if (line.startsWith('path:')) {
+          final current = pendingChainEntry;
+          if (current == null) {
+            throw 'Manifest metadata invalid: chain path without order in ${manifest.path}';
+          }
+          pendingChainEntry = _ChainEntry(order: current.order, diskId: current.diskId, path: line.substring('path:'.length).trim());
+          continue;
+        }
+      }
       if (line.startsWith('block_size:')) {
         blockSize = int.tryParse(line.substring(11).trim()) ?? 0;
       } else if (line.startsWith('file_size:')) {
         fileSize = int.tryParse(line.substring(10).trim());
+      } else if (line.startsWith('source_path:')) {
+        sourcePath = line.substring('source_path:'.length).trim();
+      } else if (line.startsWith('disk_id:')) {
+        diskId = line.substring('disk_id:'.length).trim();
+      } else if (line.startsWith('domain_xml_b64_gz:')) {
+        sawDomainXml = true;
+        inDomainXml = true;
+      } else if (line == 'chain:') {
+        sawChain = true;
+        inChain = true;
+      } else if (inChain && line == '[]') {
+        inChain = false;
       } else if (line == 'blocks:') {
+        if (pendingChainEntry != null) {
+          if (pendingChainEntry.order < 0 || pendingChainEntry.diskId.trim().isEmpty || pendingChainEntry.path.trim().isEmpty) {
+            throw 'Manifest metadata invalid: malformed chain entry in ${manifest.path}';
+          }
+          chain.add(pendingChainEntry);
+          pendingChainEntry = null;
+        }
         inBlocks = true;
       }
       continue;
@@ -621,8 +650,93 @@ Future<_ManifestBlocks> _readHashesFromManifest(File manifest) async {
       blocks.add(_BlockRef.hash(hash));
     }
   }
+  if (pendingChainEntry != null) {
+    if (pendingChainEntry.order < 0 || pendingChainEntry.diskId.trim().isEmpty || pendingChainEntry.path.trim().isEmpty) {
+      throw 'Manifest metadata invalid: malformed chain entry in ${manifest.path}';
+    }
+    chain.add(pendingChainEntry);
+  }
+  if (!sawDomainXml) {
+    throw 'Manifest metadata invalid: domain_xml_b64_gz missing in ${manifest.path}';
+  }
+  if (!sawChain) {
+    throw 'Manifest metadata invalid: chain missing in ${manifest.path}';
+  }
+  final encodedXml = domainXmlBuffer.toString().trim();
+  if (encodedXml.isEmpty) {
+    throw 'Manifest metadata invalid: domain_xml_b64_gz empty in ${manifest.path}';
+  }
+  final domainXml = _decodeDomainXml(encodedXml, manifest.path);
   final blockSizeMB = _blockSizeMbFromManifestBytes(blockSize, manifest.path);
-  return _ManifestBlocks(blockSize: blockSize, blockSizeMB: blockSizeMB, blocks: blocks, fileSize: fileSize);
+  return _ManifestData(
+    sourcePath: sourcePath?.trim() ?? '',
+    diskId: diskId?.trim() ?? '',
+    blockSize: blockSize,
+    blockSizeMB: blockSizeMB,
+    blocks: blocks,
+    fileSize: fileSize,
+    domainXml: domainXml,
+    chain: chain,
+  );
+}
+
+bool _hasValidManifestEof(String content) {
+  if (content == 'EOF\n' || content == 'EOF\n\n') {
+    return true;
+  }
+  return content.endsWith('\nEOF\n') || content.endsWith('\nEOF\n\n');
+}
+
+String _decodeDomainXml(String encoded, String manifestPath) {
+  try {
+    final compressed = base64.decode(encoded);
+    final bytes = gzip.decode(compressed);
+    final xml = utf8.decode(bytes);
+    if (xml.trim().isEmpty) {
+      throw StateError('empty xml');
+    }
+    return xml;
+  } catch (_) {
+    throw 'Manifest metadata invalid: cannot decode domain_xml_b64_gz in $manifestPath';
+  }
+}
+
+List<_ChainRebase> _collectChainRebases(List<_ManifestData> manifestData, Set<String> restoredPaths) {
+  final entriesByOrder = <int, _ChainEntry>{};
+  for (final data in manifestData) {
+    for (final entry in data.chain) {
+      final existing = entriesByOrder[entry.order];
+      if (existing == null) {
+        entriesByOrder[entry.order] = entry;
+        continue;
+      }
+      if (existing.path != entry.path || existing.diskId != entry.diskId) {
+        throw 'Manifest metadata mismatch: chain order conflict at order=${entry.order}';
+      }
+    }
+  }
+  if (entriesByOrder.isEmpty) {
+    return const <_ChainRebase>[];
+  }
+  final orders = entriesByOrder.keys.toList()..sort();
+  if (orders.first != 0) {
+    throw 'Manifest metadata invalid: chain order must start at 0';
+  }
+  for (var i = 1; i < orders.length; i += 1) {
+    if (orders[i] != orders[i - 1] + 1) {
+      throw 'Manifest metadata invalid: chain order must be contiguous';
+    }
+  }
+  final rebases = <_ChainRebase>[];
+  for (var i = orders.length - 1; i > 0; i -= 1) {
+    final lower = entriesByOrder[orders[i - 1]]!;
+    final upper = entriesByOrder[orders[i]]!;
+    if (!restoredPaths.contains(lower.path) || !restoredPaths.contains(upper.path)) {
+      continue;
+    }
+    rebases.add(_ChainRebase(overlayPath: lower.path, backingPath: upper.path));
+  }
+  return rebases;
 }
 
 int _blockSizeMbFromManifestBytes(int blockSizeBytes, String manifestPath) {
@@ -942,8 +1056,9 @@ class _RestoreDiskTarget {
 }
 
 class _ChainEntry {
-  const _ChainEntry({required this.diskId, required this.path});
+  const _ChainEntry({required this.order, required this.diskId, required this.path});
 
+  final int order;
   final String diskId;
   final String path;
 }
@@ -955,13 +1070,26 @@ class _ChainRebase {
   final String backingPath;
 }
 
-class _ManifestBlocks {
-  const _ManifestBlocks({required this.blockSize, required this.blockSizeMB, required this.blocks, required this.fileSize});
+class _ManifestData {
+  const _ManifestData({
+    required this.sourcePath,
+    required this.diskId,
+    required this.blockSize,
+    required this.blockSizeMB,
+    required this.blocks,
+    required this.fileSize,
+    required this.domainXml,
+    required this.chain,
+  });
 
+  final String sourcePath;
+  final String diskId;
   final int blockSize;
   final int blockSizeMB;
   final List<_BlockRef> blocks;
   final int? fileSize;
+  final String domainXml;
+  final List<_ChainEntry> chain;
 }
 
 class _BlockRef {

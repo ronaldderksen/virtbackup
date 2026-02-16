@@ -26,10 +26,7 @@ backup.base_path/
     manifests/
       <serverId>/
         <vmName>/
-          <timestamp>__domain.xml
-          <timestamp>__<diskId>.chain        (only if there is a backing chain)
-          <diskId>/
-            <timestamp>.manifest.gz
+          <timestamp>.manifest.gz
     tmp/
 ```
 
@@ -48,6 +45,16 @@ disk_id: <diskId>
 source_path: </remote/path/to/disk.qcow2>
 file_size: <bytes>          (present if known)
 timestamp: 2026-02-01T12:34:56.000Z
+meta:
+  format: inline_v1
+  domain_xml_encoding: base64+gzip
+  chain_encoding: yaml
+domain_xml_b64_gz: |
+  <base64-gzip payload>
+chain:
+  - order: 0
+    disk_id: <diskId>
+    path: </remote/path/to/disk.qcow2>
 blocks:
 ```
 
@@ -57,7 +64,12 @@ Blocks (0-based):
 1 -> <sha256>
 6 -> ZERO
 100-120 -> ZERO
+EOF
 ```
+
+Notes:
+- `domain.xml` and chain metadata are embedded inside each manifest.
+- Restore requires an `EOF` terminator line to accept a manifest as complete.
 
 ## Backup flow (agent)
 The agent creates a per-disk manifest and appends entries while the backup is running.
@@ -79,8 +91,8 @@ There are two paths:
    - A hash means "read blob `blobs/<blockSizeMB>/ab/<hash>` and write it to the output".
 3. The last (tail) block length can be smaller than the configured block size based on `file_size`.
 
-## Chain metadata (optional)
-If a disk has a backing chain, the agent writes a `*.chain` file in the VM directory listing chain entries (paths + disk_id). This is used to map restores to the correct manifest(s).
+## Chain metadata
+Chain metadata is embedded in each manifest (`chain:` section). No separate `*.chain` sidecar file is written.
 
 ## Concurrency / safety
 - Blob writes: atomic "temp -> rename" per driver (filesystem and gdrive) to avoid races and partially-written blobs.
