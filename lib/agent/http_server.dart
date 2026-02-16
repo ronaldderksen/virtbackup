@@ -584,6 +584,12 @@ class AgentHttpServer {
         final requestedDestinationId = (body['destinationId'] ?? '').toString().trim();
         final requestedDriver = (body['driverId'] ?? '').toString().trim();
         final driverParams = body['driverParams'] is Map ? Map<String, dynamic>.from(body['driverParams'] as Map) : <String, dynamic>{};
+        final blockSizeMBRaw = body['blockSizeMB'];
+        final blockSizeMBOverride = _parseBlockSizeMBOverride(blockSizeMBRaw);
+        if (blockSizeMBRaw != null && blockSizeMBOverride == null) {
+          _json(request, 400, {'error': 'Invalid blockSizeMB. Allowed values: 1, 2, 4, 8.'});
+          return;
+        }
         final freshRequested = body['fresh'] == true;
         if (vmName.isEmpty) {
           _json(request, 400, {'error': 'missing params'});
@@ -624,6 +630,7 @@ class AgentHttpServer {
           backupPath,
           driverIdOverride: resolvedDriverId,
           driverParams: driverParams.isNotEmpty ? driverParams : resolvedDestination.driverParams,
+          blockSizeMBOverride: blockSizeMBOverride,
           destination: resolvedDestination,
           freshRequested: effectiveFreshRequested,
         );
@@ -1230,8 +1237,8 @@ class AgentHttpServer {
   Map<String, _DriverDescriptor> _buildDriverRegistry({required String backupPath, required AppSettings settings}) {
     final trimmedPath = backupPath.trim();
     final sourceSettings = settings;
-    final filesystem = FilesystemBackupDriver(trimmedPath);
-    final dummy = DummyBackupDriver(trimmedPath, tmpWritesEnabled: sourceSettings.dummyDriverTmpWrites);
+    final filesystem = FilesystemBackupDriver(trimmedPath, blockSizeMB: sourceSettings.blockSizeMB);
+    final dummy = DummyBackupDriver(trimmedPath, tmpWritesEnabled: sourceSettings.dummyDriverTmpWrites, blockSizeMB: sourceSettings.blockSizeMB);
     final gdrive = identical(sourceSettings, _agentSettings)
         ? (_cachedGdriveDriver ??= GdriveBackupDriver(
             settings: sourceSettings,
@@ -1254,7 +1261,7 @@ class AgentHttpServer {
         usesPath: true,
         capabilities: filesystem.capabilities,
         validateStart: () => null,
-        create: (_) => FilesystemBackupDriver(trimmedPath),
+        create: (_) => FilesystemBackupDriver(trimmedPath, blockSizeMB: sourceSettings.blockSizeMB),
       ),
       'dummy': _DriverDescriptor(
         id: 'dummy',
@@ -1262,7 +1269,7 @@ class AgentHttpServer {
         usesPath: false,
         capabilities: dummy.capabilities,
         validateStart: () => null,
-        create: (params) => DummyBackupDriver(trimmedPath, tmpWritesEnabled: sourceSettings.dummyDriverTmpWrites, driverParams: params),
+        create: (params) => DummyBackupDriver(trimmedPath, tmpWritesEnabled: sourceSettings.dummyDriverTmpWrites, blockSizeMB: sourceSettings.blockSizeMB, driverParams: params),
       ),
       'gdrive': _DriverDescriptor(
         id: 'gdrive',
@@ -1412,6 +1419,7 @@ class AgentHttpServer {
     String backupPath, {
     String? driverIdOverride,
     Map<String, dynamic>? driverParams,
+    int? blockSizeMBOverride,
     _ResolvedDestination? destination,
     bool freshRequested = false,
   }) {
@@ -1447,6 +1455,7 @@ class AgentHttpServer {
           'driverId': driverId,
           'backupPath': backupPath,
           'driverParams': driverParams ?? const <String, dynamic>{},
+          'blockSizeMB': blockSizeMBOverride,
           'fresh': freshRequested,
           'settings': (destination?.settings ?? _agentSettings).toMap(),
           'destination': destination?.destination.toMap(),
@@ -1540,6 +1549,17 @@ class AgentHttpServer {
         control.workerIsolate = null;
       }
     });
+  }
+
+  int? _parseBlockSizeMBOverride(Object? value) {
+    if (value == null) {
+      return null;
+    }
+    final parsed = value is num ? value.toInt() : int.tryParse(value.toString().trim());
+    if (parsed == null || (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
+      return null;
+    }
+    return parsed;
   }
 
   void _startSanityJob(String jobId, String xmlPath, String timestamp) {

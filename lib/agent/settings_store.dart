@@ -32,7 +32,10 @@ class AppSettingsStore {
     try {
       final token = await loadAgentToken();
       return await _loadFromYamlFile(_file, token: token);
-    } catch (_) {
+    } catch (error) {
+      if (error is StateError && error.toString().contains('blockSizeMB')) {
+        rethrow;
+      }
       return AppSettings.empty();
     }
   }
@@ -123,7 +126,9 @@ class AppSettingsStore {
       return AppSettings.empty();
     }
     final normalized = _normalizeYaml(decoded);
-    final updated = _ensureDestinationDefaults(normalized);
+    final updatedDestinations = _ensureDestinationDefaults(normalized);
+    final updatedBlockSize = _ensureBlockSizeMb(normalized);
+    final updated = updatedDestinations || updatedBlockSize;
     if (updated) {
       final encoded = _ensureTrailingNewline(_toYaml(normalized));
       await file.writeAsString(encoded);
@@ -167,6 +172,23 @@ class AppSettingsStore {
       }
     }
     return changed;
+  }
+
+  bool _ensureBlockSizeMb(Map<String, dynamic> data) {
+    final value = data['blockSizeMB'];
+    if (value == null) {
+      data['blockSizeMB'] = 1;
+      return true;
+    }
+    final parsed = value is num ? value.toInt() : int.tryParse(value.toString().trim());
+    if (parsed == null || (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
+      throw StateError('Invalid blockSizeMB. Allowed values: 1, 2, 4, 8.');
+    }
+    if (value is! int) {
+      data['blockSizeMB'] = parsed;
+      return true;
+    }
+    return false;
   }
 
   Map<String, dynamic> _normalizeYaml(YamlMap map) {

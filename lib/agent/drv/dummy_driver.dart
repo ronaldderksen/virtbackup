@@ -3,10 +3,12 @@ import 'dart:io';
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 
 class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
-  DummyBackupDriver(this._destination, {required bool tmpWritesEnabled, Map<String, dynamic> driverParams = const <String, dynamic>{}})
+  DummyBackupDriver(this._destination, {required bool tmpWritesEnabled, required int blockSizeMB, Map<String, dynamic> driverParams = const <String, dynamic>{}})
     : _tmpWritesEnabled = tmpWritesEnabled,
+      _blockSizeMB = blockSizeMB,
       _throttleBytesPerSecond = _resolveThrottleBytesPerSecond(driverParams);
   final String _destination;
+  final int _blockSizeMB;
   static const String _appFolderName = 'VirtBackup';
   final bool _tmpWritesEnabled;
   final int? _throttleBytesPerSecond;
@@ -45,7 +47,7 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
 
   @override
   Directory blobsDir() {
-    return Directory('${_rootDir().path}${Platform.pathSeparator}blobs');
+    return Directory('${_rootDir().path}${Platform.pathSeparator}blobs${Platform.pathSeparator}$_blockSizeMB');
   }
 
   @override

@@ -9,10 +9,10 @@ Status: implemented. This document describes the dedup storage and manifest form
 - Implemented behind a storage driver (`filesystem`, `gdrive`, `dummy`).
 
 ## Block/Hash
-- Block size: **1 MiB** (`1024 * 1024` bytes).
+- Block size: configurable via `agent.yaml` key `blockSizeMB` (allowed: `1`, `2`, `4`, `8`; default persisted on startup: `1`).
 - Hash: SHA-256 over the raw block bytes.
 - Blob filename: hex SHA-256.
-- Directory sharding: `blobs/ab/<hash>` where `ab=hash[0..1]`.
+- Directory sharding: `blobs/<blockSizeMB>/ab/<hash>` where `ab=hash[0..1]`.
 - Zero blocks are not stored as blobs; they are recorded as `ZERO` runs in the manifest.
 
 ## Storage layout (filesystem driver)
@@ -21,7 +21,8 @@ The filesystem driver uses `backup.base_path` as its base path and creates and u
 backup.base_path/
   VirtBackup/
     blobs/
-      ab/<sha256>
+      <blockSizeMB>/
+        ab/<sha256>
     manifests/
       <serverId>/
         <vmName>/
@@ -32,7 +33,7 @@ backup.base_path/
     tmp/
 ```
 
-The Google Drive driver uses the same logical layout (manifests + `blobs/ab/<hash>`), but syncs to Drive and keeps a local cache.
+The Google Drive driver uses the same logical layout (manifests + `blobs/<blockSizeMB>/ab/<hash>`), but syncs to Drive and keeps a local cache.
 
 ## Manifest format (text, gzipped)
 One manifest is written per disk and stored as `.manifest.gz`.
@@ -69,14 +70,14 @@ There are two paths:
    - Backpressure: the agent sends `LIMIT` updates to hashblocks based on writer backlog.
 2. **Stream fallback path**
    - If `hashblocks` is not available, the agent streams the entire disk file via SFTP.
-   - The agent chunks into 1 MiB blocks, hashes locally, and writes only missing blobs.
+   - The agent chunks using configured `blockSizeMB`, hashes locally, and writes only missing blobs.
 
 ## Restore flow (agent)
 1. The agent resolves the correct `*.manifest.gz` per disk.
 2. The manifest is read; for each block:
    - `ZERO` means "write zero bytes" for the block range.
-   - A hash means "read blob `blobs/ab/<hash>` and write it to the output".
-3. The last (tail) block length can be smaller than 1 MiB based on `file_size`.
+   - A hash means "read blob `blobs/<blockSizeMB>/ab/<hash>` and write it to the output".
+3. The last (tail) block length can be smaller than the configured block size based on `file_size`.
 
 ## Chain metadata (optional)
 If a disk has a backing chain, the agent writes a `*.chain` file in the VM directory listing chain entries (paths + disk_id). This is used to map restores to the correct manifest(s).

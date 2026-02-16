@@ -37,6 +37,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   String get _username => _settings.sftpUsername.trim();
   String get _password => _settings.sftpPassword;
   String get _basePath => _settings.sftpBasePath.trim();
+  int get _blockSizeMB => _settings.blockSizeMB;
 
   static int _resolveUploadConcurrency(AppSettings settings) {
     final destination = _resolveConcurrencyDestination(settings);
@@ -156,9 +157,9 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   Directory blobsDir() {
     final basePath = _settings.backupPath.trim();
     if (basePath.isEmpty) {
-      return Directory('${_cacheRoot.path}${Platform.pathSeparator}blobs');
+      return Directory('${_cacheRoot.path}${Platform.pathSeparator}blobs${Platform.pathSeparator}$_blockSizeMB');
     }
-    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}blobs');
+    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}blobs${Platform.pathSeparator}$_blockSizeMB');
   }
 
   @override
@@ -962,7 +963,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   // Keep remote structure scoped under a dedicated folder to avoid cluttering user-provided base paths.
   String _remoteRoot() => _remoteJoin(_normalizeRemotePath(_basePath), _remoteAppFolderName);
   String _remoteManifestsRoot() => _remoteJoin(_remoteRoot(), 'manifests');
-  String _remoteBlobsRoot() => _remoteJoin(_remoteRoot(), 'blobs');
+  String _remoteBlobsRoot() => _remoteJoin(_remoteRoot(), 'blobs', _blockSizeMB.toString());
   String _remoteTmpRoot() => _remoteJoin(_remoteRoot(), 'tmp');
 
   String _remoteManifestFolder(String serverId, String vmName) => _remoteJoin(_remoteManifestsRoot(), serverId, vmName);

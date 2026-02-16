@@ -127,29 +127,27 @@ void restoreWorkerMain(Map<String, dynamic> init) {
 
     final host = BackupAgentHost();
 
-    BackupDriver buildDriver() {
+    BackupDriver buildDriverForSettings(AppSettings driverSettings) {
       final factories = <String, BackupDriver Function()>{
-        'dummy': () => DummyBackupDriver(backupPath.trim(), tmpWritesEnabled: settings.dummyDriverTmpWrites),
+        'dummy': () => DummyBackupDriver(backupPath.trim(), tmpWritesEnabled: driverSettings.dummyDriverTmpWrites, blockSizeMB: driverSettings.blockSizeMB),
         'gdrive': () => GdriveBackupDriver(
-          settings: settings,
+          settings: driverSettings,
           persistSettings: (updated) async => mainPort.send({'type': _typeSettings, 'settings': updated.toMap()}),
           logInfo: (message) => LogWriter.logAgentSync(level: 'info', message: message),
         ),
-        'filesystem': () => FilesystemBackupDriver(backupPath.trim()),
-        'sftp': () => SftpBackupDriver(settings: settings, poolSessions: downloadConcurrency),
+        'filesystem': () => FilesystemBackupDriver(backupPath.trim(), blockSizeMB: driverSettings.blockSizeMB),
+        'sftp': () => SftpBackupDriver(settings: driverSettings, poolSessions: downloadConcurrency),
       };
       final factory = factories[driverId] ?? factories['filesystem']!;
       return factory();
     }
 
-    final driver = buildDriver();
-    BackupDriver? localBlobDriver;
-    if (useStoredBlobs || storeDownloadedBlobs) {
-      final filesystemPath = _resolveFilesystemDestinationPath(settings);
-      if (filesystemPath.isEmpty) {
-        throw 'restore blob cache failed: filesystem destination path is empty';
-      }
-      localBlobDriver = FilesystemBackupDriver(filesystemPath);
+    final metadataDriver = buildDriverForSettings(settings.copyWith(blockSizeMB: 1));
+    final blobDriversByBlockSizeMB = <int, BackupDriver>{};
+    final localBlobDriversByBlockSizeMB = <int, BackupDriver>{};
+    final filesystemPath = (useStoredBlobs || storeDownloadedBlobs) ? _resolveFilesystemDestinationPath(settings) : '';
+    if ((useStoredBlobs || storeDownloadedBlobs) && filesystemPath.isEmpty) {
+      throw 'restore blob cache failed: filesystem destination path is empty';
     }
     final xmlFile = File(xmlPath);
     if (!await xmlFile.exists()) {
@@ -185,12 +183,12 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         throw 'No disk sources found in XML.';
       }
       final timestamp = _extractTimestampFromFileName(_baseName(xmlFile.path));
-      final location = driver.restoreLocationFromXml(xmlFile);
+      final location = metadataDriver.restoreLocationFromXml(xmlFile);
       if (location == null) {
         throw 'Cannot resolve restore location for $xmlPath';
       }
-      if (driver is GdriveBackupDriver) {
-        await driver.ensureXmlOnDrive(xmlFile);
+      if (metadataDriver is GdriveBackupDriver) {
+        await metadataDriver.ensureXmlOnDrive(xmlFile);
       }
 
       final localDir = location.vmDir;
@@ -203,17 +201,17 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         if (diskBaseName.isEmpty) {
           continue;
         }
-        final diskDir = await driver.findDiskDirForTimestamp(localDir, timestamp, diskBaseName);
-        File? chainFile = driver.findChainFileForTimestamp(localDir, diskDir, timestamp, diskBaseName);
-        if (chainFile == null && driver is GdriveBackupDriver) {
-          chainFile = await driver.ensureChainFile(localDir, timestamp, diskBaseName);
+        final diskDir = await metadataDriver.findDiskDirForTimestamp(localDir, timestamp, diskBaseName);
+        File? chainFile = metadataDriver.findChainFileForTimestamp(localDir, diskDir, timestamp, diskBaseName);
+        if (chainFile == null && metadataDriver is GdriveBackupDriver) {
+          chainFile = await metadataDriver.ensureChainFile(localDir, timestamp, diskBaseName);
         }
         final chainEntries = chainFile == null ? <_ChainEntry>[] : await _readChainEntries(chainFile);
         if (chainEntries.isEmpty) {
-          final manifest = await driver.findManifestForTimestamp(localDir, timestamp, diskBaseName);
+          final manifest = await metadataDriver.findManifestForTimestamp(localDir, timestamp, diskBaseName);
           if (manifest == null) {
-            final diskId = driver.sanitizeFileName(diskBaseName);
-            final expectedPath = driver.manifestFile(location.serverId, location.vmName, diskId, timestamp, inProgress: false).path;
+            final diskId = metadataDriver.sanitizeFileName(diskBaseName);
+            final expectedPath = metadataDriver.manifestFile(location.serverId, location.vmName, diskId, timestamp, inProgress: false).path;
             throw 'Manifest not found for $diskBaseName (expected $expectedPath)';
           }
           final manifestBlocks = await _readHashesFromManifest(manifest);
@@ -227,6 +225,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
               remotePath: sourcePath,
               blocks: manifestBlocks.blocks,
               blockSize: manifestBlocks.blockSize,
+              blockSizeMB: manifestBlocks.blockSizeMB,
               fileSize: manifestBlocks.fileSize,
             ),
           );
@@ -237,10 +236,10 @@ void restoreWorkerMain(Map<String, dynamic> init) {
             }
           }
           for (final chainEntry in chainEntries.reversed) {
-            final manifest = await driver.findManifestForChainEntry(localDir, timestamp, chainEntry.diskId, chainEntry.path, (manifest) => _readManifestField(manifest, 'source_path'));
+            final manifest = await metadataDriver.findManifestForChainEntry(localDir, timestamp, chainEntry.diskId, chainEntry.path, (manifest) => _readManifestField(manifest, 'source_path'));
             if (manifest == null) {
-              final diskId = driver.sanitizeFileName(chainEntry.diskId);
-              final expectedPath = driver.manifestFile(location.serverId, location.vmName, diskId, timestamp, inProgress: false).path;
+              final diskId = metadataDriver.sanitizeFileName(chainEntry.diskId);
+              final expectedPath = metadataDriver.manifestFile(location.serverId, location.vmName, diskId, timestamp, inProgress: false).path;
               throw 'Manifest not found for ${chainEntry.diskId} (expected $expectedPath)';
             }
             final manifestBlocks = await _readHashesFromManifest(manifest);
@@ -254,6 +253,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
                 remotePath: chainEntry.path,
                 blocks: manifestBlocks.blocks,
                 blockSize: manifestBlocks.blockSize,
+                blockSizeMB: manifestBlocks.blockSizeMB,
                 fileSize: manifestBlocks.fileSize,
               ),
             );
@@ -347,12 +347,17 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         }
         await host.runSshCommand(server, 'rm -f "$remotePath"');
         final blobStream = _blobStream(
-          driver,
+          blobDriversByBlockSizeMB.putIfAbsent(target.blockSizeMB, () {
+            final driverSettings = settings.copyWith(blockSizeMB: target.blockSizeMB);
+            return buildDriverForSettings(driverSettings);
+          }),
           target.blocks,
           target.blockSize,
           target.fileSize,
           () => canceled,
-          localBlobDriver: localBlobDriver,
+          localBlobDriver: !(useStoredBlobs || storeDownloadedBlobs)
+              ? null
+              : localBlobDriversByBlockSizeMB.putIfAbsent(target.blockSizeMB, () => FilesystemBackupDriver(filesystemPath, blockSizeMB: target.blockSizeMB)),
           useStoredBlobs: useStoredBlobs,
           storeDownloadedBlobs: storeDownloadedBlobs,
           maxConcurrentDownloads: downloadConcurrency,
@@ -465,6 +470,19 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         ),
       );
     } finally {
+      for (final blobDriver in blobDriversByBlockSizeMB.values) {
+        try {
+          await blobDriver.closeConnections();
+        } catch (_) {}
+      }
+      for (final localBlobDriver in localBlobDriversByBlockSizeMB.values) {
+        try {
+          await localBlobDriver.closeConnections();
+        } catch (_) {}
+      }
+      try {
+        await metadataDriver.closeConnections();
+      } catch (_) {}
       await host.endLargeTransferSession(server);
     }
   }
@@ -603,7 +621,23 @@ Future<_ManifestBlocks> _readHashesFromManifest(File manifest) async {
       blocks.add(_BlockRef.hash(hash));
     }
   }
-  return _ManifestBlocks(blockSize: blockSize, blocks: blocks, fileSize: fileSize);
+  final blockSizeMB = _blockSizeMbFromManifestBytes(blockSize, manifest.path);
+  return _ManifestBlocks(blockSize: blockSize, blockSizeMB: blockSizeMB, blocks: blocks, fileSize: fileSize);
+}
+
+int _blockSizeMbFromManifestBytes(int blockSizeBytes, String manifestPath) {
+  const bytesPerMb = 1024 * 1024;
+  if (blockSizeBytes <= 0) {
+    throw 'restore invalid manifest block_size=$blockSizeBytes in $manifestPath (must be > 0 bytes)';
+  }
+  if (blockSizeBytes % bytesPerMb != 0) {
+    throw 'restore invalid manifest block_size=$blockSizeBytes in $manifestPath (must be divisible by $bytesPerMb)';
+  }
+  final blockSizeMB = blockSizeBytes ~/ bytesPerMb;
+  if (blockSizeMB != 1 && blockSizeMB != 2 && blockSizeMB != 4 && blockSizeMB != 8) {
+    throw 'restore invalid manifest block_size=$blockSizeBytes in $manifestPath (allowed: 1048576, 2097152, 4194304, 8388608)';
+  }
+  return blockSizeMB;
 }
 
 int _minInt(int a, int b) => a < b ? a : b;
@@ -888,13 +922,22 @@ class _BlobReadCache {
 }
 
 class _RestoreDiskTarget {
-  const _RestoreDiskTarget({required this.manifest, required this.diskBaseName, required this.remotePath, required this.blocks, required this.blockSize, required this.fileSize});
+  const _RestoreDiskTarget({
+    required this.manifest,
+    required this.diskBaseName,
+    required this.remotePath,
+    required this.blocks,
+    required this.blockSize,
+    required this.blockSizeMB,
+    required this.fileSize,
+  });
 
   final File manifest;
   final String diskBaseName;
   final String remotePath;
   final List<_BlockRef> blocks;
   final int blockSize;
+  final int blockSizeMB;
   final int? fileSize;
 }
 
@@ -913,9 +956,10 @@ class _ChainRebase {
 }
 
 class _ManifestBlocks {
-  const _ManifestBlocks({required this.blockSize, required this.blocks, required this.fileSize});
+  const _ManifestBlocks({required this.blockSize, required this.blockSizeMB, required this.blocks, required this.fileSize});
 
   final int blockSize;
+  final int blockSizeMB;
   final List<_BlockRef> blocks;
   final int? fileSize;
 }

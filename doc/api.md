@@ -291,12 +291,14 @@ Body:
 {
   "vmName":"my-vm",
   "destinationId":"dest_filesystem_1739440000000000",
+  "blockSizeMB":4,
   "fresh":false
 }
 ```
 
 Notes:
 - `destinationId` selects one configured destination from root-level `destinations`.
+- `blockSizeMB` is optional and overrides dedup block size for this backup job only (`1`, `2`, `4`, `8`).
 - For backward compatibility, `driverId` and `driverParams` are still accepted when present.
 - The filesystem destination path is resolved from `destinations[id=filesystem].params.path`.
 - `fresh: true` triggers a driver "fresh cleanup" (driver-specific behavior). This is only executed when the agent runs in debug mode.

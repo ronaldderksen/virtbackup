@@ -29,6 +29,7 @@ Key modules under `lib/agent`:
 ### Backup
 
 1. API call: `POST /servers/{id}/backup` (preferred: `destinationId` in body to select one configured destination; legacy `driverId` + `driverParams` are still accepted for compatibility).
+   - Optional per-job override: `blockSizeMB` (`1|2|4|8`) can override dedup block size for that backup run only.
 2. `AgentHttpServer` creates a job and calls `_startBackupJob`.
 3. `BackupAgent.runVmBackup` orchestrates the flow:
    - Validate state and start timers.
@@ -79,7 +80,7 @@ For each VM disk:
 
 The backup uses a deduplication model based on fixed-size blocks:
 
-- Block size: 1 MiB (1,048,576 bytes).
+- Block size: configured from `agent.yaml` key `blockSizeMB` (allowed values: `1`, `2`, `4`, `8` MiB; missing key is written as `1` on startup).
 - Each block produces a SHA-256 hash.
 - Manifests record hash or zero-runs for each block.
 - Blobs are stored per hash and are only written if missing.
@@ -267,7 +268,7 @@ The agent supports optional native SFTP via FFI:
 ## Runtime Notes
 
 - Backup and restore jobs run inside worker isolates to keep the HTTP listener responsive under heavy driver load (for example large Google Drive uploads).
-- Default block size: 1 MiB (1,048,576 bytes).
+- Dedup block size comes from `agent.yaml` (`blockSizeMB`) and is applied for backup; restore uses `block_size` from each manifest.
 - Progress sampling interval: `agentLogInterval` (currently 30s).
 - Backup agent port: 33551.
 - Uses SSH commands (`virsh`, `qemu-img`) on the remote host.
@@ -316,6 +317,8 @@ The agent supports optional native SFTP via FFI:
 - In the GUI Destination editor, `driverId: gdrive` supports OAuth connect via browser (PKCE); the returned tokens are stored in that destination's `params`.
 - Destination option `disableFresh: true` forces `fresh` off for that destination; backup requests with `fresh: true` continue and are logged.
 - `fresh` cleanup never deletes filesystem destination blobs (`destinations[id=filesystem].params.path/VirtBackup/blobs`).
+- Blob storage is block-size scoped: `.../VirtBackup/blobs/<blockSizeMB>/`.
+- On agent startup, missing `blockSizeMB` is auto-added as `1` and written back immediately.
 - For non-filesystem destinations, `storeBlobs` and `useBlobs` are persisted in `agent.yaml`.
 - On agent startup, missing `storeBlobs`/`useBlobs` keys on non-filesystem destinations are auto-added as `false` and written back immediately.
 - For non-filesystem destinations, `uploadConcurrency` (backup) and `downloadConcurrency` (restore) are persisted in `agent.yaml`.
@@ -329,6 +332,7 @@ The agent supports optional native SFTP via FFI:
 - Restore behavior for non-filesystem destinations:
   - `useBlobs: true`: restore tries local blobs from `destinations[id=filesystem].params.path` first; if present, remote download is skipped.
   - `storeBlobs: true`: blobs downloaded from remote during restore are also written to local filesystem blob storage.
+  - Restore derives blob path scope from each manifest `block_size` (bytes -> MiB `1|2|4|8`); invalid/non-divisible values fail restore with an explicit error.
   - For `driverId: sftp`, remote blob reads use native SFTP streaming with native handle reuse; no dartssh fallback is used for blob-read path.
   - Restore disk upload to the hypervisor host uses native SFTP only; no dartssh upload fallback is used.
   - Native SFTP upload writes use a non-blocking libssh2 loop with socket readiness waits (EAGAIN handling) instead of fully blocking per call.

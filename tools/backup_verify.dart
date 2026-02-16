@@ -26,6 +26,7 @@ class _Args {
     required this.cancelAfterRandom,
     required this.fresh,
     required this.driverParams,
+    required this.blockSizeMBOverride,
     this.destinationId,
     this.agentTokenFile,
     this.sshKeyPath,
@@ -48,6 +49,7 @@ class _Args {
   final bool cancelAfterRandom;
   final bool fresh;
   final Map<String, dynamic> driverParams;
+  final int? blockSizeMBOverride;
   final String? destinationId;
   final String? agentTokenFile;
   final String? sshKeyPath;
@@ -70,6 +72,7 @@ class _Args {
     bool? cancelAfterRandom,
     bool? fresh,
     Map<String, dynamic>? driverParams,
+    int? blockSizeMBOverride,
     String? destinationId,
     String? agentTokenFile,
     String? sshKeyPath,
@@ -92,6 +95,7 @@ class _Args {
       cancelAfterRandom: cancelAfterRandom ?? this.cancelAfterRandom,
       fresh: fresh ?? this.fresh,
       driverParams: driverParams ?? this.driverParams,
+      blockSizeMBOverride: blockSizeMBOverride ?? this.blockSizeMBOverride,
       destinationId: destinationId ?? this.destinationId,
       agentTokenFile: agentTokenFile ?? this.agentTokenFile,
       sshKeyPath: sshKeyPath ?? this.sshKeyPath,
@@ -194,6 +198,9 @@ void main(List<String> args) async {
 
     if (resolved.fresh) {
       stdout.writeln('Fresh cleanup requested: agent will handle cleanup (debug only).');
+    }
+    if (resolved.blockSizeMBOverride != null) {
+      stdout.writeln('Backup block size override for this run: ${resolved.blockSizeMBOverride} MiB');
     }
 
     if (resolved.skipBackup) {
@@ -396,6 +403,7 @@ _Args? _parseArgs(List<String> args) {
   var skipBackup = false;
   var cancelAfterRandom = false;
   var fresh = false;
+  int? blockSizeMBOverride;
   final driverParams = <String, dynamic>{};
   String? destinationId;
   String? agentToken;
@@ -454,6 +462,9 @@ _Args? _parseArgs(List<String> args) {
       case '--driver-param':
         _applyDriverParam(driverParams, _readValue(args, ++i, arg));
         break;
+      case '--block-size-mb':
+        blockSizeMBOverride = _parseBlockSizeMBOverride(_readValue(args, ++i, arg));
+        break;
       case '--token':
         agentToken = _readValue(args, ++i, arg);
         break;
@@ -491,6 +502,7 @@ _Args? _parseArgs(List<String> args) {
     skipBackup: skipBackup,
     cancelAfterRandom: cancelAfterRandom,
     fresh: fresh,
+    blockSizeMBOverride: blockSizeMBOverride,
     driverParams: driverParams,
     destinationId: destinationId,
     agentTokenFile: agentTokenFile,
@@ -530,6 +542,14 @@ dynamic _parseDriverParamValue(String valueRaw) {
     return numeric;
   }
   return valueRaw;
+}
+
+int _parseBlockSizeMBOverride(String raw) {
+  final parsed = int.tryParse(raw.trim());
+  if (parsed == null || (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
+    throw ArgumentError('Invalid --block-size-mb. Allowed values: 1, 2, 4, 8.');
+  }
+  return parsed;
 }
 
 HttpClient _createHttpClient(Uri baseUri) {
@@ -711,6 +731,9 @@ Future<String> _startBackup(http.Client client, _Args args) async {
   }
   if (args.driverParams.isNotEmpty) {
     payload['driverParams'] = args.driverParams;
+  }
+  if (args.blockSizeMBOverride != null) {
+    payload['blockSizeMB'] = args.blockSizeMBOverride;
   }
   final response = await client.post(uri, headers: {..._authHeaders(args), 'content-type': 'application/json'}, body: jsonEncode(payload));
   if (response.statusCode != 200) {
@@ -1041,6 +1064,7 @@ void _printUsage() {
   stdout.writeln('  --ssh-key <path>          Optional private key');
   stdout.writeln('  --dest <id>               Use destination id for backup + restore');
   stdout.writeln('  --driver-param <k=v>      Driver parameter (repeatable)');
+  stdout.writeln('  --block-size-mb <1|2|4|8> Override backup dedup block size for this run only');
   stdout.writeln('  --token <value>           Agent bearer token (overrides token file)');
   stdout.writeln('  --token-file <path>       Agent token file path');
   stdout.writeln('  --no-restore              Skip restore + md5 compare');

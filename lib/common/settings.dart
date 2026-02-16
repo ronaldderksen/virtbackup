@@ -19,6 +19,7 @@ class AppSettings {
     required this.servers,
     required this.connectionVerified,
     required this.hashblocksLimitBufferMb,
+    required this.blockSizeMB,
     required this.dummyDriverTmpWrites,
     required this.ntfymeToken,
     required this.gdriveScope,
@@ -45,6 +46,7 @@ class AppSettings {
   final List<ServerConfig> servers;
   final bool connectionVerified;
   final int hashblocksLimitBufferMb;
+  final int blockSizeMB;
   final bool dummyDriverTmpWrites;
   final String ntfymeToken;
   final String gdriveScope;
@@ -71,6 +73,7 @@ class AppSettings {
     List<ServerConfig>? servers,
     bool? connectionVerified,
     int? hashblocksLimitBufferMb,
+    int? blockSizeMB,
     bool? dummyDriverTmpWrites,
     String? ntfymeToken,
     String? gdriveScope,
@@ -97,6 +100,7 @@ class AppSettings {
       servers: servers ?? this.servers,
       connectionVerified: connectionVerified ?? this.connectionVerified,
       hashblocksLimitBufferMb: hashblocksLimitBufferMb ?? this.hashblocksLimitBufferMb,
+      blockSizeMB: blockSizeMB ?? this.blockSizeMB,
       dummyDriverTmpWrites: dummyDriverTmpWrites ?? this.dummyDriverTmpWrites,
       ntfymeToken: ntfymeToken ?? this.ntfymeToken,
       gdriveScope: gdriveScope ?? this.gdriveScope,
@@ -125,6 +129,7 @@ class AppSettings {
       'sftpBasePath': sftpBasePath,
       'connectionVerified': connectionVerified,
       'hashblocksLimitBufferMb': hashblocksLimitBufferMb,
+      'blockSizeMB': blockSizeMB,
       'dummyDriverTmpWrites': dummyDriverTmpWrites,
       'ntfymeToken': ntfymeToken,
       'gdriveScope': gdriveScope,
@@ -179,6 +184,7 @@ class AppSettings {
           : (selectedBackupDestination?.driverId.isNotEmpty == true ? selectedBackupDestination!.driverId : 'filesystem'),
       connectionVerified: json['connectionVerified'] == true,
       hashblocksLimitBufferMb: _parseHashblocksLimitBufferMb(json['hashblocksLimitBufferMb']),
+      blockSizeMB: _parseBlockSizeMB(json['blockSizeMB']),
       dummyDriverTmpWrites: json['dummyDriverTmpWrites'] == true,
       ntfymeToken: (json['ntfymeToken'] ?? '').toString(),
       gdriveScope: gdriveScope ?? (selectedGdrive?.params['scope'] ?? 'https://www.googleapis.com/auth/drive.file').toString(),
@@ -213,6 +219,7 @@ class AppSettings {
     servers: [],
     connectionVerified: false,
     hashblocksLimitBufferMb: 1024,
+    blockSizeMB: 1,
     dummyDriverTmpWrites: false,
     ntfymeToken: '',
     gdriveScope: 'https://www.googleapis.com/auth/drive.file',
@@ -324,6 +331,17 @@ class AppSettings {
     final parsed = value is num ? value.toInt() : int.tryParse(value?.toString() ?? '');
     if (parsed == null || parsed <= 0) {
       return 1024;
+    }
+    return parsed;
+  }
+
+  static int _parseBlockSizeMB(Object? value) {
+    if (value == null) {
+      return 1;
+    }
+    final parsed = value is num ? value.toInt() : int.tryParse(value.toString().trim());
+    if (parsed == null || (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
+      throw StateError('Invalid blockSizeMB. Allowed values: 1, 2, 4, 8.');
     }
     return parsed;
   }

@@ -24,6 +24,17 @@ Future<void> _deleteSharedBlobCacheIfNeeded() async {
   LogWriter.logAgentSync(level: 'info', message: 'Fresh cleanup: skipping local filesystem blob cleanup.');
 }
 
+int? _parseBlockSizeMBOverride(Object? value) {
+  if (value == null) {
+    return null;
+  }
+  final parsed = value is num ? value.toInt() : int.tryParse(value.toString().trim());
+  if (parsed == null || (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
+    throw StateError('Invalid blockSizeMB override. Allowed values: 1, 2, 4, 8.');
+  }
+  return parsed;
+}
+
 void backupWorkerMain(Map<String, dynamic> init) {
   final mainPort = init['sendPort'] as SendPort;
   final commandPort = ReceivePort();
@@ -41,6 +52,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
     final driverId = payload['driverId']?.toString() ?? 'filesystem';
     final backupPath = payload['backupPath']?.toString() ?? '';
     final driverParams = Map<String, dynamic>.from(payload['driverParams'] as Map? ?? const {});
+    final blockSizeMBOverride = _parseBlockSizeMBOverride(payload['blockSizeMB']);
     final freshRequested = payload['fresh'] == true;
     final settingsMap = Map<String, dynamic>.from(payload['settings'] as Map? ?? const {});
     final destinationMap = Map<String, dynamic>.from(payload['destination'] as Map? ?? const {});
@@ -48,6 +60,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
     final vmMap = Map<String, dynamic>.from(payload['vm'] as Map? ?? const {});
 
     final settings = AppSettings.fromMap(settingsMap);
+    final effectiveSettings = blockSizeMBOverride == null ? settings : settings.copyWith(blockSizeMB: blockSizeMBOverride);
     final selectedDestination = destinationMap.isEmpty ? null : BackupDestination.fromMap(destinationMap);
     final isFilesystemDestination = selectedDestination?.id == AppSettings.filesystemDestinationId;
     final uploadConcurrency = isFilesystemDestination
@@ -57,22 +70,22 @@ void backupWorkerMain(Map<String, dynamic> init) {
     final vm = VmEntry.fromMap(vmMap);
     await LogWriter.configureSourcePath(
       source: 'agent',
-      path: LogWriter.defaultPathForSource('agent', basePath: settings.backupPath.trim()),
+      path: LogWriter.defaultPathForSource('agent', basePath: effectiveSettings.backupPath.trim()),
     );
-    LogWriter.configureSourceLevel(source: 'agent', level: settings.logLevel);
+    LogWriter.configureSourceLevel(source: 'agent', level: effectiveSettings.logLevel);
 
     final host = BackupAgentHost();
 
     BackupDriver buildDriver() {
       final factories = <String, BackupDriver Function(Map<String, dynamic>)>{
-        'dummy': (params) => DummyBackupDriver(backupPath.trim(), tmpWritesEnabled: settings.dummyDriverTmpWrites, driverParams: params),
+        'dummy': (params) => DummyBackupDriver(backupPath.trim(), tmpWritesEnabled: effectiveSettings.dummyDriverTmpWrites, blockSizeMB: effectiveSettings.blockSizeMB, driverParams: params),
         'gdrive': (_) => GdriveBackupDriver(
-          settings: settings,
+          settings: effectiveSettings,
           persistSettings: (updated) async => mainPort.send({'type': _typeSettings, 'settings': updated.toMap()}),
           logInfo: (message) => LogWriter.logAgentSync(level: 'info', message: message),
         ),
-        'filesystem': (_) => FilesystemBackupDriver(backupPath.trim()),
-        'sftp': (_) => SftpBackupDriver(settings: settings, poolSessions: uploadConcurrency),
+        'filesystem': (_) => FilesystemBackupDriver(backupPath.trim(), blockSizeMB: effectiveSettings.blockSizeMB),
+        'sftp': (_) => SftpBackupDriver(settings: effectiveSettings, poolSessions: uploadConcurrency),
       };
       final factory = factories[driverId] ?? factories['filesystem']!;
       return factory(driverParams);
@@ -83,12 +96,13 @@ void backupWorkerMain(Map<String, dynamic> init) {
     agent = BackupAgent(
       dependencies: dependencies,
       onProgress: (progress) => mainPort.send({'type': _typeProgress, 'jobId': jobId, 'progress': progress.toMap()}),
+      blockSizeBytes: effectiveSettings.blockSizeMB * 1024 * 1024,
       onInfo: (message) => LogWriter.logAgentSync(level: 'info', message: message),
       onError: (message, error, stackTrace) {
         LogWriter.logAgentSync(level: 'info', message: '$message $error');
         LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
       },
-      hashblocksLimitBufferMb: settings.hashblocksLimitBufferMb,
+      hashblocksLimitBufferMb: effectiveSettings.hashblocksLimitBufferMb,
       writerConcurrencyOverride: uploadConcurrency,
     );
 

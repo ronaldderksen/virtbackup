@@ -115,9 +115,9 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   Directory blobsDir() {
     final basePath = _settings.backupPath.trim();
     if (basePath.isEmpty) {
-      return Directory('${_cacheRoot.path}${Platform.pathSeparator}blobs');
+      return Directory('${_cacheRoot.path}${Platform.pathSeparator}blobs${Platform.pathSeparator}${_settings.blockSizeMB}');
     }
-    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}blobs');
+    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}blobs${Platform.pathSeparator}${_settings.blockSizeMB}');
   }
 
   @override
@@ -175,7 +175,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   @override
   Future<Set<String>> listBlobNames(String shard) async {
-    final shardId = await _findFolderByPath(['blobs', shard]);
+    final shardId = await _findFolderByPath(<String>[..._blobsPathPrefix(), shard]);
     if (shardId == null || shardId.isEmpty) {
       return <String>{};
     }
@@ -288,7 +288,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       return;
     }
     final shardKey = hash.substring(0, 2);
-    await _ensureFolderByPath(['blobs', shardKey]);
+    await _ensureFolderByPath(<String>[..._blobsPathPrefix(), shardKey]);
   }
 
   @override
@@ -297,7 +297,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       return;
     }
     final shardKey = hash.substring(0, 2);
-    final parentId = await _findFolderByPath(['blobs', shardKey]);
+    final parentId = await _findFolderByPath(<String>[..._blobsPathPrefix(), shardKey]);
     if (parentId == null || parentId.isEmpty) {
       throw 'Blob shard folder not ready for $shardKey';
     }
@@ -350,7 +350,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       return null;
     }
     final shardKey = hash.substring(0, 2);
-    final folderId = await _findFolderByPath(['blobs', shardKey]);
+    final folderId = await _findFolderByPath(<String>[..._blobsPathPrefix(), shardKey]);
     if (folderId == null || folderId.isEmpty) {
       return null;
     }
@@ -602,8 +602,10 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     if (_blobsRootId != null) {
       return;
     }
-    _blobsRootId = await _ensureFolderByPath(['blobs']);
+    _blobsRootId = await _ensureFolderByPath(_blobsPathPrefix());
   }
+
+  List<String> _blobsPathPrefix() => <String>['blobs', _settings.blockSizeMB.toString()];
 
   Future<String> _ensureTmpFolder() async {
     if (_tmpFolderId != null) {

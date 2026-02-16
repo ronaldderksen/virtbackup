@@ -57,6 +57,7 @@ class BackupAgent {
   BackupAgent({
     required BackupAgentDependencies dependencies,
     required BackupProgressListener onProgress,
+    required int blockSizeBytes,
     LogInfo? onInfo,
     LogError? onError,
     int? writerBacklogBytesLimit,
@@ -64,6 +65,7 @@ class BackupAgent {
     int? writerConcurrencyOverride,
   }) : _dependencies = dependencies,
        _onProgress = onProgress,
+       _blockSize = blockSizeBytes,
        _onInfo = onInfo,
        _onError = onError,
        _writerBacklogBytesLimit = writerBacklogBytesLimit ?? _defaultWriterBacklogBytesLimit,
@@ -92,7 +94,7 @@ class BackupAgent {
   int _writerInFlightBytes = 0;
   int _driverBufferedBytes = 0;
   DateTime? _backupStartAt;
-  static const int _blockSize = 1024 * 1024;
+  final int _blockSize;
   static const int _sftpPrefetchWindow = 2;
   static const int _defaultWriterBacklogBytesLimit = 4 * 1024 * 1024 * 1024;
   final Set<Future<void>> _inFlightWrites = {};
