@@ -31,13 +31,6 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
 
   Directory _rootDir() => Directory('$_destination${Platform.pathSeparator}$_appFolderName');
 
-  Directory _manifestsRoot() => Directory('${_rootDir().path}${Platform.pathSeparator}manifests');
-
-  @override
-  Directory manifestsDir(String serverId, String vmName) {
-    return Directory('${_manifestsRoot().path}${Platform.pathSeparator}$serverId${Platform.pathSeparator}$vmName');
-  }
-
   @override
   Directory blobsDir() {
     return Directory('${_rootDir().path}${Platform.pathSeparator}blobs${Platform.pathSeparator}$_blockSizeMB');
@@ -46,33 +39,6 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
   @override
   Directory tmpDir() {
     return Directory('${_rootDir().path}${Platform.pathSeparator}tmp');
-  }
-
-  @override
-  File xmlFile(String serverId, String vmName, String timestamp, {required bool inProgress}) {
-    final suffix = inProgress ? '.inprogress' : '';
-    final base = manifestsDir(serverId, vmName).path;
-    return File('$base${Platform.pathSeparator}${timestamp}__domain.xml$suffix');
-  }
-
-  @override
-  File chainFile(String serverId, String vmName, String timestamp, String diskId, {required bool inProgress}) {
-    final suffix = inProgress ? '.inprogress' : '';
-    final base = manifestsDir(serverId, vmName).path;
-    return File('$base${Platform.pathSeparator}${timestamp}__$diskId.chain$suffix');
-  }
-
-  @override
-  File manifestFile(String serverId, String vmName, String diskId, String timestamp, {required bool inProgress}) {
-    final suffix = inProgress ? '.inprogress' : '';
-    final base = manifestsDir(serverId, vmName).path;
-    return File('$base${Platform.pathSeparator}$timestamp.manifest$suffix');
-  }
-
-  @override
-  File manifestGzFile(String serverId, String vmName, String diskId, String timestamp) {
-    final base = manifestsDir(serverId, vmName).path;
-    return File('$base${Platform.pathSeparator}$timestamp.manifest.gz');
   }
 
   @override
@@ -138,82 +104,56 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
 
   @override
   Future<void> prepareBackup(String serverId, String vmName) async {
-    await manifestsDir(serverId, vmName).create(recursive: true);
+    await _rootDir().create(recursive: true);
     await blobsDir().create(recursive: true);
   }
 
   @override
-  DriverFileWrite startXmlWrite(String serverId, String vmName, String timestamp) {
-    final file = xmlFile(serverId, vmName, timestamp, inProgress: true);
-    file.parent.createSync(recursive: true);
-    final sink = file.openWrite();
-    return DriverFileWrite(
-      sink: sink,
-      commit: () async {
-        final finalPath = file.path.substring(0, file.path.length - '.inprogress'.length);
-        final finalFile = File(finalPath);
-        if (await finalFile.exists()) {
-          await finalFile.delete();
-        }
-        if (await file.exists()) {
-          await file.rename(finalPath);
-        }
-      },
-    );
+  Future<void> uploadFile({required String relativePath, required File localFile}) async {
+    final finalFile = _relativeFile(relativePath);
+    final tempFile = File('${finalFile.path}.inprogress.${DateTime.now().microsecondsSinceEpoch}');
+    await tempFile.parent.create(recursive: true);
+    await tempFile.writeAsBytes(await localFile.readAsBytes());
+    if (await finalFile.exists()) {
+      await finalFile.delete();
+    }
+    await tempFile.rename(finalFile.path);
   }
 
   @override
-  DriverFileWrite startChainWrite(String serverId, String vmName, String timestamp, String diskId) {
-    final file = chainFile(serverId, vmName, timestamp, diskId, inProgress: true);
-    file.parent.createSync(recursive: true);
-    final sink = file.openWrite();
-    return DriverFileWrite(
-      sink: sink,
-      commit: () async {
-        final finalPath = file.path.substring(0, file.path.length - '.inprogress'.length);
-        final finalFile = File(finalPath);
-        if (await finalFile.exists()) {
-          await finalFile.delete();
-        }
-        if (await file.exists()) {
-          await file.rename(finalPath);
-        }
-      },
-    );
+  Future<List<String>> listRelativeFiles(String relativeDir) async {
+    final normalized = _normalizeRelativePath(relativeDir);
+    final root = Directory('${_rootDir().path}${Platform.pathSeparator}${normalized.replaceAll('/', Platform.pathSeparator)}');
+    if (!await root.exists()) {
+      return <String>[];
+    }
+    final result = <String>[];
+    await for (final entity in root.list(recursive: true, followLinks: false)) {
+      if (entity is! File) {
+        continue;
+      }
+      final rel = _relativePath(from: root.path, to: entity.path);
+      if (rel.isEmpty) {
+        continue;
+      }
+      result.add('$normalized/$rel');
+    }
+    result.sort();
+    return result;
   }
 
   @override
-  DriverManifestWrite startManifestWrite(String serverId, String vmName, String diskId, String timestamp) {
-    final file = manifestFile(serverId, vmName, diskId, timestamp, inProgress: true);
-    file.parent.createSync(recursive: true);
-    final sink = file.openWrite();
-    return DriverManifestWrite(
-      sink: sink,
-      commit: () async {
-        final finalFile = manifestFile(serverId, vmName, diskId, timestamp, inProgress: false);
-        final finalGzFile = manifestGzFile(serverId, vmName, diskId, timestamp);
-        if (await finalFile.exists()) {
-          await finalFile.delete();
-        }
-        if (await file.exists()) {
-          await file.rename(finalFile.path);
-        }
-        await _gzipManifest(finalFile, finalGzFile);
-        try {
-          await finalFile.delete();
-        } catch (_) {}
-      },
-    );
-  }
-
-  @override
-  Future<void> finalizeManifest(DriverManifestWrite write) async {
-    await write.commit();
+  Future<List<int>?> readFileBytes(String relativePath) async {
+    final file = _relativeFile(relativePath);
+    if (!await file.exists()) {
+      return null;
+    }
+    return file.readAsBytes();
   }
 
   @override
   Future<void> freshCleanup() async {
-    await _deleteDirIfExists(_manifestsRoot());
+    await _deleteDirIfExists(Directory('${_rootDir().path}${Platform.pathSeparator}manifests'));
   }
 
   @override
@@ -245,15 +185,34 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
   }
 
   @override
-  String backupCompletedMessage(String manifestsPath) {
-    return 'Backup saved to $manifestsPath';
+  String backupCompletedMessage(String outputPath) {
+    return 'Backup saved to $outputPath';
   }
 
   @override
   Future<void> cleanupInProgressFiles() async {
-    await _deleteInProgressInDir(_manifestsRoot());
+    await _deleteInProgressInDir(_rootDir());
     await _deleteInProgressInDir(tmpDir());
     await _deleteInProgressInDir(blobsDir());
+  }
+
+  File _relativeFile(String relativePath) {
+    final normalized = _normalizeRelativePath(relativePath).replaceAll('/', Platform.pathSeparator);
+    return File('${_rootDir().path}${Platform.pathSeparator}$normalized');
+  }
+
+  String _normalizeRelativePath(String relativePath) {
+    return relativePath.replaceAll('\\', '/').split('/').where((part) => part.trim().isNotEmpty && part != '.').join('/');
+  }
+
+  String _relativePath({required String from, required String to}) {
+    final fromAbs = Directory(from).absolute.path;
+    final toAbs = File(to).absolute.path;
+    final prefix = fromAbs.endsWith(Platform.pathSeparator) ? fromAbs : '$fromAbs${Platform.pathSeparator}';
+    if (!toAbs.startsWith(prefix)) {
+      return '';
+    }
+    return toAbs.substring(prefix.length).replaceAll('\\', '/');
   }
 
   @override
@@ -282,16 +241,6 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
       try {
         await entity.delete();
       } catch (_) {}
-    }
-  }
-
-  Future<void> _gzipManifest(File source, File target) async {
-    final input = source.openRead();
-    final output = target.openWrite();
-    try {
-      await output.addStream(input.transform(gzip.encoder));
-    } finally {
-      await output.close();
     }
   }
 }

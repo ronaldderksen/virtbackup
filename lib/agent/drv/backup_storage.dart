@@ -46,26 +46,19 @@ abstract class BackupDriver {
 
   Future<void> ensureReady();
   Future<void> prepareBackup(String serverId, String vmName);
-  DriverFileWrite startXmlWrite(String serverId, String vmName, String timestamp);
-  DriverFileWrite startChainWrite(String serverId, String vmName, String timestamp, String diskId);
-  DriverManifestWrite startManifestWrite(String serverId, String vmName, String diskId, String timestamp);
-  Future<void> finalizeManifest(DriverManifestWrite write);
+  Future<void> uploadFile({required String relativePath, required File localFile});
+  Future<List<String>> listRelativeFiles(String relativeDir);
+  Future<List<int>?> readFileBytes(String relativePath);
   Future<void> freshCleanup();
   Future<void> ensureBlobDir(String hash);
   // Hard rule: always blind-write in every driver implementation.
   // No exists/list/stat/mkdir checks are allowed in this write path.
   // Existence/dir decisions are owned by agent-side cache/workers.
   Future<void> writeBlob(String hash, List<int> bytes);
-  String backupCompletedMessage(String manifestsPath);
+  String backupCompletedMessage(String outputPath);
 
-  Directory manifestsDir(String serverId, String vmName);
   Directory blobsDir();
   Directory tmpDir();
-
-  File xmlFile(String serverId, String vmName, String timestamp, {required bool inProgress});
-  File chainFile(String serverId, String vmName, String timestamp, String diskId, {required bool inProgress});
-  File manifestFile(String serverId, String vmName, String diskId, String timestamp, {required bool inProgress});
-  File manifestGzFile(String serverId, String vmName, String diskId, String timestamp);
   File blobFile(String hash);
 
   String baseName(String path);
@@ -84,18 +77,4 @@ abstract class RemoteBlobDriver {
 abstract class BlobDirectoryLister {
   Future<Set<String>> listBlobShards();
   Future<Set<String>> listBlobNames(String shard);
-}
-
-class DriverFileWrite {
-  DriverFileWrite({required this.sink, required this.commit});
-
-  final IOSink sink;
-  final Future<void> Function() commit;
-}
-
-class DriverManifestWrite {
-  DriverManifestWrite({required this.sink, required this.commit});
-
-  final IOSink sink;
-  final Future<void> Function() commit;
 }

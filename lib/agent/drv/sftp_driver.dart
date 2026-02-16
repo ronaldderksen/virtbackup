@@ -77,8 +77,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   static Directory _cacheRootForSettings(AppSettings settings) {
     final basePath = settings.backupPath.trim();
     if (basePath.isEmpty) {
-      // Fallback for misconfiguration; callers should configure backup.base_path.
-      return Directory('${_tempBase()}${Platform.pathSeparator}virtbackup_sftp_cache');
+      throw StateError('SFTP cache root requires backupPath in settings.');
     }
     final destinationId = _cacheKeyFromSettings(settings);
     return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}cache${Platform.pathSeparator}$destinationId');
@@ -119,22 +118,19 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       throw StateError('Native SFTP is required for SFTP driver.');
     }
     await _cacheRoot.create(recursive: true);
-    await manifestsDir('tmp', 'tmp').parent.create(recursive: true);
     await tmpDir().create(recursive: true);
   }
 
   @override
   Future<void> prepareBackup(String serverId, String vmName) async {
     _validateConfig();
-    await manifestsDir(serverId, vmName).create(recursive: true);
+    await _cacheRoot.create(recursive: true);
     await tmpDir().create(recursive: true);
 
     await _withSftp('prepare remote layout', (sftp) async {
       await _ensureRemoteDir(sftp, _remoteRoot());
-      await _ensureRemoteDir(sftp, _remoteManifestsRoot());
       await _ensureRemoteDir(sftp, _remoteBlobsRoot());
       await _ensureRemoteDir(sftp, _remoteTmpRoot());
-      await _ensureRemoteDir(sftp, _remoteManifestFolder(serverId, vmName));
     });
   }
 
@@ -154,11 +150,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   }
 
   @override
-  Directory manifestsDir(String serverId, String vmName) {
-    return Directory('${_cacheRoot.path}${Platform.pathSeparator}manifests${Platform.pathSeparator}$serverId${Platform.pathSeparator}$vmName');
-  }
-
-  @override
   Directory blobsDir() {
     final basePath = _settings.backupPath.trim();
     if (basePath.isEmpty) {
@@ -169,33 +160,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Directory tmpDir() => Directory('${_cacheRoot.path}${Platform.pathSeparator}tmp');
-
-  @override
-  File xmlFile(String serverId, String vmName, String timestamp, {required bool inProgress}) {
-    final suffix = inProgress ? '.inprogress' : '';
-    final base = manifestsDir(serverId, vmName).path;
-    return File('$base${Platform.pathSeparator}${timestamp}__domain.xml$suffix');
-  }
-
-  @override
-  File chainFile(String serverId, String vmName, String timestamp, String diskId, {required bool inProgress}) {
-    final suffix = inProgress ? '.inprogress' : '';
-    final base = manifestsDir(serverId, vmName).path;
-    return File('$base${Platform.pathSeparator}${timestamp}__$diskId.chain$suffix');
-  }
-
-  @override
-  File manifestFile(String serverId, String vmName, String diskId, String timestamp, {required bool inProgress}) {
-    final suffix = inProgress ? '.inprogress' : '';
-    final base = '${manifestsDir(serverId, vmName).path}${Platform.pathSeparator}$diskId';
-    return File('$base${Platform.pathSeparator}$timestamp.manifest$suffix');
-  }
-
-  @override
-  File manifestGzFile(String serverId, String vmName, String diskId, String timestamp) {
-    final base = '${manifestsDir(serverId, vmName).path}${Platform.pathSeparator}$diskId';
-    return File('$base${Platform.pathSeparator}$timestamp.manifest.gz');
-  }
 
   @override
   File blobFile(String hash) {
@@ -247,81 +211,50 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     });
   }
 
-  Future<T> _traceRemoteCall<T>(Future<T> Function() action) async => action();
+  Future<List<SftpName>> _remoteListDir(SftpClient sftp, String remotePath) => sftp.listdir(remotePath);
 
-  Future<List<SftpName>> _remoteListDir(SftpClient sftp, String remotePath) => _traceRemoteCall(() => sftp.listdir(remotePath));
+  Future<SftpFileAttrs> _remoteStat(SftpClient sftp, String remotePath) => sftp.stat(remotePath);
 
-  Future<SftpFileAttrs> _remoteStat(SftpClient sftp, String remotePath) => _traceRemoteCall(() => sftp.stat(remotePath));
+  Future<void> _remoteMkdir(SftpClient sftp, String remotePath) => sftp.mkdir(remotePath);
 
-  Future<void> _remoteMkdir(SftpClient sftp, String remotePath) => _traceRemoteCall(() => sftp.mkdir(remotePath));
+  Future<void> _remoteRename(SftpClient sftp, String fromPath, String toPath) => sftp.rename(fromPath, toPath);
 
-  Future<void> _remoteRename(SftpClient sftp, String fromPath, String toPath) => _traceRemoteCall(() => sftp.rename(fromPath, toPath));
+  Future<SftpFile> _remoteOpen(SftpClient sftp, String remotePath, SftpFileOpenMode mode) => sftp.open(remotePath, mode: mode);
 
-  Future<SftpFile> _remoteOpen(SftpClient sftp, String remotePath, SftpFileOpenMode mode) => _traceRemoteCall(() => sftp.open(remotePath, mode: mode));
+  Future<void> _remoteRemove(SftpClient sftp, String remotePath) => sftp.remove(remotePath);
 
-  Future<void> _remoteRemove(SftpClient sftp, String remotePath) => _traceRemoteCall(() => sftp.remove(remotePath));
+  Future<void> _remoteWriteAll(SftpFile remoteFile, String remotePath, Uint8List bytes) => remoteFile.writeBytes(bytes);
 
-  Future<void> _remoteWriteAll(SftpFile remoteFile, String remotePath, Uint8List bytes) => _traceRemoteCall(() => remoteFile.writeBytes(bytes));
-
-  Future<void> _remoteCloseFile(SftpFile remoteFile, String remotePath) => _traceRemoteCall(() => remoteFile.close());
+  Future<void> _remoteCloseFile(SftpFile remoteFile, String remotePath) => remoteFile.close();
 
   @override
-  DriverFileWrite startXmlWrite(String serverId, String vmName, String timestamp) {
-    final file = xmlFile(serverId, vmName, timestamp, inProgress: true);
-    file.parent.createSync(recursive: true);
-    final sink = file.openWrite();
-    return DriverFileWrite(
-      sink: sink,
-      commit: () async {
-        await _commitSmallRemoteFile(localFile: file, remotePath: _remoteJoin(_remoteManifestFolder(serverId, vmName), '${timestamp}__domain.xml'));
-      },
-    );
+  Future<void> uploadFile({required String relativePath, required File localFile}) async {
+    final normalizedPath = _normalizeRelativePath(relativePath);
+    await _commitSmallRemoteFile(localFile: localFile, remotePath: _remoteRelativePath(normalizedPath));
   }
 
   @override
-  DriverFileWrite startChainWrite(String serverId, String vmName, String timestamp, String diskId) {
-    final file = chainFile(serverId, vmName, timestamp, diskId, inProgress: true);
-    file.parent.createSync(recursive: true);
-    final sink = file.openWrite();
-    return DriverFileWrite(
-      sink: sink,
-      commit: () async {
-        await _commitSmallRemoteFile(localFile: file, remotePath: _remoteJoin(_remoteManifestFolder(serverId, vmName), '${timestamp}__$diskId.chain'));
-      },
-    );
+  Future<List<String>> listRelativeFiles(String relativeDir) async {
+    final normalizedDir = _normalizeRelativePath(relativeDir);
+    if (normalizedDir.isEmpty) {
+      return <String>[];
+    }
+    final remoteRoot = _remoteRelativePath(normalizedDir);
+    return _withSftp('list relative files', (sftp) async {
+      final result = <String>[];
+      await _listRemoteFilesRecursively(sftp: sftp, remoteDir: remoteRoot, relativePrefix: normalizedDir, out: result);
+      result.sort();
+      return result;
+    });
   }
 
   @override
-  DriverManifestWrite startManifestWrite(String serverId, String vmName, String diskId, String timestamp) {
-    final file = manifestFile(serverId, vmName, diskId, timestamp, inProgress: true);
-    file.parent.createSync(recursive: true);
-    final sink = file.openWrite();
-    return DriverManifestWrite(
-      sink: sink,
-      commit: () async {
-        final finalFile = manifestFile(serverId, vmName, diskId, timestamp, inProgress: false);
-        if (await finalFile.exists()) {
-          await finalFile.delete();
-        }
-        if (await file.exists()) {
-          await file.rename(finalFile.path);
-        }
-        final gzFile = manifestGzFile(serverId, vmName, diskId, timestamp);
-        await _gzipManifest(finalFile, gzFile);
-        try {
-          await finalFile.delete();
-        } catch (_) {}
-        await _withSftp('ensure disk manifest folder', (sftp) async {
-          await _ensureRemoteDir(sftp, _remoteDiskManifestFolder(serverId, vmName, diskId));
-        });
-        await _commitSmallRemoteFile(localFile: gzFile, remotePath: _remoteJoin(_remoteDiskManifestFolder(serverId, vmName, diskId), '$timestamp.manifest.gz'));
-      },
-    );
-  }
-
-  @override
-  Future<void> finalizeManifest(DriverManifestWrite write) async {
-    await write.commit();
+  Future<List<int>?> readFileBytes(String relativePath) async {
+    final normalized = _normalizeRelativePath(relativePath);
+    if (normalized.isEmpty) {
+      return null;
+    }
+    return _readRemoteFileBytes(_remoteRelativePath(normalized));
   }
 
   @override
@@ -443,7 +376,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   }
 
   @override
-  String backupCompletedMessage(String manifestsPath) => 'Backup saved to SFTP';
+  String backupCompletedMessage(String outputPath) => 'Backup saved to SFTP';
 
   @override
   String baseName(String path) {
@@ -458,7 +391,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Future<void> cleanupInProgressFiles() async {
-    await _deleteInProgressInDir(manifestsDir('tmp', 'tmp').parent);
+    await _deleteInProgressInDir(_cacheRoot);
     await _deleteInProgressInDir(tmpDir());
     await _deleteInProgressInDir(blobsDir());
   }
@@ -733,12 +666,10 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   // Keep remote structure scoped under a dedicated folder to avoid cluttering user-provided base paths.
   String _remoteRoot() => _remoteJoin(_normalizeRemotePath(_basePath), _remoteAppFolderName);
-  String _remoteManifestsRoot() => _remoteJoin(_remoteRoot(), 'manifests');
   String _remoteBlobsRoot() => _remoteJoin(_remoteRoot(), 'blobs', _blockSizeMB.toString());
   String _remoteTmpRoot() => _remoteJoin(_remoteRoot(), 'tmp');
 
-  String _remoteManifestFolder(String serverId, String vmName) => _remoteJoin(_remoteManifestsRoot(), serverId, vmName);
-  String _remoteDiskManifestFolder(String serverId, String vmName, String diskId) => _remoteJoin(_remoteManifestsRoot(), serverId, vmName, diskId);
+  String _remoteRelativePath(String relativePath) => _remoteJoin(_remoteRoot(), _normalizeRelativePath(relativePath));
 
   String _remoteBlobDir(String hash) => _remoteJoin(_remoteBlobsRoot(), hash.substring(0, 2));
   String _remoteBlobPath(String hash) => _remoteJoin(_remoteBlobDir(hash), hash);
@@ -770,13 +701,37 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     });
   }
 
-  Future<void> _gzipManifest(File source, File target) async {
-    final input = source.openRead();
-    final output = target.openWrite();
+  Future<void> _listRemoteFilesRecursively({required SftpClient sftp, required String remoteDir, required String relativePrefix, required List<String> out}) async {
+    List<SftpName> entries;
     try {
-      await output.addStream(input.transform(gzip.encoder));
-    } finally {
-      await output.close();
+      entries = await _remoteListDir(sftp, remoteDir);
+    } catch (_) {
+      return;
+    }
+    for (final entry in entries) {
+      final name = entry.filename;
+      if (name == '.' || name == '..') {
+        continue;
+      }
+      final remotePath = _remoteJoin(remoteDir, name);
+      if (entry.attr.isDirectory) {
+        final childPrefix = '$relativePrefix/$name';
+        await _listRemoteFilesRecursively(sftp: sftp, remoteDir: remotePath, relativePrefix: childPrefix, out: out);
+        continue;
+      }
+      out.add('$relativePrefix/$name');
+    }
+  }
+
+  Future<Uint8List?> _readRemoteFileBytes(String remotePath) async {
+    final builder = BytesBuilder(copy: false);
+    try {
+      await for (final chunk in _openBlobStreamNative(remotePath)) {
+        builder.add(chunk);
+      }
+      return builder.takeBytes();
+    } on _NativeBlobMissing {
+      return null;
     }
   }
 
@@ -795,6 +750,12 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         await entity.delete();
       } catch (_) {}
     }
+  }
+
+  String _normalizeRelativePath(String relativePath) {
+    final normalized = relativePath.replaceAll('\\', '/');
+    final parts = normalized.split('/').where((part) => part.trim().isNotEmpty && part != '.').toList();
+    return parts.join('/');
   }
 
   Future<void> _ensureRemoteDir(SftpClient sftp, String remotePath) async {
@@ -876,13 +837,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
     final raw = parts.join('/');
     return _normalizeRemotePath(raw.startsWith('/') ? '/$raw' : raw);
-  }
-
-  static String _tempBase() {
-    if (Platform.isWindows) {
-      return Directory.systemTemp.path;
-    }
-    return '${Platform.pathSeparator}var${Platform.pathSeparator}tmp';
   }
 }
 

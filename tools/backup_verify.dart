@@ -917,7 +917,12 @@ Future<String> _pickLatestRestoreXml(http.Client client, _Args args) async {
 
 Future<void> _restorePrecheck(http.Client client, _Args args, String xmlPath) async {
   final uri = args.agentUrl.replace(path: '/servers/${args.targetServerId}/restore/precheck');
-  final response = await client.post(uri, headers: {..._authHeaders(args), 'content-type': 'application/json'}, body: jsonEncode({'xmlPath': xmlPath}));
+  final payload = <String, dynamic>{'xmlPath': xmlPath};
+  final destinationId = args.destinationId;
+  if (destinationId != null && destinationId.trim().isNotEmpty) {
+    payload['destinationId'] = destinationId.trim();
+  }
+  final response = await client.post(uri, headers: {..._authHeaders(args), 'content-type': 'application/json'}, body: jsonEncode(payload));
   if (response.statusCode != 200) {
     throw StateError('Restore precheck failed: ${response.statusCode} ${response.body}');
   }

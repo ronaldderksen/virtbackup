@@ -4,7 +4,7 @@ Status: implemented. This document describes the dedup storage and manifest form
 
 ## Goal
 - Content-addressed blob store (SHA-256) shared across backups.
-- Per-VM-disk restore points via manifests.
+- Per-VM restore points via manifests (single manifest file containing all disks).
 - No encryption (for now).
 - Implemented behind a storage driver (`filesystem`, `gdrive`, `dummy`).
 
@@ -15,8 +15,10 @@ Status: implemented. This document describes the dedup storage and manifest form
 - Directory sharding: `blobs/<blockSizeMB>/ab/<hash>` where `ab=hash[0..1]`.
 - Zero blocks are not stored as blobs; they are recorded as `ZERO` runs in the manifest.
 
-## Storage layout (filesystem driver)
-The filesystem driver uses `backup.base_path` as its base path and creates and uses a `VirtBackup` folder inside that path:
+## Storage layout (agent-defined, driver-independent)
+The agent defines the logical backup layout. Drivers only perform generic read/write operations on relative paths.
+
+For filesystem destinations, the files are stored under `backup.base_path/VirtBackup`:
 ```
 backup.base_path/
   VirtBackup/
@@ -30,10 +32,10 @@ backup.base_path/
     tmp/
 ```
 
-The Google Drive driver uses the same logical layout (manifests + `blobs/<blockSizeMB>/ab/<hash>`), but syncs to Drive and keeps a local cache.
+Remote drivers (Google Drive/SFTP) use the same agent-defined relative layout under their own destination roots.
 
 ## Manifest format (text, gzipped)
-One manifest is written per disk and stored as `.manifest.gz`.
+One manifest is written per VM timestamp and stored as `<timestamp>.manifest.gz`.
 
 Headers:
 ```
@@ -41,9 +43,6 @@ version: 1
 block_size: 1048576
 server_id: <serverId>
 vm_name: <vmName>
-disk_id: <diskId>
-source_path: </remote/path/to/disk.qcow2>
-file_size: <bytes>          (present if known)
 timestamp: 2026-02-01T12:34:56.000Z
 meta:
   format: inline_v1
@@ -51,11 +50,15 @@ meta:
   chain_encoding: yaml
 domain_xml_b64_gz: |
   <base64-gzip payload>
+
+disk_id: <diskId>
+source_path: </remote/path/to/disk.qcow2>
+file_size: <bytes>          (present if known)
 chain:
   - order: 0
     disk_id: <diskId>
     path: </remote/path/to/disk.qcow2>
-blocks:
+blocks: </remote/path/to/disk.qcow2>
 ```
 
 Blocks (0-based):
@@ -68,11 +71,12 @@ EOF
 ```
 
 Notes:
-- `domain.xml` and chain metadata are embedded inside each manifest.
+- `domain.xml` is embedded once per manifest.
+- Disk metadata (`disk_id`, `source_path`, `chain`, `blocks`) is repeated per disk section.
 - Restore requires an `EOF` terminator line to accept a manifest as complete.
 
 ## Backup flow (agent)
-The agent creates a per-disk manifest and appends entries while the backup is running.
+The agent creates one VM manifest and appends per-disk sections while the backup is running.
 
 There are two paths:
 1. **Hashblocks path (primair)**
@@ -85,18 +89,18 @@ There are two paths:
    - The agent chunks using configured `blockSizeMB`, hashes locally, and writes only missing blobs.
 
 ## Restore flow (agent)
-1. The agent resolves the correct `*.manifest.gz` per disk.
-2. The manifest is read; for each block:
+1. The agent resolves the correct `*.manifest.gz` for the selected VM timestamp.
+2. The manifest is read; for each disk section and each block:
    - `ZERO` means "write zero bytes" for the block range.
    - A hash means "read blob `blobs/<blockSizeMB>/ab/<hash>` and write it to the output".
 3. The last (tail) block length can be smaller than the configured block size based on `file_size`.
 
 ## Chain metadata
-Chain metadata is embedded in each manifest (`chain:` section). No separate `*.chain` sidecar file is written.
+Chain metadata is embedded per disk section (`chain:`). No separate `*.chain` sidecar file is written.
 
 ## Concurrency / safety
 - Blob writes: atomic "temp -> rename" per driver (filesystem and gdrive) to avoid races and partially-written blobs.
-- Manifests: during backup an `.inprogress` file is written; on commit the manifest is gzipped and the plain manifest is deleted.
+- Manifest: during backup a local `.inprogress` file is written; after backup the manifest is gzipped and uploaded as one file.
 
 ## Out of scope (intentionally)
 - Garbage collection / refcounting for blobs (not implemented yet).

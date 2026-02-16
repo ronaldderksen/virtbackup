@@ -163,6 +163,7 @@ class BackupAgent {
     var disks = <MapEntry<String, String>>[];
     final backupPlans = <_DiskBackupPlan>[];
     Object? runError;
+    _LocalManifestWrite? vmManifestWrite;
     try {
       await _dependencies.beginLargeTransfer?.call(server);
       if (server.connectionType != ConnectionType.ssh) {
@@ -175,7 +176,7 @@ class BackupAgent {
       _blobDirectoryCache = blobLister == null ? null : _BlobDirectoryCache(driver: blobLister, createShard: (hash) => driver.ensureBlobDir(hash));
       _startBlobCacheWorker();
       await driver.prepareBackup(serverFolderName, vmFolderName);
-      final manifestsBase = driver.manifestsDir(serverFolderName, vmFolderName);
+      final manifestsBase = Directory('${driver.destination}${Platform.pathSeparator}manifests${Platform.pathSeparator}$serverFolderName${Platform.pathSeparator}$vmFolderName');
       final backupTimestamp = _dependencies.sanitizeFileName(DateTime.now().toIso8601String());
 
       final xmlResult = await _dependencies.runSshCommand(server, 'virsh dumpxml "${vm.name}"');
@@ -186,6 +187,9 @@ class BackupAgent {
       if (xml.isEmpty) {
         throw 'dumpxml returned empty output';
       }
+      vmManifestWrite = _startManifestWrite(driver: driver, serverFolderName: serverFolderName, vmFolderName: vmFolderName, backupTimestamp: backupTimestamp);
+      final vmManifestSink = vmManifestWrite.sink;
+      _writeManifestHeader(vmManifestSink, serverId: server.id, vmName: vm.name, backupTimestamp: backupTimestamp, domainXml: xml);
 
       final activeDisks = await _dependencies.loadVmDiskPaths(server, vm);
       final inactiveDisks = await _dependencies.loadVmDiskPaths(server, vm, inactive: true);
@@ -270,32 +274,15 @@ class BackupAgent {
           _logInfo('Streaming disk ${_progress.completedDisks + 1}/${_progress.totalDisks} for ${vm.name}: $diskId');
           _setProgress(_progress.copyWith(statusMessage: 'Streaming ${_progress.completedDisks + 1} of ${_progress.totalDisks}: $diskId'));
           _setProgress(_progress.copyWith(statusMessage: 'Backup ${_progress.completedDisks + 1} of ${_progress.totalDisks}: $diskId'));
-          final usedHashblocks = await _writeDiskUsingHashblocks(
-            driver: driver,
-            backupTimestamp: backupTimestamp,
-            diskId: diskId,
-            serverFolderName: serverFolderName,
-            vmFolderName: vmFolderName,
-            serverId: server.id,
-            vmName: vm.name,
-            sourcePath: sourcePath,
-            server: server,
-            domainXml: xml,
-            chain: plan.chain,
-          );
+          final usedHashblocks = await _writeDiskUsingHashblocks(driver: driver, manifestSink: vmManifestSink, diskId: diskId, sourcePath: sourcePath, server: server, chain: plan.chain);
           if (!usedHashblocks) {
             _setProgress(_progress.copyWith(statusMessage: 'Backup ${_progress.completedDisks + 1} of ${_progress.totalDisks}: $diskId'));
             await _writeDiskStreamToDedupStore(
               driver: driver,
-              backupTimestamp: backupTimestamp,
+              manifestSink: vmManifestSink,
               diskId: diskId,
-              serverFolderName: serverFolderName,
-              vmFolderName: vmFolderName,
-              serverId: server.id,
-              vmName: vm.name,
               sourcePath: sourcePath,
               server: server,
-              domainXml: xml,
               chain: plan.chain,
               streamRemoteFile: (onChunk) => _dependencies.streamRemoteFile(server, sourcePath, onChunk: onChunk),
             );
@@ -310,6 +297,10 @@ class BackupAgent {
       if (snapshotCreated) {
         await _dependencies.commitVmSnapshot(server, vm, disks);
       }
+      vmManifestSink.writeln('EOF');
+      await _closeManifestSinkIfOpen(vmManifestSink, manifestWrite: vmManifestWrite);
+      await _finalizeManifestWrite(driver: driver, manifestWrite: vmManifestWrite);
+      vmManifestWrite = null;
 
       final message = driver.backupCompletedMessage(manifestsBase.path);
       _logInfo(message);
@@ -324,6 +315,10 @@ class BackupAgent {
         try {
           await _dependencies.loadVmDiskPaths(server, vm);
         } catch (_) {}
+      }
+      if (vmManifestWrite != null) {
+        await _abortManifestWrite(vmManifestWrite);
+        vmManifestWrite = null;
       }
       if (snapshotCreated) {
         try {
@@ -664,37 +659,26 @@ class BackupAgent {
 
   Future<void> _writeDiskStreamToDedupStore({
     required BackupDriver driver,
-    required String backupTimestamp,
+    required IOSink manifestSink,
     required String diskId,
-    required String serverFolderName,
-    required String vmFolderName,
-    required String serverId,
-    required String vmName,
     required String sourcePath,
     required ServerConfig server,
-    required String domainXml,
     required List<_DiskChainItem> chain,
     required Future<void> Function(Future<void> Function(List<int> chunk) onChunk) streamRemoteFile,
   }) async {
     _ensureNotCanceled();
-    final manifestWrite = driver.startManifestWrite(serverFolderName, vmFolderName, diskId, backupTimestamp);
-    final sink = manifestWrite.sink;
+    final sink = manifestSink;
     int? fileSize;
     try {
       fileSize = await _dependencies.getRemoteFileSize(server, sourcePath);
     } catch (_) {}
-    sink.writeln('version: 1');
-    sink.writeln('block_size: $_blockSize');
-    sink.writeln('server_id: $serverId');
-    sink.writeln('vm_name: $vmName');
     sink.writeln('disk_id: $diskId');
     sink.writeln('source_path: $sourcePath');
     if (fileSize != null && fileSize > 0) {
       sink.writeln('file_size: $fileSize');
     }
-    sink.writeln('timestamp: ${DateTime.now().toUtc().toIso8601String()}');
-    _writeManifestEmbeddedMetadata(sink, domainXml: domainXml, chain: chain);
-    sink.writeln('blocks:');
+    _writeManifestChainMetadata(sink, chain: chain);
+    sink.writeln('blocks: $sourcePath');
 
     var index = 0;
     int zeroRunStart = -1;
@@ -784,28 +768,18 @@ class BackupAgent {
         zeroRunStart = -1;
         zeroRunEnd = -1;
       }
-      sink.writeln('EOF');
-      sink.writeln();
     } finally {
       await _drainPendingWrites();
       await sink.flush();
-      await sink.close();
     }
-
-    await driver.finalizeManifest(manifestWrite);
   }
 
   Future<bool> _writeDiskUsingHashblocks({
     required BackupDriver driver,
-    required String backupTimestamp,
+    required IOSink manifestSink,
     required String diskId,
-    required String serverFolderName,
-    required String vmFolderName,
-    required String serverId,
-    required String vmName,
     required String sourcePath,
     required ServerConfig server,
-    required String domainXml,
     required List<_DiskChainItem> chain,
   }) async {
     final remoteHashblocksPath = await _dependencies.ensureHashblocks(server);
@@ -815,18 +789,12 @@ class BackupAgent {
     _ensureNotCanceled();
 
     final fileSize = await _dependencies.getRemoteFileSize(server, sourcePath);
-    final manifestWrite = driver.startManifestWrite(serverFolderName, vmFolderName, diskId, backupTimestamp);
-    final sink = manifestWrite.sink;
-    sink.writeln('version: 1');
-    sink.writeln('block_size: $_blockSize');
-    sink.writeln('server_id: $serverId');
-    sink.writeln('vm_name: $vmName');
+    final sink = manifestSink;
     sink.writeln('disk_id: $diskId');
     sink.writeln('source_path: $sourcePath');
     sink.writeln('file_size: $fileSize');
-    sink.writeln('timestamp: ${DateTime.now().toUtc().toIso8601String()}');
-    _writeManifestEmbeddedMetadata(sink, domainXml: domainXml, chain: chain);
-    sink.writeln('blocks:');
+    _writeManifestChainMetadata(sink, chain: chain);
+    sink.writeln('blocks: $sourcePath');
 
     var hashblocksBytes = 0;
     var hashblocksBytesSinceTick = 0;
@@ -1045,7 +1013,7 @@ class BackupAgent {
       enqueueExists: existsWorker.enqueue,
     );
 
-    var manifestClosed = false;
+    var manifestFlushed = false;
 
     try {
       final writerFuture = writerWorker.run();
@@ -1140,11 +1108,8 @@ class BackupAgent {
       _logInfo(
         'hashblocks done: lines=${hashblocksWorker.totalLines} existing=${hashblocksWorker.existingBlocks} missing=${hashblocksWorker.missingBlocks} zero=${hashblocksWorker.zeroBlocks} speed=${doneMbPerSec.toStringAsFixed(1)}MB/s total=${doneTotalMb.toStringAsFixed(1)}MB',
       );
-      sink.writeln('EOF');
-      sink.writeln();
       await sink.flush();
-      await sink.close();
-      manifestClosed = true;
+      manifestFlushed = true;
     } finally {
       hashblocksLogTimer?.cancel();
       if (!eofSeen) {
@@ -1162,9 +1127,8 @@ class BackupAgent {
         await writerFutureRef;
       }
       await _drainPendingWrites();
-      if (!manifestClosed) {
+      if (!manifestFlushed) {
         await sink.flush();
-        await sink.close();
       }
     }
 
@@ -1174,8 +1138,79 @@ class BackupAgent {
       _logInfo('SFTP read window: ${elapsedSec.toStringAsFixed(2)}s');
     }
 
-    await driver.finalizeManifest(manifestWrite);
     return true;
+  }
+
+  _LocalManifestWrite _startManifestWrite({required BackupDriver driver, required String serverFolderName, required String vmFolderName, required String backupTimestamp}) {
+    final baseName = '$backupTimestamp.manifest';
+    final relativePath = 'manifests/$serverFolderName/$vmFolderName/$baseName.gz';
+    final tempPath = '${driver.tmpDir().path}${Platform.pathSeparator}manifest_${DateTime.now().microsecondsSinceEpoch}.inprogress';
+    final localFile = File(tempPath);
+    localFile.parent.createSync(recursive: true);
+    final sink = localFile.openWrite();
+    return _LocalManifestWrite(sink: sink, localFile: localFile, relativePath: relativePath);
+  }
+
+  Future<void> _closeManifestSinkIfOpen(IOSink sink, {required _LocalManifestWrite manifestWrite}) async {
+    if (manifestWrite.closed) {
+      return;
+    }
+    await sink.flush();
+    await sink.close();
+    manifestWrite.closed = true;
+  }
+
+  Future<void> _finalizeManifestWrite({required BackupDriver driver, required _LocalManifestWrite manifestWrite}) async {
+    if (!manifestWrite.closed) {
+      await _closeManifestSinkIfOpen(manifestWrite.sink, manifestWrite: manifestWrite);
+    }
+    final localGzipFile = File('${manifestWrite.localFile.path}.gz');
+    try {
+      await _gzipFile(source: manifestWrite.localFile, target: localGzipFile);
+      await driver.uploadFile(relativePath: manifestWrite.relativePath, localFile: localGzipFile);
+    } finally {
+      try {
+        if (await manifestWrite.localFile.exists()) {
+          await manifestWrite.localFile.delete();
+        }
+      } catch (_) {}
+      try {
+        if (await localGzipFile.exists()) {
+          await localGzipFile.delete();
+        }
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _abortManifestWrite(_LocalManifestWrite manifestWrite) async {
+    try {
+      if (!manifestWrite.closed) {
+        await manifestWrite.sink.flush();
+        await manifestWrite.sink.close();
+        manifestWrite.closed = true;
+      }
+    } catch (_) {}
+    try {
+      if (await manifestWrite.localFile.exists()) {
+        await manifestWrite.localFile.delete();
+      }
+    } catch (_) {}
+    final gzipFile = File('${manifestWrite.localFile.path}.gz');
+    try {
+      if (await gzipFile.exists()) {
+        await gzipFile.delete();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _gzipFile({required File source, required File target}) async {
+    final input = source.openRead();
+    final output = target.openWrite();
+    try {
+      await output.addStream(input.transform(gzip.encoder));
+    } finally {
+      await output.close();
+    }
   }
 
   Future<void> _writeBlob(String hash, List<int> bytes, BackupDriver driver) async {
@@ -1336,7 +1371,12 @@ class BackupAgent {
     }
   }
 
-  void _writeManifestEmbeddedMetadata(IOSink sink, {required String domainXml, required List<_DiskChainItem> chain}) {
+  void _writeManifestHeader(IOSink sink, {required String serverId, required String vmName, required String backupTimestamp, required String domainXml}) {
+    sink.writeln('version: 1');
+    sink.writeln('block_size: $_blockSize');
+    sink.writeln('server_id: $serverId');
+    sink.writeln('vm_name: $vmName');
+    sink.writeln('timestamp: $backupTimestamp');
     sink.writeln('meta:');
     sink.writeln('  format: inline_v1');
     sink.writeln('  domain_xml_encoding: base64+gzip');
@@ -1347,6 +1387,10 @@ class BackupAgent {
       final end = start + 120 < encodedXml.length ? start + 120 : encodedXml.length;
       sink.writeln('  ${encodedXml.substring(start, end)}');
     }
+    sink.writeln();
+  }
+
+  void _writeManifestChainMetadata(IOSink sink, {required List<_DiskChainItem> chain}) {
     sink.writeln('chain:');
     if (chain.isEmpty) {
       sink.writeln('  []');
@@ -1373,6 +1417,15 @@ class _SpeedSample {
   final DateTime at;
   final int logicalTotal;
   final int physicalTotal;
+}
+
+class _LocalManifestWrite {
+  _LocalManifestWrite({required this.sink, required this.localFile, required this.relativePath});
+
+  final IOSink sink;
+  final File localFile;
+  final String relativePath;
+  bool closed = false;
 }
 
 class _BlobDirectoryCache {

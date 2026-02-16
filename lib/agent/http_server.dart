@@ -682,11 +682,22 @@ class AgentHttpServer {
         }
         final body = await _readJson(request);
         final xmlPath = (body['xmlPath'] ?? '').toString();
+        final requestedDestinationId = (body['destinationId'] ?? '').toString().trim();
+        final requestedDriver = (body['driverId'] ?? '').toString().trim();
         if (xmlPath.isEmpty) {
           _json(request, 400, {'error': 'missing xmlPath'});
           return;
         }
-        final result = await _restorePrecheck(server, xmlPath);
+        if (requestedDriver.isNotEmpty && !_driverCatalog.containsKey(requestedDriver)) {
+          _json(request, 400, {'error': 'unknown driverId', 'known': _driverCatalog.keys.toList()});
+          return;
+        }
+        final resolvedDestination = _resolveBackupDestination(requestedDestinationId);
+        if (requestedDestinationId.isNotEmpty && resolvedDestination == null) {
+          _json(request, 400, {'error': 'destination not found or unavailable'});
+          return;
+        }
+        final result = await _restorePrecheck(server, xmlPath, destination: resolvedDestination, driverIdOverride: requestedDriver.isEmpty ? null : requestedDriver);
         _json(request, 200, result.toMap());
         return;
       }
@@ -929,38 +940,44 @@ class AgentHttpServer {
     }
     final settings = (resolvedDestination ?? defaultDestination).settings;
     final driver = _driverForSettings(driverInfo.id, backupPath, settings: settings);
-    final manifestsRoot = driver.manifestsDir('__scan__', '__scan__').parent.parent;
-    final manifestFiles = await _findManifestFiles(manifestsRoot);
-    final grouped = <String, List<File>>{};
-    for (final manifest in manifestFiles) {
-      final relative = _relativePath(fromDir: manifestsRoot, toPath: manifest.path);
-      if (relative.isEmpty) {
-        continue;
+    try {
+      await driver.ensureReady();
+      await _cacheRelativeDirFromDriver(driver: driver, relativeDir: 'manifests');
+      final manifestsRoot = Directory('${driver.destination}${Platform.pathSeparator}manifests');
+      final manifestFiles = await _findManifestFiles(manifestsRoot);
+      final grouped = <String, List<File>>{};
+      for (final manifest in manifestFiles) {
+        final relative = _relativePath(fromDir: manifestsRoot, toPath: manifest.path);
+        if (relative.isEmpty) {
+          continue;
+        }
+        final parts = relative.split(RegExp(r'[\\/]')).where((part) => part.isNotEmpty).toList();
+        if (parts.length < 3) {
+          continue;
+        }
+        final serverId = parts[0].trim();
+        final vmName = parts[1].trim();
+        final fileName = _baseName(manifest.path);
+        final vmDir = Directory('${manifestsRoot.path}${Platform.pathSeparator}$serverId${Platform.pathSeparator}$vmName');
+        final timestamp = _extractTimestampFromManifestFileName(fileName);
+        if (serverId.isEmpty || vmName.isEmpty || timestamp.isEmpty) {
+          continue;
+        }
+        final key = '$serverId|$vmName|$timestamp|${vmDir.path}';
+        grouped.putIfAbsent(key, () => <File>[]).add(manifest);
       }
-      final parts = relative.split(RegExp(r'[\\/]')).where((part) => part.isNotEmpty).toList();
-      if (parts.length < 3) {
-        continue;
+      final entries = <RestoreEntry>[];
+      for (final group in grouped.entries) {
+        final entry = await _buildRestoreEntryFromManifestGroup(group.key, group.value, driver);
+        if (entry != null) {
+          entries.add(entry);
+        }
       }
-      final serverId = parts[0].trim();
-      final vmName = parts[1].trim();
-      final fileName = _baseName(manifest.path);
-      final vmDir = Directory('${manifestsRoot.path}${Platform.pathSeparator}$serverId${Platform.pathSeparator}$vmName');
-      final timestamp = _extractTimestampFromManifestFileName(fileName);
-      if (serverId.isEmpty || vmName.isEmpty || timestamp.isEmpty) {
-        continue;
-      }
-      final key = '$serverId|$vmName|$timestamp|${vmDir.path}';
-      grouped.putIfAbsent(key, () => <File>[]).add(manifest);
+      entries.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+      return entries;
+    } finally {
+      await driver.closeConnections();
     }
-    final entries = <RestoreEntry>[];
-    for (final group in grouped.entries) {
-      final entry = await _buildRestoreEntryFromManifestGroup(group.key, group.value, driver);
-      if (entry != null) {
-        entries.add(entry);
-      }
-    }
-    entries.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-    return entries;
   }
 
   Future<List<File>> _findManifestFiles(Directory manifestsRoot) async {
@@ -1007,16 +1024,21 @@ class AgentHttpServer {
       final diskBasenames = <String>[];
       final requiredDiskIds = <String>{};
       for (final manifest in manifests) {
-        final sourcePath = await _readManifestField(manifest, 'source_path');
-        if (sourcePath != null && sourcePath.trim().isNotEmpty) {
+        final sourcePaths = await _readManifestFields(manifest, 'source_path');
+        for (final sourcePath in sourcePaths) {
+          if (sourcePath.trim().isEmpty) {
+            continue;
+          }
           final base = sourcePath.split(RegExp(r'[\\/]')).last.trim();
           if (base.isNotEmpty) {
             diskBasenames.add(base);
           }
         }
-        final diskId = await _readManifestField(manifest, 'disk_id');
-        if (diskId != null && diskId.trim().isNotEmpty) {
-          requiredDiskIds.add(diskId.trim());
+        final diskIds = await _readManifestFields(manifest, 'disk_id');
+        for (final diskId in diskIds) {
+          if (diskId.trim().isNotEmpty) {
+            requiredDiskIds.add(diskId.trim());
+          }
         }
       }
       final diskNamesForTimestamp = await _collectDiskNamesForTimestamp(vmDir, timestamp);
@@ -1058,9 +1080,9 @@ class AgentHttpServer {
     final names = <String>[];
     final manifests = await _listManifestFilesForTimestamp(vmDir, timestamp);
     for (final manifest in manifests) {
-      final diskId = await _readManifestField(manifest, 'disk_id');
-      if (diskId != null && diskId.isNotEmpty) {
-        names.add(diskId);
+      final diskIds = await _readManifestFields(manifest, 'disk_id');
+      if (diskIds.isNotEmpty) {
+        names.addAll(diskIds.where((value) => value.trim().isNotEmpty));
         continue;
       }
       final name = _baseName(manifest.parent.path);
@@ -1897,55 +1919,93 @@ class AgentHttpServer {
     }());
   }
 
-  Future<RestorePrecheckResult> _restorePrecheck(ServerConfig server, String xmlPath) async {
-    final destination = _resolveBackupDestination(null);
-    if (destination == null) {
+  Future<RestorePrecheckResult> _restorePrecheck(ServerConfig server, String xmlPath, {_ResolvedDestination? destination, String? driverIdOverride}) async {
+    final resolvedDestination = destination ?? _resolveBackupDestination(null);
+    if (resolvedDestination == null) {
       return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
     }
-    final driverInfo = _driverCatalog[destination.driverId] ?? _driverCatalog['filesystem']!;
-    final backupPath = destination.backupPath;
+    final requestedDriverId = driverIdOverride?.trim() ?? '';
+    final effectiveDriverId = requestedDriverId.isEmpty ? resolvedDestination.driverId : requestedDriverId;
+    final driverInfo = _driverCatalog[effectiveDriverId] ?? _driverCatalog['filesystem']!;
+    final backupPath = resolvedDestination.backupPath;
     if (driverInfo.usesPath && backupPath.isEmpty) {
       return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
     }
-    final vmDir = _vmDirFromXmlPath(xmlPath);
-    if (!await vmDir.exists()) {
-      return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
+    final driver = _driverForSettings(driverInfo.id, backupPath, settings: resolvedDestination.settings);
+    try {
+      await driver.ensureReady();
+      await _cacheRelativeDirFromDriver(driver: driver, relativeDir: 'manifests');
+      final vmDir = _vmDirFromXmlPath(xmlPath);
+      if (!await vmDir.exists()) {
+        return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
+      }
+      final timestamp = _extractTimestampFromManifestXmlPath(xmlPath);
+      if (timestamp.isEmpty) {
+        return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
+      }
+      final manifests = await _listManifestFilesForTimestamp(vmDir, timestamp);
+      if (manifests.isEmpty) {
+        return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
+      }
+      final diskSourcePaths = <String>[];
+      for (final manifest in manifests) {
+        final sourcePaths = await _readManifestFields(manifest, 'source_path');
+        for (final sourcePath in sourcePaths) {
+          final trimmed = sourcePath.trim();
+          if (trimmed.isEmpty) {
+            continue;
+          }
+          diskSourcePaths.add(trimmed);
+        }
+      }
+      final vmName = _extractVmNameFromXmlPath(xmlPath);
+      if (vmName.isEmpty) {
+        return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
+      }
+      final vmExistsResult = await _host.runSshCommand(server, 'virsh dominfo "$vmName"');
+      final vmExists = (vmExistsResult.exitCode ?? 1) == 0;
+      if (!vmExists) {
+        return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
+      }
+      var canDefineOnly = true;
+      for (final sourcePath in diskSourcePaths) {
+        final existsResult = await _host.runSshCommand(server, 'test -f "$sourcePath"');
+        if ((existsResult.exitCode ?? 1) != 0) {
+          canDefineOnly = false;
+          break;
+        }
+      }
+      return RestorePrecheckResult(vmExists: true, canDefineOnly: canDefineOnly);
+    } finally {
+      await driver.closeConnections();
     }
-    final timestamp = _extractTimestampFromManifestXmlPath(xmlPath);
-    if (timestamp.isEmpty) {
-      return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
+  }
+
+  Future<void> _cacheRelativeDirFromDriver({required drv.BackupDriver driver, required String relativeDir}) async {
+    final normalizedDir = relativeDir.replaceAll('\\', '/').split('/').where((part) => part.trim().isNotEmpty && part != '.').join('/');
+    if (normalizedDir.isEmpty) {
+      return;
     }
-    final manifests = await _listManifestFilesForTimestamp(vmDir, timestamp);
-    if (manifests.isEmpty) {
-      return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
-    }
-    final diskSourcePaths = <String>[];
-    for (final manifest in manifests) {
-      final sourcePath = await _readManifestField(manifest, 'source_path');
-      final trimmed = sourcePath?.trim() ?? '';
-      if (trimmed.isEmpty) {
+    final files = await driver.listRelativeFiles(normalizedDir);
+    for (final relativePath in files) {
+      final bytes = await driver.readFileBytes(relativePath);
+      if (bytes == null) {
         continue;
       }
-      diskSourcePaths.add(trimmed);
-    }
-    final vmName = _extractVmNameFromXmlPath(xmlPath);
-    if (vmName.isEmpty) {
-      return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
-    }
-    final vmExistsResult = await _host.runSshCommand(server, 'virsh dominfo "$vmName"');
-    final vmExists = (vmExistsResult.exitCode ?? 1) == 0;
-    if (!vmExists) {
-      return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
-    }
-    var canDefineOnly = true;
-    for (final sourcePath in diskSourcePaths) {
-      final existsResult = await _host.runSshCommand(server, 'test -f "$sourcePath"');
-      if ((existsResult.exitCode ?? 1) != 0) {
-        canDefineOnly = false;
-        break;
+      final normalizedPath = relativePath.replaceAll('\\', '/').split('/').where((part) => part.trim().isNotEmpty && part != '.').join('/');
+      if (normalizedPath.isEmpty) {
+        continue;
       }
+      final localFilePath = '${driver.destination}${Platform.pathSeparator}${normalizedPath.replaceAll('/', Platform.pathSeparator)}';
+      final localFile = File(localFilePath);
+      final tempFile = File('${localFile.path}.inprogress.${DateTime.now().microsecondsSinceEpoch}');
+      await tempFile.parent.create(recursive: true);
+      await tempFile.writeAsBytes(bytes);
+      if (await localFile.exists()) {
+        await localFile.delete();
+      }
+      await tempFile.rename(localFile.path);
     }
-    return RestorePrecheckResult(vmExists: true, canDefineOnly: canDefineOnly);
   }
 
   void _startRestoreJob(String jobId, ServerConfig server, String xmlPath, String decision, {_ResolvedDestination? destination, String? driverIdOverride}) {
@@ -2181,20 +2241,32 @@ class AgentHttpServer {
     }
   }
 
-  Future<String?> _readManifestField(File manifest, String field) async {
+  Future<List<String>> _readManifestFields(File manifest, String field) async {
+    final values = <String>[];
     try {
       final lines = await _readManifestLines(manifest);
+      var inBlocks = false;
       for (final line in lines) {
         final trimmed = line.trim();
-        if (trimmed.startsWith('$field:')) {
-          return trimmed.substring(field.length + 1).trim();
+        if (trimmed.startsWith('disk_id:')) {
+          inBlocks = false;
         }
-        if (trimmed == 'blocks:') {
-          break;
+        if (inBlocks && trimmed.contains('->')) {
+          continue;
+        }
+        if (trimmed.startsWith('$field:')) {
+          final value = trimmed.substring(field.length + 1).trim();
+          if (value.isNotEmpty) {
+            values.add(value);
+          }
+          continue;
+        }
+        if (trimmed.startsWith('blocks:')) {
+          inBlocks = true;
         }
       }
     } catch (_) {}
-    return null;
+    return values;
   }
 
   Future<List<String>> _readManifestLines(File manifest) async {

@@ -20,6 +20,15 @@ class GdrivePrefillStats {
   final int durationMs;
 }
 
+class _PermanentGdriveConfigError implements Exception {
+  _PermanentGdriveConfigError(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
   GdriveBackupDriver({required AppSettings settings, required Future<void> Function(AppSettings) persistSettings, Directory? settingsDir, void Function(String message)? logInfo})
     : _settings = settings,
@@ -44,10 +53,10 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   final Set<String> _folderChildrenLoaded = {};
   final _NamedAsyncLock _folderLocks = _NamedAsyncLock();
   bool _agentLogConfigured = false;
+  Future<String>? _tokenRefreshInFlight;
   http.Client _client = IOClient(_createHttpClient());
   final _HttpClientPool _uploadClientPool = _HttpClientPool(maxClients: _uploadConcurrency);
   int _inFlightUploads = 0;
-  String? _tmpFolderId;
   String? _blobsRootId;
   String? _resolvedDriveRootId;
   void Function(GdrivePrefillStats stats, bool done)? onPrefillProgress;
@@ -55,8 +64,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   static Directory _cacheRootForSettings(AppSettings settings) {
     final basePath = settings.backupPath.trim();
     if (basePath.isEmpty) {
-      // Fallback for misconfiguration; callers should configure backup.base_path.
-      return Directory('${_tempBase()}${Platform.pathSeparator}virtbackup_gdrive_cache');
+      throw StateError('GDrive cache root requires backupPath in settings.');
     }
     final destinationId = _cacheKeyFromSettings(settings);
     return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}cache${Platform.pathSeparator}$destinationId');
@@ -131,11 +139,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }
 
   @override
-  Directory manifestsDir(String serverId, String vmName) {
-    return Directory('${_cacheRoot.path}${Platform.pathSeparator}manifests${Platform.pathSeparator}$serverId${Platform.pathSeparator}$vmName');
-  }
-
-  @override
   Directory blobsDir() {
     final basePath = _settings.backupPath.trim();
     if (basePath.isEmpty) {
@@ -147,33 +150,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   @override
   Directory tmpDir() {
     return Directory('${_cacheRoot.path}${Platform.pathSeparator}tmp');
-  }
-
-  @override
-  File xmlFile(String serverId, String vmName, String timestamp, {required bool inProgress}) {
-    final suffix = inProgress ? '.inprogress' : '';
-    final base = manifestsDir(serverId, vmName).path;
-    return File('$base${Platform.pathSeparator}${timestamp}__domain.xml$suffix');
-  }
-
-  @override
-  File chainFile(String serverId, String vmName, String timestamp, String diskId, {required bool inProgress}) {
-    final suffix = inProgress ? '.inprogress' : '';
-    final base = manifestsDir(serverId, vmName).path;
-    return File('$base${Platform.pathSeparator}${timestamp}__$diskId.chain$suffix');
-  }
-
-  @override
-  File manifestFile(String serverId, String vmName, String diskId, String timestamp, {required bool inProgress}) {
-    final suffix = inProgress ? '.inprogress' : '';
-    final base = '${manifestsDir(serverId, vmName).path}${Platform.pathSeparator}$diskId';
-    return File('$base${Platform.pathSeparator}$timestamp.manifest$suffix');
-  }
-
-  @override
-  File manifestGzFile(String serverId, String vmName, String diskId, String timestamp) {
-    final base = '${manifestsDir(serverId, vmName).path}${Platform.pathSeparator}$diskId';
-    return File('$base${Platform.pathSeparator}$timestamp.manifest.gz');
   }
 
   @override
@@ -218,7 +194,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   Future<void> ensureReady() async {
     await _configureAgentLogPath();
     await _cacheRoot.create(recursive: true);
-    await manifestsDir('tmp', 'tmp').parent.create(recursive: true);
     await tmpDir().create(recursive: true);
     await _ensureBlobsRoot();
     await _warmFolderCache();
@@ -227,71 +202,57 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   @override
   Future<void> prepareBackup(String serverId, String vmName) async {
-    await manifestsDir(serverId, vmName).create(recursive: true);
+    await _cacheRoot.create(recursive: true);
     await tmpDir().create(recursive: true);
-    await _ensureTmpFolder();
-    await _ensureManifestFolder(serverId, vmName);
     await _ensureBlobsRoot();
     _logInfo('gdrive: prepare backup for $serverId/$vmName');
   }
 
   @override
-  DriverFileWrite startXmlWrite(String serverId, String vmName, String timestamp) {
-    final file = xmlFile(serverId, vmName, timestamp, inProgress: true);
-    file.parent.createSync(recursive: true);
-    final sink = file.openWrite();
-    return DriverFileWrite(
-      sink: sink,
-      commit: () async {
-        _logInfo('gdrive: commit xml $timestamp for $serverId/$vmName');
-        await _commitManifestFile(localFile: file, finalName: '${timestamp}__domain.xml', remoteFolder: await _ensureManifestFolder(serverId, vmName));
-      },
-    );
+  Future<void> uploadFile({required String relativePath, required File localFile}) async {
+    final normalizedPath = _normalizeRelativePath(relativePath);
+    _logInfo('gdrive: upload file $normalizedPath');
+    await _commitRelativeFile(localFile: localFile, relativePath: normalizedPath);
   }
 
   @override
-  DriverFileWrite startChainWrite(String serverId, String vmName, String timestamp, String diskId) {
-    final file = chainFile(serverId, vmName, timestamp, diskId, inProgress: true);
-    file.parent.createSync(recursive: true);
-    final sink = file.openWrite();
-    return DriverFileWrite(
-      sink: sink,
-      commit: () async {
-        _logInfo('gdrive: commit chain $timestamp for $serverId/$vmName ($diskId)');
-        await _commitManifestFile(localFile: file, finalName: '${timestamp}__$diskId.chain', remoteFolder: await _ensureManifestFolder(serverId, vmName));
-      },
-    );
+  Future<List<String>> listRelativeFiles(String relativeDir) async {
+    final normalizedDir = _normalizeRelativePath(relativeDir);
+    if (normalizedDir.isEmpty) {
+      return <String>[];
+    }
+    final parts = _splitRelativePath(normalizedDir);
+    final folderId = await _findFolderByPath(parts);
+    if (folderId == null || folderId.isEmpty) {
+      return <String>[];
+    }
+    final result = <String>[];
+    await _listDriveFilesRecursively(folderId: folderId, relativePrefix: normalizedDir, out: result);
+    result.sort();
+    return result;
   }
 
   @override
-  DriverManifestWrite startManifestWrite(String serverId, String vmName, String diskId, String timestamp) {
-    final file = manifestFile(serverId, vmName, diskId, timestamp, inProgress: true);
-    file.parent.createSync(recursive: true);
-    final sink = file.openWrite();
-    return DriverManifestWrite(
-      sink: sink,
-      commit: () async {
-        _logInfo('gdrive: commit manifest $timestamp for $serverId/$vmName ($diskId)');
-        final finalFile = manifestFile(serverId, vmName, diskId, timestamp, inProgress: false);
-        if (await finalFile.exists()) {
-          await finalFile.delete();
-        }
-        if (await file.exists()) {
-          await file.rename(finalFile.path);
-        }
-        final gzFile = manifestGzFile(serverId, vmName, diskId, timestamp);
-        await _gzipManifest(finalFile, gzFile);
-        try {
-          await finalFile.delete();
-        } catch (_) {}
-        await _commitManifestFile(localFile: gzFile, finalName: '$timestamp.manifest.gz', remoteFolder: await _ensureDiskManifestFolder(serverId, vmName, diskId));
-      },
-    );
-  }
-
-  @override
-  Future<void> finalizeManifest(DriverManifestWrite write) async {
-    await write.commit();
+  Future<List<int>?> readFileBytes(String relativePath) async {
+    final normalized = _normalizeRelativePath(relativePath);
+    if (normalized.isEmpty) {
+      return null;
+    }
+    final parts = _splitRelativePath(normalized);
+    if (parts.isEmpty) {
+      return null;
+    }
+    final name = parts.last;
+    final folderParts = parts.take(parts.length - 1).toList();
+    final folderId = folderParts.isEmpty ? await _resolveDriveRootId() : await _findFolderByPath(folderParts);
+    if (folderId == null || folderId.isEmpty) {
+      return null;
+    }
+    final fileRef = await _findFileByName(folderId, name, includeSize: true);
+    if (fileRef == null) {
+      return null;
+    }
+    return _downloadFile(fileRef.id);
   }
 
   @override
@@ -382,7 +343,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }
 
   @override
-  String backupCompletedMessage(String manifestsPath) {
+  String backupCompletedMessage(String outputPath) {
     return 'Backup saved to Google Drive';
   }
 
@@ -399,7 +360,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   @override
   Future<void> cleanupInProgressFiles() async {
-    await _deleteInProgressInDir(manifestsDir('tmp', 'tmp').parent);
+    await _deleteInProgressInDir(_cacheRoot);
     await _deleteInProgressInDir(tmpDir());
   }
 
@@ -419,15 +380,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }
 
   List<String> _blobsPathPrefix() => <String>['blobs', _settings.blockSizeMB.toString()];
-
-  Future<String> _ensureTmpFolder() async {
-    if (_tmpFolderId != null) {
-      return _tmpFolderId!;
-    }
-    final root = await _ensureDriveRoot();
-    _tmpFolderId = await _ensureFolder(root, 'tmp');
-    return _tmpFolderId!;
-  }
 
   Future<String?> _resolveDriveRootId() async {
     final cachedRoot = _resolvedDriveRootId;
@@ -465,21 +417,20 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return resolved;
   }
 
-  Future<void> _commitManifestFile({required File localFile, required String finalName, required String remoteFolder}) async {
+  Future<void> _commitRelativeFile({required File localFile, required String relativePath}) async {
     if (!await localFile.exists()) {
       return;
     }
     final bytes = await localFile.readAsBytes();
-    _logInfo('gdrive: upload manifest $finalName size=${bytes.length}');
+    final parts = _splitRelativePath(relativePath);
+    if (parts.isEmpty) {
+      return;
+    }
+    final finalName = parts.last;
+    final parentParts = <String>[...parts.take(parts.length - 1)];
+    final remoteFolder = await _ensureFolderByPath(parentParts);
+    _logInfo('gdrive: upload file $relativePath size=${bytes.length}');
     await _uploadSimple(name: finalName, parentId: remoteFolder, bytes: bytes, contentType: 'application/octet-stream');
-  }
-
-  Future<String> _ensureManifestFolder(String serverId, String vmName) async {
-    return _ensureFolderByPath(['manifests', serverId, vmName]);
-  }
-
-  Future<String> _ensureDiskManifestFolder(String serverId, String vmName, String diskId) async {
-    return _ensureFolderByPath(['manifests', serverId, vmName, diskId]);
   }
 
   Future<String> _ensureFolderByPath(List<String> parts) async {
@@ -879,51 +830,55 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     if (token.isNotEmpty && expiresAt != null && expiresAt.isAfter(now.add(const Duration(minutes: 1)))) {
       return token;
     }
-    _logInfo('gdrive: refreshing access token');
+    final inFlight = _tokenRefreshInFlight;
+    if (inFlight != null) {
+      return inFlight;
+    }
     final refresh = _refreshToken;
     if (refresh.isEmpty) {
-      throw 'Google Drive refresh token is missing.';
+      throw _PermanentGdriveConfigError('Google Drive refresh token is missing.');
     }
-    final oauth = await _ensureOAuthClient();
-    final uri = Uri.parse('https://oauth2.googleapis.com/token');
-    final response = await _withRetry('refresh token', () async {
-      final body = <String, String>{'client_id': oauth.clientId, 'client_secret': oauth.clientSecret, 'refresh_token': refresh, 'grant_type': 'refresh_token'};
-      final response = await _requestWithApiLog(
-        action: 'auth.refresh',
-        method: 'POST',
-        uri: uri,
-        send: () => _client.post(uri, headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: body),
-      );
-      if (response.statusCode >= 300) {
-        throw 'Token refresh failed: ${response.statusCode} ${response.body}';
+    _logInfo('gdrive: refreshing access token');
+    final refreshFuture = _refreshAccessTokenInternal(refresh, forced: false);
+    _tokenRefreshInFlight = refreshFuture;
+    try {
+      return await refreshFuture;
+    } finally {
+      if (identical(_tokenRefreshInFlight, refreshFuture)) {
+        _tokenRefreshInFlight = null;
       }
-      return response;
-    });
-    final decoded = jsonDecode(response.body);
-    if (decoded is! Map) {
-      throw 'Token refresh failed: invalid response.';
     }
-    final accessToken = decoded['access_token']?.toString() ?? '';
-    final expiresIn = decoded['expires_in'];
-    final newExpiresAt = _calculateExpiresAt(expiresIn);
-    await _persistRefreshedToken(accessToken: accessToken, expiresAt: newExpiresAt);
-    _logInfo('gdrive: access token refreshed, expiresAt=${newExpiresAt?.toIso8601String() ?? 'unknown'}');
-    return accessToken;
   }
 
   Future<String> _refreshAccessToken() async {
-    _logInfo('gdrive: refreshing access token (forced)');
+    final inFlight = _tokenRefreshInFlight;
+    if (inFlight != null) {
+      return inFlight;
+    }
     final refresh = _refreshToken;
     if (refresh.isEmpty) {
-      throw 'Google Drive refresh token is missing.';
+      throw _PermanentGdriveConfigError('Google Drive refresh token is missing.');
     }
+    _logInfo('gdrive: refreshing access token (forced)');
+    final refreshFuture = _refreshAccessTokenInternal(refresh, forced: true);
+    _tokenRefreshInFlight = refreshFuture;
+    try {
+      return await refreshFuture;
+    } finally {
+      if (identical(_tokenRefreshInFlight, refreshFuture)) {
+        _tokenRefreshInFlight = null;
+      }
+    }
+  }
+
+  Future<String> _refreshAccessTokenInternal(String refresh, {required bool forced}) async {
     final oauth = await _ensureOAuthClient();
     final uri = Uri.parse('https://oauth2.googleapis.com/token');
-    final response = await _withRetry('refresh token (forced)', () async {
+    final response = await _withRetry(forced ? 'refresh token (forced)' : 'refresh token', () async {
       final body = <String, String>{'client_id': oauth.clientId, 'client_secret': oauth.clientSecret, 'refresh_token': refresh, 'grant_type': 'refresh_token'};
       final response = await _requestWithApiLog(
         action: 'auth.refresh',
-        detail: 'forced',
+        detail: forced ? 'forced' : null,
         method: 'POST',
         uri: uri,
         send: () => _client.post(uri, headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: body),
@@ -1018,10 +973,30 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return '${blobsDir().path}${Platform.pathSeparator}$shard${Platform.pathSeparator}$hash';
   }
 
+  String _normalizeRelativePath(String relativePath) {
+    return _splitRelativePath(relativePath).join('/');
+  }
+
+  List<String> _splitRelativePath(String relativePath) {
+    return relativePath.replaceAll('\\', '/').split('/').map((part) => part.trim()).where((part) => part.isNotEmpty && part != '.').toList();
+  }
+
   Future<_DriveFileRef?> _findFileByName(String parentId, String name, {bool includeSize = false}) async {
     final fields = includeSize ? 'nextPageToken,files(id,name,parents,size)' : 'nextPageToken,files(id,name,parents)';
     final files = await _listFilesRaw("'$parentId' in parents and name='${_escapeQuery(name)}' and trashed=false", fields: fields);
     return files.isEmpty ? null : files.first;
+  }
+
+  Future<void> _listDriveFilesRecursively({required String folderId, required String relativePrefix, required List<String> out}) async {
+    final files = await _listFilesRaw("mimeType!='$_driveFolderMime' and '$folderId' in parents and trashed=false", fields: 'nextPageToken,files(id,name,parents)');
+    for (final file in files) {
+      out.add('$relativePrefix/${file.name}');
+    }
+    final folders = await _listChildFolders(folderId);
+    for (final folder in folders) {
+      final childPrefix = '$relativePrefix/${folder.name}';
+      await _listDriveFilesRecursively(folderId: folder.id, relativePrefix: childPrefix, out: out);
+    }
   }
 
   Future<void> _deleteInProgressInDir(Directory dir) async {
@@ -1041,16 +1016,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     }
   }
 
-  Future<void> _gzipManifest(File source, File target) async {
-    final input = source.openRead();
-    final output = target.openWrite();
-    try {
-      await output.addStream(input.transform(gzip.encoder));
-    } finally {
-      await output.close();
-    }
-  }
-
   Future<T> _withRetry<T>(String label, Future<T> Function() action, {void Function()? onRetry}) async {
     var delaySeconds = 2;
     var attempt = 0;
@@ -1059,6 +1024,10 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       try {
         return await action();
       } catch (error, stackTrace) {
+        if (error is _PermanentGdriveConfigError) {
+          _logInfo('gdrive: $label failed: $error');
+          rethrow;
+        }
         if (attempt >= maxRetries) {
           _logInfo('gdrive: $label failed after retry: $error');
           _logInfo(stackTrace.toString());
@@ -1123,13 +1092,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   void _resetHttpClient() {
     _client.close();
     _client = IOClient(_createHttpClient());
-  }
-
-  static String _tempBase() {
-    if (Platform.isWindows) {
-      return Directory.systemTemp.path;
-    }
-    return '${Platform.pathSeparator}var${Platform.pathSeparator}tmp';
   }
 
   Future<_UploadClientLease> _leaseUploadClient() async {

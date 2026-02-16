@@ -38,13 +38,6 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
 
   Directory _rootDir() => Directory('$_destination${Platform.pathSeparator}$_appFolderName');
 
-  Directory _manifestsRoot() => Directory('${_rootDir().path}${Platform.pathSeparator}manifests');
-
-  @override
-  Directory manifestsDir(String serverId, String vmName) {
-    return Directory('${_manifestsRoot().path}${Platform.pathSeparator}$serverId${Platform.pathSeparator}$vmName');
-  }
-
   @override
   Directory blobsDir() {
     return Directory('${_rootDir().path}${Platform.pathSeparator}blobs${Platform.pathSeparator}$_blockSizeMB');
@@ -53,33 +46,6 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
   @override
   Directory tmpDir() {
     return Directory('${_rootDir().path}${Platform.pathSeparator}tmp');
-  }
-
-  @override
-  File xmlFile(String serverId, String vmName, String timestamp, {required bool inProgress}) {
-    final suffix = inProgress ? '.inprogress' : '';
-    final base = manifestsDir(serverId, vmName).path;
-    return File('$base${Platform.pathSeparator}${timestamp}__domain.xml$suffix');
-  }
-
-  @override
-  File chainFile(String serverId, String vmName, String timestamp, String diskId, {required bool inProgress}) {
-    final suffix = inProgress ? '.inprogress' : '';
-    final base = manifestsDir(serverId, vmName).path;
-    return File('$base${Platform.pathSeparator}${timestamp}__$diskId.chain$suffix');
-  }
-
-  @override
-  File manifestFile(String serverId, String vmName, String diskId, String timestamp, {required bool inProgress}) {
-    final suffix = inProgress ? '.inprogress' : '';
-    final base = manifestsDir(serverId, vmName).path;
-    return File('$base${Platform.pathSeparator}$timestamp.manifest$suffix');
-  }
-
-  @override
-  File manifestGzFile(String serverId, String vmName, String diskId, String timestamp) {
-    final base = manifestsDir(serverId, vmName).path;
-    return File('$base${Platform.pathSeparator}$timestamp.manifest.gz');
   }
 
   @override
@@ -109,64 +75,38 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
 
   @override
   Future<void> prepareBackup(String serverId, String vmName) async {
-    await manifestsDir(serverId, vmName).create(recursive: true);
+    await _rootDir().create(recursive: true);
     await blobsDir().create(recursive: true);
     await tmpDir().create(recursive: true);
   }
 
   @override
-  DriverFileWrite startXmlWrite(String serverId, String vmName, String timestamp) {
-    final file = xmlFile(serverId, vmName, timestamp, inProgress: true);
-    file.parent.createSync(recursive: true);
-    final sink = file.openWrite();
-    return DriverFileWrite(
-      sink: sink,
-      commit: () async {
-        if (await file.exists()) {
-          await file.delete();
-        }
-      },
-    );
+  Future<void> uploadFile({required String relativePath, required File localFile}) async {
+    if (!_tmpWritesEnabled) {
+      return;
+    }
+    final finalFile = _relativeFile(relativePath);
+    final tempFile = File('${finalFile.path}.inprogress.${DateTime.now().microsecondsSinceEpoch}');
+    await tempFile.parent.create(recursive: true);
+    await tempFile.writeAsBytes(await localFile.readAsBytes());
+    try {
+      await tempFile.delete();
+    } catch (_) {}
   }
 
   @override
-  DriverFileWrite startChainWrite(String serverId, String vmName, String timestamp, String diskId) {
-    final file = chainFile(serverId, vmName, timestamp, diskId, inProgress: true);
-    file.parent.createSync(recursive: true);
-    final sink = file.openWrite();
-    return DriverFileWrite(
-      sink: sink,
-      commit: () async {
-        if (await file.exists()) {
-          await file.delete();
-        }
-      },
-    );
+  Future<List<String>> listRelativeFiles(String relativeDir) async {
+    return <String>[];
   }
 
   @override
-  DriverManifestWrite startManifestWrite(String serverId, String vmName, String diskId, String timestamp) {
-    final file = manifestFile(serverId, vmName, diskId, timestamp, inProgress: true);
-    file.parent.createSync(recursive: true);
-    final sink = file.openWrite();
-    return DriverManifestWrite(
-      sink: sink,
-      commit: () async {
-        if (await file.exists()) {
-          await file.delete();
-        }
-      },
-    );
-  }
-
-  @override
-  Future<void> finalizeManifest(DriverManifestWrite write) async {
-    await write.commit();
+  Future<List<int>?> readFileBytes(String relativePath) async {
+    return null;
   }
 
   @override
   Future<void> freshCleanup() async {
-    await _deleteDirIfExists(_manifestsRoot());
+    await _deleteDirIfExists(Directory('${_rootDir().path}${Platform.pathSeparator}manifests'));
     await _deleteDirIfExists(blobsDir());
   }
 
@@ -238,13 +178,23 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
   }
 
   @override
-  String backupCompletedMessage(String manifestsPath) => 'Backup completed (dummy driver)';
+  String backupCompletedMessage(String outputPath) => 'Backup completed (dummy driver)';
 
   @override
   Future<void> cleanupInProgressFiles() async {
-    await _deleteInProgressInDir(_manifestsRoot());
+    await _deleteInProgressInDir(_rootDir());
     await _deleteInProgressInDir(tmpDir());
     await _deleteInProgressInDir(blobsDir());
+  }
+
+  File _relativeFile(String relativePath) {
+    final normalized = relativePath
+        .replaceAll('\\', Platform.pathSeparator)
+        .replaceAll('/', Platform.pathSeparator)
+        .split(Platform.pathSeparator)
+        .where((part) => part.isNotEmpty)
+        .join(Platform.pathSeparator);
+    return File('${_rootDir().path}${Platform.pathSeparator}$normalized');
   }
 
   @override
