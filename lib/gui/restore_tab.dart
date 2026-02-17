@@ -17,7 +17,8 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
       _isLoadingRestoreEntries = true;
     });
     try {
-      final entries = await _agentApiClient.fetchRestoreEntries();
+      final destinationId = _selectedBackupDestinationId?.trim();
+      final entries = await _agentApiClient.fetchRestoreEntries(destinationId: destinationId);
       final selectedStillExists =
           _selectedRestoreVmName != null &&
           _selectedRestoreTimestamp != null &&
@@ -102,7 +103,8 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
       return;
     }
     try {
-      final precheck = await _agentApiClient.restorePrecheck(server.id, entry.xmlPath);
+      final destinationId = _selectedBackupDestinationId?.trim();
+      final precheck = await _agentApiClient.restorePrecheck(server.id, entry.xmlPath, destinationId: destinationId);
       var decision = 'overwrite';
       if (precheck.vmExists) {
         final selected = await _confirmRestoreDecision(entry.vmName, canDefineOnly: precheck.canDefineOnly);
@@ -111,7 +113,7 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
         }
         decision = selected;
       }
-      final start = await _agentApiClient.startRestore(server.id, entry.xmlPath, decision);
+      final start = await _agentApiClient.startRestore(server.id, entry.xmlPath, decision, destinationId: destinationId);
       _startRestoreJobPolling(start.jobId);
     } catch (error, stackTrace) {
       _logError('Restore failed.', error, stackTrace);

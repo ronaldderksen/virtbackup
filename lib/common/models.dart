@@ -132,7 +132,7 @@ class BackupDestination {
   final Map<String, dynamic> params;
 
   Map<String, dynamic> toMap() {
-    final map = <String, dynamic>{'id': id, 'name': name, 'driverId': driverId, 'enabled': enabled, 'disableFresh': disableFresh, 'params': params};
+    final map = <String, dynamic>{'id': id, 'name': name, 'driverId': driverId, 'enabled': enabled, 'disableFresh': disableFresh, 'params': Map<String, dynamic>.from(params)};
     if (driverId.trim() != 'filesystem') {
       map['storeBlobs'] = storeBlobs;
       map['useBlobs'] = useBlobs;

@@ -895,7 +895,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     final accessToken = decoded['access_token']?.toString() ?? '';
     final expiresIn = decoded['expires_in'];
     final newExpiresAt = _calculateExpiresAt(expiresIn);
-    await _persistRefreshedToken(accessToken: accessToken, expiresAt: newExpiresAt);
+    await _persistRefreshedToken(refreshToken: refresh, accessToken: accessToken, expiresAt: newExpiresAt);
     _logInfo('gdrive: access token refreshed, expiresAt=${newExpiresAt?.toIso8601String() ?? 'unknown'}');
     return accessToken;
   }
@@ -911,9 +911,10 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return DateTime.now().toUtc().add(Duration(seconds: parsed));
   }
 
-  Future<void> _persistRefreshedToken({required String accessToken, required DateTime? expiresAt}) async {
+  Future<void> _persistRefreshedToken({required String refreshToken, required String accessToken, required DateTime? expiresAt}) async {
     final destination = _gdriveDestination;
     final updatedParams = Map<String, dynamic>.from(destination.params);
+    updatedParams['refreshToken'] = refreshToken;
     updatedParams['accessToken'] = accessToken;
     if (expiresAt == null) {
       updatedParams.remove('expiresAt');

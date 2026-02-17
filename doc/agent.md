@@ -291,6 +291,7 @@ The agent supports optional native SFTP via FFI:
 - The GUI can store multiple agent addresses and switch between them.
 - For `127.0.0.1`, the GUI always uses the local `agent.token` file; other agents require a token entered in the GUI (token is mandatory).
 - Google Drive OAuth refresh/access tokens are stored encrypted in destination params (`destinations[*].params.accessTokenEnc`, `destinations[*].params.refreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.
+- Saving settings does not mutate in-memory destination token fields; token encryption only applies to the persisted YAML payload.
 - Google OAuth client config (`etc/google_oauth_client.json`) is bundled as a Flutter asset; lookup checks override path, `etc/` near executable/current dir, and bundled `flutter_assets/etc/google_oauth_client.json`.
 - SFTP password is stored encrypted in destination params (`destinations[*].params.passwordEnc`) using the same AES-GCM key derivation as SSH passwords.
 - Destination editor saves preserve existing `passwordEnc`/`accessTokenEnc`/`refreshTokenEnc` when plaintext fields are left empty; explicit Google Drive disconnect clears those tokens.
@@ -345,3 +346,4 @@ The agent supports optional native SFTP via FFI:
 - `backup.base_path` is deprecated; `destinations[id=filesystem].params.path` is the source of truth and is what gets persisted.
 - Backup uses `backupDestinationId` to pick the active destination.
 - Restore destination selection is request-driven via `destinationId` (`POST /servers/{id}/restore/start`), otherwise the active/default destination is used.
+- The GUI restore flow sends the currently selected backup destination as `destinationId` for restore entry listing, precheck, and restore start so restore reads stay on the same destination.

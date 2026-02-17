@@ -233,8 +233,10 @@ class AgentApiClient {
     }
   }
 
-  Future<List<RestoreEntry>> fetchRestoreEntries() async {
-    final response = await _get('/restore/entries');
+  Future<List<RestoreEntry>> fetchRestoreEntries({String? destinationId}) async {
+    final normalizedDestinationId = destinationId?.trim() ?? '';
+    final query = normalizedDestinationId.isEmpty ? '' : '?destinationId=${Uri.encodeQueryComponent(normalizedDestinationId)}';
+    final response = await _get('/restore/entries$query');
     if (response.statusCode != 200) {
       throw 'Agent responded ${response.statusCode}';
     }
@@ -245,16 +247,26 @@ class AgentApiClient {
     return decoded.whereType<Map>().map((item) => RestoreEntry.fromMap(Map<String, dynamic>.from(item))).toList();
   }
 
-  Future<RestorePrecheckResult> restorePrecheck(String serverId, String xmlPath) async {
-    final response = await _post('/servers/$serverId/restore/precheck', {'xmlPath': xmlPath});
+  Future<RestorePrecheckResult> restorePrecheck(String serverId, String xmlPath, {String? destinationId}) async {
+    final normalizedDestinationId = destinationId?.trim() ?? '';
+    final payload = <String, dynamic>{'xmlPath': xmlPath};
+    if (normalizedDestinationId.isNotEmpty) {
+      payload['destinationId'] = normalizedDestinationId;
+    }
+    final response = await _post('/servers/$serverId/restore/precheck', payload);
     if (response.statusCode != 200) {
       throw 'Agent responded ${response.statusCode}';
     }
     return RestorePrecheckResult.fromMap(Map<String, dynamic>.from(jsonDecode(response.body)));
   }
 
-  Future<AgentJobStart> startRestore(String serverId, String xmlPath, String decision) async {
-    final response = await _post('/servers/$serverId/restore/start', {'xmlPath': xmlPath, 'decision': decision});
+  Future<AgentJobStart> startRestore(String serverId, String xmlPath, String decision, {String? destinationId}) async {
+    final normalizedDestinationId = destinationId?.trim() ?? '';
+    final payload = <String, dynamic>{'xmlPath': xmlPath, 'decision': decision};
+    if (normalizedDestinationId.isNotEmpty) {
+      payload['destinationId'] = normalizedDestinationId;
+    }
+    final response = await _post('/servers/$serverId/restore/start', payload);
     if (response.statusCode != 200) {
       throw 'Agent responded ${response.statusCode}';
     }
