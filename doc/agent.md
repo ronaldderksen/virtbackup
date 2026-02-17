@@ -28,7 +28,7 @@ Key modules under `lib/agent`:
 
 ### Backup
 
-1. API call: `POST /servers/{id}/backup` (preferred: `destinationId` in body to select one configured destination; legacy `driverId` + `driverParams` are still accepted for compatibility).
+1. API call: `POST /servers/{id}/backup` (preferred: `storageId` in body to select one configured storage; legacy `driverId` + `driverParams` are still accepted for compatibility).
    - Optional per-job override: `blockSizeMB` (`1|2|4|8`) can override dedup block size for that backup run only.
 2. `AgentHttpServer` creates a job and calls `_startBackupJob`.
 3. `BackupAgent.runVmBackup` orchestrates the flow:
@@ -43,7 +43,7 @@ Key modules under `lib/agent`:
 
 ### Restore
 
-1. API call: `POST /servers/{id}/restore/start` (optional `driverId` in body to override the driver for this job only) or `POST /restore/sanity`.
+1. API call: `POST /servers/{id}/restore/start` (optional `driverId` in body to override the driver for this job only), `POST /restore/sanity`, or `POST /restore/quick-check`.
 2. `AgentHttpServer` resolves manifests and disk chains from stored metadata.
 3. Restore stream uploads reconstructed data to remote disks via SFTP.
 4. VM XML is uploaded and defined with `virsh define`.
@@ -100,7 +100,7 @@ There are two paths:
 ### End-to-End Flow (Hashblocks Path)
 
 1. **Backup start**
-   - Agent selects the driver and prepares the destination.
+   - Agent selects the driver and prepares the storage.
    - The agent initializes an in-memory blob cache and performs an upfront scan (`shard` -> blob names) before hash checks start.
    - Manifests and folders are created as needed.
 
@@ -221,13 +221,14 @@ Endpoints include:
 - `POST /config` persists settings immediately and performs server refresh/listener restart in the background.
 - `POST /ntfyme/test`: send a test Ntfy me notification using the configured token.
 - `GET /servers/{id}/vms`: VM inventory.
-- `POST /servers/{id}/backup`: start backup job (supports `destinationId`; legacy `driverId` is still accepted).
-- `POST /servers/{id}/restore/start`: start restore job (supports `destinationId`; legacy `driverId` is still accepted).
-- `POST /restore/sanity`: validate manifests/blobs.
+- `POST /servers/{id}/backup`: start backup job (supports `storageId`; legacy `driverId` is still accepted).
+- `POST /servers/{id}/restore/start`: start restore job (supports `storageId`; legacy `driverId` is still accepted).
+- `POST /restore/sanity`: validate manifests/blobs (`storageId` required).
+- `POST /restore/quick-check`: validate blob presence using cached blob directory scans (`storageId` required, no blob content hashing).
 - `GET /jobs`, `GET /jobs/{id}`: job status.
 - `POST /jobs/{id}/cancel`: cancel jobs.
 - `GET /events`: SSE stream.
-- `GET /restore/entries`: list restore candidates. Optional query `destinationId` selects a specific destination (or `driverId` for legacy driver-based filtering).
+- `GET /restore/entries`: list restore candidates (`storageId` query required; `driverId` optional override).
 
 ## Drivers
 
@@ -235,7 +236,7 @@ Three drivers are present:
 
 - `FilesystemBackupDriver`: stores manifests and blobs on disk.
 - `GdriveBackupDriver`: stores manifests and blobs in Google Drive (with a local cache).
-- `SftpBackupDriver`: stores manifests and blobs on an SFTP server (configured per destination in `destinations[*].params`).
+- `SftpBackupDriver`: stores manifests and blobs on an SFTP server (configured per storage in `storage[*].params`).
 - `DummyBackupDriver`: discards writes and simulates ~20 MB/s write throughput (useful for testing backpressure).
 
 Both implement the same `BackupDriver` interface.
@@ -284,17 +285,17 @@ The agent supports optional native SFTP via FFI:
 - Encrypted values are stored as `sshPasswordEnc` and decrypted into memory on load.
 - Ntfy me notifications are sent by the agent when backup/restore jobs finish (success or failure).
 - The agent posts JSON to `https://ntfyme.net/msg` with topic `virtbackup-job`.
-- `destination` is always included and contains the destination label.
-- `push_msg` is formatted as `<msg> on <destination label>`.
+- `storage` is always included and contains the storage label.
+- `push_msg` is formatted as `<msg> on <storage label>`.
 - `size` is included for backup jobs as a human-readable size (KiB/MiB/GiB).
 - Set `ntfymeToken` in agent settings to enable notifications; when empty, notifications are skipped.
 - The GUI can store multiple agent addresses and switch between them.
 - For `127.0.0.1`, the GUI always uses the local `agent.token` file; other agents require a token entered in the GUI (token is mandatory).
-- Google Drive OAuth refresh/access tokens are stored encrypted in destination params (`destinations[*].params.accessTokenEnc`, `destinations[*].params.refreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.
-- Saving settings does not mutate in-memory destination token fields; token encryption only applies to the persisted YAML payload.
+- Google Drive OAuth refresh/access tokens are stored encrypted in storage params (`storage[*].params.accessTokenEnc`, `storage[*].params.refreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.
+- Saving settings does not mutate in-memory storage token fields; token encryption only applies to the persisted YAML payload.
 - Google OAuth client config (`etc/google_oauth_client.json`) is bundled as a Flutter asset; lookup checks override path, `etc/` near executable/current dir, and bundled `flutter_assets/etc/google_oauth_client.json`.
-- SFTP password is stored encrypted in destination params (`destinations[*].params.passwordEnc`) using the same AES-GCM key derivation as SSH passwords.
-- Destination editor saves preserve existing `passwordEnc`/`accessTokenEnc`/`refreshTokenEnc` when plaintext fields are left empty; explicit Google Drive disconnect clears those tokens.
+- SFTP password is stored encrypted in storage params (`storage[*].params.passwordEnc`) using the same AES-GCM key derivation as SSH passwords.
+- Storage editor saves preserve existing `passwordEnc`/`accessTokenEnc`/`refreshTokenEnc` when plaintext fields are left empty; explicit Google Drive disconnect clears those tokens.
 - The Google Drive storage driver (`driverId: gdrive`) stores data as individual blob files using the same directory layout as the filesystem driver.
 - All Google Drive API calls retry up to 5 times with exponential backoff starting at 2 seconds; each retry recreates the HTTP client connection, and a persistent failure aborts the backup with a clean error.
 - Log records are routed by source: `agent` writes to `VirtBackup/logs/agent.log` and `gui` writes to `VirtBackup/logs/gui.log` under the configured backup base path.
@@ -314,24 +315,24 @@ The agent supports optional native SFTP via FFI:
 - Google Drive HTTP calls are logged as operation records with timestamp, action (`mkdir`, `list`, `upload`, `download`, `move`, `trash`, `auth.refresh`), status, duration, and request details.
 - Google Drive upload HTTP clients are leased from a bounded pool so upload retries/concurrency cannot fan out into unbounded concurrent connections.
 - Google Drive folder creation is guarded by a local folder lock and checks for existing folders before creating; when duplicate folder names are detected, the driver performs a strict merge into a primary folder and fails the operation if duplicates cannot be fully resolved.
-- Storage destinations are configured at root-level `destinations` in `agent.yaml` (not under `backup`), each with its own `id`, `driverId`, and `params`.
-- In the GUI Destination editor, `driverId: gdrive` supports OAuth connect via browser (PKCE); the returned tokens are stored in that destination's `params`.
-- Destination option `disableFresh: true` forces `fresh` off for that destination; backup requests with `fresh: true` continue and are logged.
-- `fresh` cleanup never deletes filesystem destination blobs (`destinations[id=filesystem].params.path/VirtBackup/blobs`).
+- Storage storage are configured at root-level `storage` in `agent.yaml` (not under `backup`), each with its own `id`, `driverId`, and `params`.
+- In the GUI Storage editor, `driverId: gdrive` supports OAuth connect via browser (PKCE); the returned tokens are stored in that storage's `params`.
+- Storage option `disableFresh: true` forces `fresh` off for that storage; backup requests with `fresh: true` continue and are logged.
+- `fresh` cleanup never deletes filesystem storage blobs (`storage[id=filesystem].params.path/VirtBackup/blobs`).
 - Blob storage is block-size scoped: `.../VirtBackup/blobs/<blockSizeMB>/`.
 - On agent startup, missing `blockSizeMB` is auto-added as `1` and written back immediately.
-- For non-filesystem destinations, `storeBlobs` and `useBlobs` are persisted in `agent.yaml`.
-- On agent startup, missing `storeBlobs`/`useBlobs` keys on non-filesystem destinations are auto-added as `false` and written back immediately.
-- For non-filesystem destinations, `uploadConcurrency` (backup) and `downloadConcurrency` (restore) are persisted in `agent.yaml`.
-- On agent startup, missing `uploadConcurrency`/`downloadConcurrency` keys on non-filesystem destinations are auto-added as `8` and written back immediately.
-- Restore read concurrency uses destination `downloadConcurrency` from `agent.yaml`; if not present, it defaults to `8`.
-- `SftpBackupDriver` resolves concurrency from the selected SFTP destination (`uploadConcurrency`/`downloadConcurrency`, default `8`) and uses that for SFTP/native session pools.
+- For non-filesystem storage, `storeBlobs` and `useBlobs` are persisted in `agent.yaml`.
+- On agent startup, missing `storeBlobs`/`useBlobs` keys on non-filesystem storage are auto-added as `false` and written back immediately.
+- For non-filesystem storage, `uploadConcurrency` (backup) and `downloadConcurrency` (restore) are persisted in `agent.yaml`.
+- On agent startup, missing `uploadConcurrency`/`downloadConcurrency` keys on non-filesystem storage are auto-added as `8` and written back immediately.
+- Restore read concurrency uses storage `downloadConcurrency` from `agent.yaml`; if not present, it defaults to `8`.
+- `SftpBackupDriver` resolves concurrency from the selected SFTP storage (`uploadConcurrency`/`downloadConcurrency`, default `8`) and uses that for SFTP/native session pools.
 - `SftpBackupDriver` requires native SFTP for blob data paths; no dartssh blob read/write fallback is used.
 - `SftpBackupDriver` native blob transfers use fixed 16 MiB chunks.
 - Native FFI `vb_sftp_read` uses a fill loop and keeps reading until the requested length is satisfied or EOF is reached, reducing Dart/FFI roundtrips on short libssh2 reads.
-- Remote destination cache folders under `<filesystem path>/VirtBackup/cache/` are keyed by destination id (not by driver id).
-- Restore behavior for non-filesystem destinations:
-  - `useBlobs: true`: restore tries local blobs from `destinations[id=filesystem].params.path` first; if present, remote download is skipped.
+- Remote storage cache folders under `<filesystem path>/VirtBackup/cache/` are keyed by storage id (not by driver id).
+- Restore behavior for non-filesystem storage:
+  - `useBlobs: true`: restore tries local blobs from `storage[id=filesystem].params.path` first; if present, remote download is skipped.
   - `storeBlobs: true`: blobs downloaded from remote during restore are also written to local filesystem blob storage.
   - Restore derives blob path scope from each manifest `block_size` (bytes -> MiB `1|2|4|8`); invalid/non-divisible values fail restore with an explicit error.
   - For `driverId: sftp`, remote blob reads use native SFTP streaming with native handle reuse; no dartssh fallback is used for blob-read path.
@@ -342,8 +343,8 @@ The agent supports optional native SFTP via FFI:
   - Restore keeps a bounded in-memory local blob read cache (512 MiB LRU) so repeated hashes are not re-read from disk.
   - Existing local blobs are not overwritten.
   - Local blob write failures fail the restore job.
-- Destination `id: filesystem` is mandatory, always enabled, and cannot be removed.
-- `backup.base_path` is deprecated; `destinations[id=filesystem].params.path` is the source of truth and is what gets persisted.
-- Backup uses `backupDestinationId` to pick the active destination.
-- Restore destination selection is request-driven via `destinationId` (`POST /servers/{id}/restore/start`), otherwise the active/default destination is used.
-- The GUI restore flow sends the currently selected backup destination as `destinationId` for restore entry listing, precheck, and restore start so restore reads stay on the same destination.
+- Storage `id: filesystem` is mandatory, always enabled, and cannot be removed.
+- `backup.base_path` is deprecated; `storage[id=filesystem].params.path` is the source of truth and is what gets persisted.
+- Backup uses `backupStorageId` to pick the active storage.
+- Restore storage selection is request-driven via `storageId` (`POST /servers/{id}/restore/start`), otherwise the active/default storage is used.
+- The GUI restore flow sends the currently selected backup storage as `storageId` for restore entry listing, precheck, and restore start so restore reads stay on the same storage.

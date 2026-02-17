@@ -35,8 +35,8 @@ for dest in ${DESTINATONS[@]}; do
     for bs in ${BS[@]}; do
       echo "[$(date '+%Y-%m-%d %H:%M:%S')] vm=${vm} dest=${dest}"
       [ "${dest}" = dummy ] && EXTRA_PARAMS+=( --no-restore )
-      echo "+ dart run tools/backup_verify.dart --vm ${vm} --dest ${dest} ${EXTRA_PARAMS[@]} --block-size-mb ${bs}"
-      dart run tools/backup_verify.dart --vm ${vm} --dest ${dest} ${EXTRA_PARAMS[@]} --block-size-mb ${bs} || true
+      echo "+ dart run tools/backup_verify.dart --vm ${vm} --storage ${dest} ${EXTRA_PARAMS[@]} --block-size-mb ${bs}"
+      dart run tools/backup_verify.dart --vm ${vm} --storage ${dest} ${EXTRA_PARAMS[@]} --block-size-mb ${bs} || true
     done
   done
 done

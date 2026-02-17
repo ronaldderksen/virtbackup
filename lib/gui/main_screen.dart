@@ -69,6 +69,7 @@ class BackupServerSetupScreen extends StatefulWidget {
 
 class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   static const String _guiLogLevelPrefKey = 'log_level';
+  static const String _guiSelectedStoragePrefPrefix = 'selected_storage_id';
   static const EdgeInsets _contentPadding = EdgeInsets.only(left: 24, right: 24, bottom: 32);
   static const double _contentTitleSpacing = 8;
   static const double _contentSectionSpacing = 32;
@@ -93,9 +94,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String? _editingServerId;
   String _savedBackupPath = '';
   String _savedNtfymeToken = '';
-  String? _selectedBackupDestinationId;
+  String? _selectedBackupStorageId;
   final Map<String, List<VmEntry>> _vmCacheByServerId = {};
-  bool _connectionVerified = false;
   int _selectedMenuIndex = 2;
   bool _isTesting = false;
   bool _allowEmptyServerNameForTest = false;
@@ -127,9 +127,9 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String? _restoreJobId;
   String? _sanityJobId;
   String _sanityStatusMessage = '';
-  int _sanityBytesTransferred = 0;
   double _sanitySpeedBytesPerSec = 0;
-  int _sanityTotalBytes = 0;
+  int _sanityCheckedBlocks = 0;
+  int _sanityTotalBlocks = 0;
   String _backupStatusMessage = '';
   int _backupCompletedDisks = 0;
   int _backupTotalDisks = 0;
@@ -142,8 +142,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   int _backupPhysicalTotalBytes = 0;
   double _backupPhysicalProgressPercent = 0;
   int _backupTotalBytes = 0;
-  int _backupSanityBytesTransferred = 0;
-  double _backupSanitySpeedBytesPerSec = 0;
+  int _backupSanityCheckBytesTransferred = 0;
+  double _backupSanityCheckSpeedBytesPerSec = 0;
   final AgentApiClient _agentApiClient = AgentApiClient();
   AppSettings _agentSettings = AppSettings.empty();
   bool _agentReachable = true;
@@ -256,6 +256,48 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
+  String _selectedStoragePrefKey() {
+    final agentId = _selectedAgentId?.trim() ?? '';
+    if (agentId.isEmpty) {
+      return _guiSelectedStoragePrefPrefix;
+    }
+    return '${_guiSelectedStoragePrefPrefix}_$agentId';
+  }
+
+  Future<String?> _loadSelectedStorageIdFromPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final value = (prefs.getString(_selectedStoragePrefKey()) ?? '').trim();
+    return value.isEmpty ? null : value;
+  }
+
+  Future<void> _persistSelectedStorageIdToPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = _selectedStoragePrefKey();
+    final value = _selectedBackupStorageId?.trim() ?? '';
+    if (value.isEmpty) {
+      await prefs.remove(key);
+      return;
+    }
+    await prefs.setString(key, value);
+  }
+
+  Future<void> _setSelectedBackupStorage(String? storageId, {required bool refreshRestoreEntries}) async {
+    _updateUi(() {
+      _selectedBackupStorageId = storageId;
+      if (refreshRestoreEntries && _selectedMenuIndex == 3) {
+        _isLoadingRestoreEntries = true;
+        _restoreEntries.clear();
+        _selectedRestoreVmName = null;
+        _selectedRestoreTimestamp = null;
+        _selectedRestoreSourceServerId = null;
+      }
+    });
+    await _persistSelectedStorageIdToPrefs();
+    if (refreshRestoreEntries && _selectedMenuIndex == 3) {
+      await _loadRestoreEntries();
+    }
+  }
+
   _AgentEndpoint? _currentAgent() {
     if (_selectedAgentId == null) {
       return _agentEndpoints.isNotEmpty ? _agentEndpoints.first : null;
@@ -328,8 +370,9 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     } finally {
       _isLoadingAgentSettings = false;
     }
-    _selectedBackupDestinationId = _agentSettings.backupDestinationId;
-    _ensureBackupDestinationSelection();
+    _selectedBackupStorageId = (await _loadSelectedStorageIdFromPrefs()) ?? _agentSettings.backupStorageId;
+    _ensureBackupStorageSelection();
+    unawaited(_persistSelectedStorageIdToPrefs());
     _backupPathController.text = _agentSettings.backupPath;
     _savedBackupPath = _backupPathController.text.trim();
     unawaited(_configureGuiLogWriter(backupPath: _savedBackupPath, rotateOnStartup: true));
@@ -338,12 +381,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _servers
       ..clear()
       ..addAll(_agentSettings.servers);
-    _connectionVerified = _agentSettings.connectionVerified;
 
-    final storedId = _agentSettings.selectedServerId;
-    if (storedId != null && _servers.any((server) => server.id == storedId)) {
-      _editingServerId = storedId;
-    } else if (_servers.isNotEmpty) {
+    if (_servers.isNotEmpty) {
       _editingServerId = _servers.first.id;
     } else {
       _editingServerId = null;
@@ -369,11 +408,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       if (server != null) {
         await _loadVmInventory(server);
       }
-    }
-    if (_requiresVerifiedIndex(_selectedMenuIndex) && !_connectionVerified) {
-      setState(() {
-        _selectedMenuIndex = 0;
-      });
     }
   }
 
@@ -706,47 +740,47 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     ];
   }
 
-  List<BackupDestination> _enabledDestinations() {
-    final result = <BackupDestination>[];
+  List<BackupStorage> _enabledStorages() {
+    final result = <BackupStorage>[];
     final seenIds = <String>{};
-    for (final destination in _agentSettings.destinations) {
-      if (!destination.enabled) {
+    for (final storage in _agentSettings.storage) {
+      if (!storage.enabled) {
         continue;
       }
-      final id = destination.id.trim();
+      final id = storage.id.trim();
       if (id.isEmpty || seenIds.contains(id)) {
         continue;
       }
       seenIds.add(id);
-      result.add(destination);
+      result.add(storage);
     }
     return result;
   }
 
-  void _ensureBackupDestinationSelection() {
-    final enabled = _enabledDestinations();
+  void _ensureBackupStorageSelection() {
+    final enabled = _enabledStorages();
     if (enabled.isEmpty) {
-      _selectedBackupDestinationId = null;
+      _selectedBackupStorageId = null;
       return;
     }
-    final currentId = _selectedBackupDestinationId?.trim() ?? '';
+    final currentId = _selectedBackupStorageId?.trim() ?? '';
     if (currentId.isNotEmpty) {
-      for (final destination in enabled) {
-        if (destination.id == currentId) {
+      for (final storage in enabled) {
+        if (storage.id == currentId) {
           return;
         }
       }
     }
-    final preferredId = _agentSettings.backupDestinationId?.trim() ?? '';
+    final preferredId = _agentSettings.backupStorageId?.trim() ?? '';
     if (preferredId.isNotEmpty) {
-      for (final destination in enabled) {
-        if (destination.id == preferredId) {
-          _selectedBackupDestinationId = destination.id;
+      for (final storage in enabled) {
+        if (storage.id == preferredId) {
+          _selectedBackupStorageId = storage.id;
           return;
         }
       }
     }
-    _selectedBackupDestinationId = enabled.first.id;
+    _selectedBackupStorageId = enabled.first.id;
   }
 
   void _scheduleAgentReconnect() {
@@ -919,15 +953,24 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       }
       final runningBackup = jobs.where((job) => job.type == AgentJobType.backup && job.state == AgentJobState.running).toList();
       if (runningBackup.isNotEmpty) {
-        _startBackupJobPolling(runningBackup.first.id);
+        final jobId = runningBackup.first.id;
+        if (_backupJobId != jobId || _backupJobTimer == null) {
+          _startBackupJobPolling(jobId);
+        }
       }
       final runningRestore = jobs.where((job) => job.type == AgentJobType.restore && job.state == AgentJobState.running).toList();
       if (runningRestore.isNotEmpty) {
-        _startRestoreJobPolling(runningRestore.first.id);
+        final jobId = runningRestore.first.id;
+        if (_restoreJobId != jobId || _restoreUiTimer == null) {
+          _startRestoreJobPolling(jobId);
+        }
       }
-      final runningSanity = jobs.where((job) => job.type == AgentJobType.sanity && job.state == AgentJobState.running).toList();
-      if (runningSanity.isNotEmpty) {
-        _startSanityJobPolling(runningSanity.first.id);
+      final runningSanityCheck = jobs.where((job) => job.type == AgentJobType.sanity && job.state == AgentJobState.running).toList();
+      if (runningSanityCheck.isNotEmpty) {
+        final jobId = runningSanityCheck.first.id;
+        if (_sanityJobId != jobId || _sanityJobTimer == null) {
+          _startSanityCheckJobPolling(jobId);
+        }
       }
     } catch (error, stackTrace) {
       _logError('Failed to sync running jobs.', error, stackTrace);
@@ -935,8 +978,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
-  Future<void> _persistServers({String? selectedId}) async {
-    _agentSettings = _agentSettings.copyWith(servers: List<ServerConfig>.from(_servers), selectedServerId: selectedId ?? _agentSettings.selectedServerId);
+  Future<void> _persistServers() async {
+    _agentSettings = _agentSettings.copyWith(servers: List<ServerConfig>.from(_servers));
     await _pushAgentSettings();
   }
 
@@ -962,19 +1005,14 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   }
 
   Future<void> _setConnectionVerified(bool verified) async {
-    _connectionVerified = verified;
     _agentSettings = _agentSettings.copyWith(connectionVerified: verified);
     await _pushAgentSettings();
     if (mounted) {
-      if (!verified && _requiresVerifiedIndex(_selectedMenuIndex)) {
-        _selectedMenuIndex = 0;
-      }
       setState(() {});
     }
   }
 
   Future<void> _clearConnectionVerified() async {
-    _connectionVerified = false;
     _agentSettings = _agentSettings.copyWith(connectionVerified: false);
     await _pushAgentSettings();
     if (mounted) {
@@ -1000,6 +1038,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       }
     }
     if (index == 3) {
+      _autoSelectRestoreServerForDebug();
       await _loadRestoreEntries();
     }
   }
@@ -1074,6 +1113,18 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     return '$current/$total';
   }
 
+  String _fullCheckUiText(String text) {
+    return text.replaceAll('Sanity check', 'Full check').replaceAll('Sanity Check', 'Full Check');
+  }
+
+  String _checkUiNameFromMessage(String text) {
+    final lower = text.toLowerCase();
+    if (lower.contains('quick check')) {
+      return 'Quick Check';
+    }
+    return 'Full Check';
+  }
+
   String _formatEta(int? seconds) {
     if (seconds == null || seconds <= 0) {
       return 'n/a';
@@ -1109,8 +1160,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       _backupPhysicalTotalBytes = status.physicalTotalBytes;
       _backupPhysicalProgressPercent = status.physicalProgressPercent;
       _backupTotalBytes = status.totalBytes;
-      _backupSanityBytesTransferred = status.sanityBytesTransferred;
-      _backupSanitySpeedBytesPerSec = status.sanitySpeedBytesPerSec;
+      _backupSanityCheckBytesTransferred = status.sanityBytesTransferred;
+      _backupSanityCheckSpeedBytesPerSec = status.sanitySpeedBytesPerSec;
     });
   }
 
@@ -1214,16 +1265,16 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     });
   }
 
-  void _applySanityJobStatus(AgentJobStatus status) {
+  void _applySanityCheckJobStatus(AgentJobStatus status) {
     if (!mounted) {
       return;
     }
     setState(() {
       _isSanityChecking = status.state == AgentJobState.running;
-      _sanityStatusMessage = status.message;
-      _sanityTotalBytes = status.totalBytes;
-      _sanityBytesTransferred = status.bytesTransferred;
+      _sanityStatusMessage = _fullCheckUiText(status.message);
       _sanitySpeedBytesPerSec = status.speedBytesPerSec;
+      _sanityCheckedBlocks = status.completedUnits;
+      _sanityTotalBlocks = status.totalUnits;
     });
   }
 
@@ -1280,16 +1331,16 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     });
   }
 
-  void _startSanityJobPolling(String jobId) {
+  void _startSanityCheckJobPolling(String jobId) {
     _sanityJobTimer?.cancel();
     _sanityJobId = jobId;
     var consecutiveErrors = 0;
-    _applySanityJobStatus(
+    _applySanityCheckJobStatus(
       AgentJobStatus(
         id: jobId,
         type: AgentJobType.sanity,
         state: AgentJobState.running,
-        message: 'Sanity check...',
+        message: 'Checking...',
         totalUnits: 0,
         completedUnits: 0,
         bytesTransferred: 0,
@@ -1305,28 +1356,27 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       try {
         final status = await _agentApiClient.fetchJob(jobId);
         if (consecutiveErrors > 0) {
-          _logInfo('Sanity polling recovered after $consecutiveErrors error(s).');
+          _logInfo('Sanity Check polling recovered after $consecutiveErrors error(s).');
           consecutiveErrors = 0;
         }
-        _applySanityJobStatus(status);
+        _applySanityCheckJobStatus(status);
         if (status.state != AgentJobState.running) {
-          _stopSanityJobPolling();
+          _stopSanityCheckJobPolling();
           if (mounted) {
-            final message = status.message.isEmpty ? (status.state == AgentJobState.success ? 'Sanity check completed.' : 'Sanity check failed.') : status.message;
-            if (status.state == AgentJobState.success || status.state == AgentJobState.canceled) {
-              _showSnackBarInfo(message);
-            } else {
-              _showSnackBarError(message);
-            }
+            final checkName = _checkUiNameFromMessage(status.message);
+            final checkNameLower = checkName.toLowerCase();
+            final message = status.message.isEmpty ? (status.state == AgentJobState.success ? '$checkNameLower completed.' : '$checkNameLower failed.') : _fullCheckUiText(status.message);
+            final title = status.state == AgentJobState.success ? '$checkName Completed' : (status.state == AgentJobState.canceled ? '$checkName Canceled' : '$checkName Failed');
+            unawaited(_showResultDialog(title: title, message: message));
           }
         }
       } catch (error) {
         consecutiveErrors += 1;
-        _logError('Sanity polling error (attempt $consecutiveErrors)', error, StackTrace.current);
+        _logError('Sanity Check polling error (attempt $consecutiveErrors)', error, StackTrace.current);
         if (consecutiveErrors >= 5) {
-          _stopSanityJobPolling();
+          _stopSanityCheckJobPolling();
           if (mounted) {
-            _showSnackBarError('Sanity polling failed: $error');
+            unawaited(_showResultDialog(title: 'Check Failed', message: 'Check polling failed: $error'));
           }
         }
       }
@@ -1345,7 +1395,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
-  void _stopSanityJobPolling() {
+  void _stopSanityCheckJobPolling() {
     _sanityJobTimer?.cancel();
     _sanityJobTimer = null;
     _sanityJobId = null;
@@ -1353,23 +1403,23 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       setState(() {
         _isSanityChecking = false;
         _sanityStatusMessage = '';
-        _sanityBytesTransferred = 0;
         _sanitySpeedBytesPerSec = 0;
-        _sanityTotalBytes = 0;
+        _sanityCheckedBlocks = 0;
+        _sanityTotalBlocks = 0;
       });
     }
   }
 
-  Future<void> _cancelSanityJob() async {
+  Future<void> _cancelSanityCheckJob() async {
     final jobId = _sanityJobId;
     if (jobId == null) {
       return;
     }
     try {
       await _agentApiClient.cancelJob(jobId);
-      _showSnackBarInfo('Sanity check cancel requested.');
+      _showSnackBarInfo('Check cancel requested.');
     } catch (error) {
-      _showSnackBarError('Sanity check cancel failed: $error');
+      _showSnackBarError('Check cancel failed: $error');
     }
   }
 
@@ -1401,8 +1451,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       setState(() {});
     }
   }
-
-  bool _isSelectedServerVerified() => _connectionVerified;
 
   Future<void> _configureGuiLogWriter({String? backupPath, bool rotateOnStartup = false}) async {
     final prefs = await SharedPreferences.getInstance();
@@ -1444,7 +1492,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     setState(updates);
   }
 
-  bool _requiresVerifiedIndex(int index) => index == 1 || index == 3;
   bool _requiresVmInventory(int index) => index == 1 || index == 2;
 
   void _applyServerToForm(ServerConfig server) {
@@ -1483,7 +1530,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       _applyServerToForm(server);
     });
     if (_isPersistedServer(server.id)) {
-      await _persistServers(selectedId: server.id);
+      await _persistServers();
     }
     _vmHasOverlayByName
       ..clear()
@@ -1505,6 +1552,22 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
+  void _autoSelectRestoreServerForDebug() {
+    if (!kDebugMode) {
+      return;
+    }
+    const preferred = 'nuc02';
+    for (final server in _servers) {
+      final id = server.id.trim().toLowerCase();
+      final name = server.name.trim().toLowerCase();
+      final host = server.sshHost.trim().toLowerCase();
+      if (id == preferred || name == preferred || host == preferred) {
+        _restoreServerId = server.id;
+        return;
+      }
+    }
+  }
+
   Future<void> _deleteServer(ServerConfig server) async {
     _servers.removeWhere((item) => item.id == server.id);
     if (_editingServerId == server.id) {
@@ -1519,7 +1582,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     if (_restoreServerId == server.id) {
       _restoreServerId = _editingServerId;
     }
-    await _persistServers(selectedId: _editingServerId);
+    await _persistServers();
     if (mounted) {
       setState(() {});
     }
@@ -1666,7 +1729,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         _servers.add(config);
       }
       _editingServerId = config.id;
-      await _persistServers(selectedId: config.id);
+      await _persistServers();
       if (mounted) {
         if (showSnackBar) {
           _showSnackBarInfo('Connection settings saved locally');
@@ -1683,23 +1746,23 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     try {
       final trimmedPath = _backupPathController.text.trim();
       final trimmedToken = _ntfymeTokenController.text.trim();
-      final updatedDestinations = List<BackupDestination>.from(_agentSettings.destinations);
-      final filesystemIndex = updatedDestinations.indexWhere((destination) => destination.id == AppSettings.filesystemDestinationId);
+      final updatedStorages = List<BackupStorage>.from(_agentSettings.storage);
+      final filesystemIndex = updatedStorages.indexWhere((storage) => storage.id == AppSettings.filesystemStorageId);
       if (filesystemIndex >= 0) {
-        final current = updatedDestinations[filesystemIndex];
-        updatedDestinations[filesystemIndex] = BackupDestination(
-          id: AppSettings.filesystemDestinationId,
-          name: AppSettings.filesystemDestinationName,
+        final current = updatedStorages[filesystemIndex];
+        updatedStorages[filesystemIndex] = BackupStorage(
+          id: AppSettings.filesystemStorageId,
+          name: AppSettings.filesystemStorageName,
           driverId: 'filesystem',
           enabled: true,
           disableFresh: current.disableFresh,
           params: <String, dynamic>{'path': trimmedPath},
         );
         if (current.params['path']?.toString().trim() != trimmedPath) {
-          _selectedBackupDestinationId ??= AppSettings.filesystemDestinationId;
+          _selectedBackupStorageId ??= AppSettings.filesystemStorageId;
         }
       }
-      _agentSettings = _agentSettings.copyWith(backupPath: trimmedPath, ntfymeToken: trimmedToken, backupDestinationId: _selectedBackupDestinationId, destinations: updatedDestinations);
+      _agentSettings = _agentSettings.copyWith(backupPath: trimmedPath, ntfymeToken: trimmedToken, backupStorageId: _selectedBackupStorageId, storage: updatedStorages);
       await _pushAgentSettings();
       _savedBackupPath = trimmedPath;
       unawaited(_configureGuiLogWriter(backupPath: trimmedPath));
@@ -1755,11 +1818,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
-  bool _isDestinationGdriveConnected(String refreshToken) {
+  bool _isStorageGdriveConnected(String refreshToken) {
     return refreshToken.trim().isNotEmpty;
   }
 
-  Future<void> _startGdriveDestinationOAuth({
+  Future<void> _startGdriveStorageOAuth({
     required String scope,
     required String existingRefreshToken,
     required void Function({required String accessToken, required String refreshToken, required String accountEmail, required int? expiresAtMs}) onConnected,
@@ -2008,20 +2071,20 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
-  String _generateDestinationId(String driverId) {
+  String _generateStorageId(String driverId) {
     final normalized = driverId.trim().isEmpty ? 'driver' : driverId.trim();
     final stamp = DateTime.now().microsecondsSinceEpoch;
     return 'dest_${normalized}_$stamp';
   }
 
-  Future<void> _openDestinationEditor() async {
-    var working = List<BackupDestination>.from(_agentSettings.destinations);
+  Future<void> _openStorageEditor() async {
+    var working = List<BackupStorage>.from(_agentSettings.storage);
     await showDialog<void>(
       context: context,
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setStateDialog) {
-            Future<void> editDestination({BackupDestination? existing}) async {
+            Future<void> editStorage({BackupStorage? existing}) async {
               final nameController = TextEditingController(text: existing?.name ?? '');
               var driverId = existing?.driverId ?? (_backupDrivers.isNotEmpty ? _backupDrivers.first.id : 'filesystem');
               var enabled = existing?.enabled ?? true;
@@ -2040,13 +2103,13 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
               var gdriveExpiresAtMs = params['expiresAt'] is num ? (params['expiresAt'] as num).toInt() : int.tryParse((params['expiresAt'] ?? '').toString());
               var gdriveDisconnected = false;
               final formKey = GlobalKey<FormState>();
-              final result = await showDialog<BackupDestination>(
+              final result = await showDialog<BackupStorage>(
                 context: context,
                 builder: (context) {
                   return StatefulBuilder(
-                    builder: (context, setStateDestination) {
+                    builder: (context, setStateStorage) {
                       return AlertDialog(
-                        title: Text(existing == null ? 'New destination' : 'Edit destination'),
+                        title: Text(existing == null ? 'New storage' : 'Edit storage'),
                         content: SizedBox(
                           width: 520,
                           child: Form(
@@ -2086,7 +2149,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                                 if (value == null || value.isEmpty) {
                                                   return;
                                                 }
-                                                setStateDestination(() {
+                                                setStateStorage(() {
                                                   driverId = value;
                                                 });
                                               },
@@ -2095,7 +2158,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                     },
                                   ),
                                   const SizedBox(height: 12),
-                                  SwitchListTile(value: enabled, onChanged: (value) => setStateDestination(() => enabled = value), title: const Text('Enabled')),
+                                  SwitchListTile(value: enabled, onChanged: (value) => setStateStorage(() => enabled = value), title: const Text('Enabled')),
                                   if (driverId == 'filesystem') ...[
                                     const SizedBox(height: 12),
                                     TextFormField(
@@ -2169,7 +2232,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                           onPressed: _isGdriveConnecting
                                               ? null
                                               : () async {
-                                                  await _startGdriveDestinationOAuth(
+                                                  await _startGdriveStorageOAuth(
                                                     scope: gdriveScopeController.text.trim(),
                                                     existingRefreshToken: gdriveRefreshController.text,
                                                     onConnected: ({required accessToken, required refreshToken, required accountEmail, required expiresAtMs}) {
@@ -2179,12 +2242,12 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                                       gdriveExpiresAtMs = expiresAtMs;
                                                       gdriveDisconnected = false;
                                                       if (context.mounted) {
-                                                        setStateDestination(() {});
+                                                        setStateStorage(() {});
                                                       }
                                                     },
                                                   );
                                                   if (context.mounted) {
-                                                    setStateDestination(() {});
+                                                    setStateStorage(() {});
                                                   }
                                                 },
                                           icon: const Icon(Icons.link_outlined),
@@ -2192,14 +2255,14 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                         ),
                                         const SizedBox(width: 12),
                                         TextButton.icon(
-                                          onPressed: _isDestinationGdriveConnected(gdriveRefreshController.text) && !_isGdriveConnecting
+                                          onPressed: _isStorageGdriveConnected(gdriveRefreshController.text) && !_isGdriveConnecting
                                               ? () {
                                                   gdriveAccessController.clear();
                                                   gdriveRefreshController.clear();
                                                   gdriveEmailController.clear();
                                                   gdriveExpiresAtMs = null;
                                                   gdriveDisconnected = true;
-                                                  setStateDestination(() {});
+                                                  setStateStorage(() {});
                                                 }
                                               : null,
                                           icon: const Icon(Icons.link_off_outlined),
@@ -2208,7 +2271,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                       ],
                                     ),
                                     const SizedBox(height: 8),
-                                    if (_isDestinationGdriveConnected(gdriveRefreshController.text)) ...[
+                                    if (_isStorageGdriveConnected(gdriveRefreshController.text)) ...[
                                       Text(
                                         'Connected account: ${gdriveEmailController.text.trim().isEmpty ? 'Unknown' : gdriveEmailController.text.trim()}',
                                         style: Theme.of(context).textTheme.bodyMedium,
@@ -2231,56 +2294,56 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                               if (!formKey.currentState!.validate()) {
                                 return;
                               }
-                              final destinationParams = <String, dynamic>{};
+                              final storageParams = <String, dynamic>{};
                               if (driverId == 'filesystem') {
-                                destinationParams['path'] = pathController.text.trim();
+                                storageParams['path'] = pathController.text.trim();
                               } else if (driverId == 'sftp') {
-                                destinationParams['host'] = sftpHostController.text.trim();
-                                destinationParams['port'] = int.tryParse(sftpPortController.text.trim()) ?? 22;
-                                destinationParams['username'] = sftpUserController.text.trim();
+                                storageParams['host'] = sftpHostController.text.trim();
+                                storageParams['port'] = int.tryParse(sftpPortController.text.trim()) ?? 22;
+                                storageParams['username'] = sftpUserController.text.trim();
                                 final sftpPassword = sftpPasswordController.text;
-                                destinationParams['password'] = sftpPassword;
+                                storageParams['password'] = sftpPassword;
                                 if (sftpPassword.isEmpty) {
                                   final encryptedPassword = params['passwordEnc']?.toString() ?? '';
                                   if (encryptedPassword.isNotEmpty) {
-                                    destinationParams['passwordEnc'] = encryptedPassword;
+                                    storageParams['passwordEnc'] = encryptedPassword;
                                   }
                                 }
-                                destinationParams['basePath'] = sftpBasePathController.text.trim();
+                                storageParams['basePath'] = sftpBasePathController.text.trim();
                               } else if (driverId == 'gdrive') {
                                 final accessToken = gdriveAccessController.text.trim();
                                 final refreshToken = gdriveRefreshController.text.trim();
-                                destinationParams['rootPath'] = gdriveRootController.text.trim();
-                                destinationParams['scope'] = gdriveScopeController.text.trim();
-                                destinationParams['accessToken'] = accessToken;
-                                destinationParams['refreshToken'] = refreshToken;
-                                destinationParams['accountEmail'] = gdriveEmailController.text.trim();
+                                storageParams['rootPath'] = gdriveRootController.text.trim();
+                                storageParams['scope'] = gdriveScopeController.text.trim();
+                                storageParams['accessToken'] = accessToken;
+                                storageParams['refreshToken'] = refreshToken;
+                                storageParams['accountEmail'] = gdriveEmailController.text.trim();
                                 if (gdriveExpiresAtMs != null) {
-                                  destinationParams['expiresAt'] = gdriveExpiresAtMs;
+                                  storageParams['expiresAt'] = gdriveExpiresAtMs;
                                 }
                                 if (!gdriveDisconnected) {
                                   if (accessToken.isEmpty) {
                                     final encryptedAccessToken = params['accessTokenEnc']?.toString() ?? '';
                                     if (encryptedAccessToken.isNotEmpty) {
-                                      destinationParams['accessTokenEnc'] = encryptedAccessToken;
+                                      storageParams['accessTokenEnc'] = encryptedAccessToken;
                                     }
                                   }
                                   if (refreshToken.isEmpty) {
                                     final encryptedRefreshToken = params['refreshTokenEnc']?.toString() ?? '';
                                     if (encryptedRefreshToken.isNotEmpty) {
-                                      destinationParams['refreshTokenEnc'] = encryptedRefreshToken;
+                                      storageParams['refreshTokenEnc'] = encryptedRefreshToken;
                                     }
                                   }
                                 }
                               }
                               Navigator.of(context).pop(
-                                BackupDestination(
-                                  id: existing?.id ?? _generateDestinationId(driverId),
+                                BackupStorage(
+                                  id: existing?.id ?? _generateStorageId(driverId),
                                   name: nameController.text.trim(),
                                   driverId: driverId,
                                   enabled: enabled,
                                   disableFresh: existing?.disableFresh ?? false,
-                                  params: destinationParams,
+                                  params: storageParams,
                                 ),
                               );
                             },
@@ -2306,14 +2369,14 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
             }
 
             return AlertDialog(
-              title: const Text('Destinations'),
+              title: const Text('Storages'),
               content: SizedBox(
                 width: 640,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     if (working.isEmpty)
-                      const Padding(padding: EdgeInsets.symmetric(vertical: 16), child: Text('No destinations configured.'))
+                      const Padding(padding: EdgeInsets.symmetric(vertical: 16), child: Text('No storage configured.'))
                     else
                       Flexible(
                         child: ListView.separated(
@@ -2321,16 +2384,16 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                           itemCount: working.length,
                           separatorBuilder: (_, _) => const Divider(height: 1),
                           itemBuilder: (context, index) {
-                            final destination = working[index];
-                            final isMandatoryFilesystem = destination.id == AppSettings.filesystemDestinationId;
+                            final storage = working[index];
+                            final isMandatoryFilesystem = storage.id == AppSettings.filesystemStorageId;
                             return ListTile(
-                              title: Text(destination.name),
-                              subtitle: Text('${destination.driverId} · ${destination.enabled ? 'enabled' : 'disabled'}'),
+                              title: Text(storage.name),
+                              subtitle: Text('${storage.driverId} · ${storage.enabled ? 'enabled' : 'disabled'}'),
                               trailing: Wrap(
                                 spacing: 8,
                                 children: [
                                   IconButton(
-                                    onPressed: () => editDestination(existing: destination),
+                                    onPressed: () => editStorage(existing: storage),
                                     icon: const Icon(Icons.edit_outlined),
                                   ),
                                   IconButton(
@@ -2342,7 +2405,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                             });
                                           },
                                     icon: const Icon(Icons.delete_outline),
-                                    tooltip: isMandatoryFilesystem ? 'Filesystem destination is required' : null,
+                                    tooltip: isMandatoryFilesystem ? 'Filesystem storage is required' : null,
                                   ),
                                 ],
                               ),
@@ -2353,7 +2416,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                     const SizedBox(height: 12),
                     Align(
                       alignment: Alignment.centerLeft,
-                      child: OutlinedButton.icon(onPressed: () => editDestination(), icon: const Icon(Icons.add), label: const Text('New destination')),
+                      child: OutlinedButton.icon(onPressed: () => editStorage(), icon: const Icon(Icons.add), label: const Text('New storage')),
                     ),
                   ],
                 ),
@@ -2363,28 +2426,29 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                 FilledButton(
                   onPressed: () async {
                     try {
-                      final nextBackupId = _selectedBackupDestinationId != null && working.any((item) => item.id == _selectedBackupDestinationId)
-                          ? _selectedBackupDestinationId
+                      final nextBackupId = _selectedBackupStorageId != null && working.any((item) => item.id == _selectedBackupStorageId)
+                          ? _selectedBackupStorageId
                           : (working.isEmpty ? null : working.first.id);
-                      final updated = _agentSettings.copyWith(destinations: working, backupDestinationId: nextBackupId);
+                      final updated = _agentSettings.copyWith(storage: working, backupStorageId: nextBackupId);
                       await _agentApiClient.updateConfig(updated);
                       if (!mounted) {
                         return;
                       }
                       setState(() {
                         _agentSettings = updated;
-                        _selectedBackupDestinationId = nextBackupId;
-                        _ensureBackupDestinationSelection();
+                        _selectedBackupStorageId = nextBackupId;
+                        _ensureBackupStorageSelection();
                       });
-                      _showSnackBarInfo('Destinations saved');
+                      unawaited(_persistSelectedStorageIdToPrefs());
+                      _showSnackBarInfo('Storages saved');
                       if (!context.mounted) {
                         return;
                       }
                       Navigator.of(context).pop();
                     } catch (error, stackTrace) {
-                      _logError('Saving destinations failed.', error, stackTrace);
+                      _logError('Saving storage failed.', error, stackTrace);
                       if (mounted) {
-                        _showSnackBarError('Saving destinations failed: $error');
+                        _showSnackBarError('Saving storage failed: $error');
                       }
                     }
                   },
@@ -2500,6 +2564,23 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
 
   void _showSnackBarError(String message, {Duration? duration}) {
     _showSnackBar(message, duration: duration ?? const Duration(seconds: 4));
+  }
+
+  Future<void> _showResultDialog({required String title, required String message}) async {
+    if (!mounted) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Text(title),
+          content: Text(message),
+          actions: [FilledButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Close'))],
+        );
+      },
+    );
   }
 
   Future<void> _runVmAction(ServerConfig server, VmEntry vm, VmAction action) async {
@@ -2645,7 +2726,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     final railWidth = railTheme.minWidth ?? 72;
     final isSaveEnabled = _selectedMenuIndex == 0 && !_isSavingAll && _hasAnyChanges();
     final isSettingsEnabled = true;
-    final isAgentReady = _agentReachable && !_agentAuthFailed && !_agentTokenMissing;
     return Scaffold(
       floatingActionButton: _selectedMenuIndex == 0
           ? FloatingActionButton.extended(
@@ -2670,27 +2750,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                   child: Column(
                     children: [
                       const SizedBox(height: 16),
-                      _buildRailItem(
-                        index: 1,
-                        icon: Icons.dns_outlined,
-                        selectedIcon: Icons.dns,
-                        label: 'Manage',
-                        colorScheme: colorScheme,
-                        railTheme: railTheme,
-                        enabled: isAgentReady && _isSelectedServerVerified(),
-                      ),
+                      _buildRailItem(index: 1, icon: Icons.dns_outlined, selectedIcon: Icons.dns, label: 'Manage', colorScheme: colorScheme, railTheme: railTheme, enabled: true),
                       const SizedBox(height: 8),
-                      _buildRailItem(index: 2, icon: Icons.backup_outlined, selectedIcon: Icons.backup, label: 'Backup', colorScheme: colorScheme, railTheme: railTheme, enabled: isAgentReady),
+                      _buildRailItem(index: 2, icon: Icons.backup_outlined, selectedIcon: Icons.backup, label: 'Backup', colorScheme: colorScheme, railTheme: railTheme, enabled: true),
                       const SizedBox(height: 8),
-                      _buildRailItem(
-                        index: 3,
-                        icon: Icons.restore_outlined,
-                        selectedIcon: Icons.restore,
-                        label: 'Restore',
-                        colorScheme: colorScheme,
-                        railTheme: railTheme,
-                        enabled: isAgentReady && _isSelectedServerVerified(),
-                      ),
+                      _buildRailItem(index: 3, icon: Icons.restore_outlined, selectedIcon: Icons.restore, label: 'Restore', colorScheme: colorScheme, railTheme: railTheme, enabled: true),
                       const Spacer(),
                       _buildRailItem(
                         index: 0,
@@ -2796,8 +2860,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                           ClipRRect(
                             borderRadius: BorderRadius.circular(6),
                             child: LinearProgressIndicator(
-                              value: (_backupSanityBytesTransferred > 0 || _backupSanitySpeedBytesPerSec > 0)
-                                  ? (_backupTotalBytes > 0 ? (_backupSanityBytesTransferred / _backupTotalBytes).clamp(0, 1).toDouble() : null)
+                              value: (_backupSanityCheckBytesTransferred > 0 || _backupSanityCheckSpeedBytesPerSec > 0)
+                                  ? (_backupTotalBytes > 0 ? (_backupSanityCheckBytesTransferred / _backupTotalBytes).clamp(0, 1).toDouble() : null)
                                   : (_backupTotalBytes > 0
                                         ? (_backupBytesTransferred / _backupTotalBytes).clamp(0, 1).toDouble()
                                         : (_backupTotalDisks > 0 ? _backupCompletedDisks / _backupTotalDisks : null)),
@@ -2810,7 +2874,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                               TextButton.icon(onPressed: _backupJobId == null ? null : _cancelBackupJob, icon: const Icon(Icons.cancel_outlined), label: const Text('Cancel')),
                             ],
                           ),
-                          if (_backupSanityBytesTransferred <= 0 && _backupSanitySpeedBytesPerSec <= 0)
+                          if (_backupSanityCheckBytesTransferred <= 0 && _backupSanityCheckSpeedBytesPerSec <= 0)
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -2824,9 +2888,9 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                 ),
                               ],
                             ),
-                          if (_backupSanityBytesTransferred > 0 || _backupSanitySpeedBytesPerSec > 0)
+                          if (_backupSanityCheckBytesTransferred > 0 || _backupSanityCheckSpeedBytesPerSec > 0)
                             Text(
-                              'Speed: ${_formatSpeed(_backupSanitySpeedBytesPerSec)} • Total: ${_formatTotalSizeWithTotal(_backupSanityBytesTransferred, _backupTotalBytes)}',
+                              'Speed: ${_formatSpeed(_backupSanityCheckSpeedBytesPerSec)} • Total: ${_formatTotalSizeWithTotal(_backupSanityCheckBytesTransferred, _backupTotalBytes)}',
                               style: Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
                             ),
                         ],
@@ -2890,17 +2954,17 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                         children: [
                           ClipRRect(
                             borderRadius: BorderRadius.circular(6),
-                            child: LinearProgressIndicator(value: _sanityTotalBytes > 0 ? (_sanityBytesTransferred / _sanityTotalBytes).clamp(0, 1).toDouble() : null),
+                            child: LinearProgressIndicator(value: _sanityTotalBlocks > 0 ? (_sanityCheckedBlocks / _sanityTotalBlocks).clamp(0, 1).toDouble() : null),
                           ),
                           const SizedBox(height: 8),
                           Row(
                             children: [
                               Expanded(child: Text(_sanityStatusMessage, style: Theme.of(context).textTheme.bodyMedium)),
-                              TextButton.icon(onPressed: _sanityJobId == null ? null : _cancelSanityJob, icon: const Icon(Icons.cancel_outlined), label: const Text('Cancel')),
+                              TextButton.icon(onPressed: _sanityJobId == null ? null : _cancelSanityCheckJob, icon: const Icon(Icons.cancel_outlined), label: const Text('Cancel')),
                             ],
                           ),
                           Text(
-                            'Speed: ${_formatSpeed(_sanitySpeedBytesPerSec)} • Total: ${_formatTotalSizeWithTotal(_sanityBytesTransferred, _sanityTotalBytes)}',
+                            'Speed: ${_formatSpeed(_sanitySpeedBytesPerSec)} • Blocks: $_sanityCheckedBlocks/$_sanityTotalBlocks',
                             style: Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
                           ),
                         ],

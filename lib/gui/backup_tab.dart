@@ -32,20 +32,18 @@ extension _BackupServerSetupBackupSection on _BackupServerSetupScreenState {
                   children: [
                     Expanded(
                       child: DropdownButtonFormField<String>(
-                        initialValue: _selectedBackupDestinationId,
-                        decoration: const InputDecoration(labelText: 'Destination', prefixIcon: Icon(Icons.cloud_queue_outlined), border: OutlineInputBorder()),
-                        items: _enabledDestinations().map((destination) => DropdownMenuItem<String>(value: destination.id, child: Text('${destination.name} (${destination.driverId})'))).toList(),
+                        initialValue: _selectedBackupStorageId,
+                        decoration: const InputDecoration(labelText: 'Storage', prefixIcon: Icon(Icons.cloud_queue_outlined), border: OutlineInputBorder()),
+                        items: _enabledStorages().map((storage) => DropdownMenuItem<String>(value: storage.id, child: Text('${storage.name} (${storage.driverId})'))).toList(),
                         onChanged: _isBackupRunning
                             ? null
                             : (value) {
-                                _updateUi(() {
-                                  _selectedBackupDestinationId = value;
-                                });
+                                unawaited(_setSelectedBackupStorage(value, refreshRestoreEntries: false));
                               },
                       ),
                     ),
                     const SizedBox(width: 12),
-                    OutlinedButton(onPressed: _isBackupRunning ? null : _openDestinationEditor, child: const Text('Manage')),
+                    OutlinedButton(onPressed: _isBackupRunning ? null : _openStorageEditor, child: const Text('Manage')),
                   ],
                 ),
                 const SizedBox(height: 16),

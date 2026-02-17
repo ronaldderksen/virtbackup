@@ -9,7 +9,7 @@ import 'package:http/io_client.dart';
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/google_oauth_client.dart';
-import 'package:virtbackup/common/models.dart' show BackupDestination;
+import 'package:virtbackup/common/models.dart' show BackupStorage;
 import 'package:virtbackup/common/settings.dart';
 
 class GdrivePrefillStats {
@@ -66,39 +66,39 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     if (basePath.isEmpty) {
       throw StateError('GDrive cache root requires backupPath in settings.');
     }
-    final destinationId = _cacheKeyFromSettings(settings);
-    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}cache${Platform.pathSeparator}$destinationId');
+    final storageId = _cacheKeyFromSettings(settings);
+    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}cache${Platform.pathSeparator}$storageId');
   }
 
   static String _cacheKeyFromSettings(AppSettings settings) {
-    final destinationId = settings.backupDestinationId?.trim() ?? '';
-    if (destinationId.isEmpty) {
-      throw StateError('GDrive cache root requires backupDestinationId in settings.');
+    final storageId = settings.backupStorageId?.trim() ?? '';
+    if (storageId.isEmpty) {
+      throw StateError('GDrive cache root requires backupStorageId in settings.');
     }
-    return destinationId.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    return storageId.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
   }
 
-  BackupDestination get _gdriveDestination => _resolveSelectedGdriveDestination(_settings);
-  Map<String, dynamic> get _params => _gdriveDestination.params;
+  BackupStorage get _gdriveStorage => _resolveSelectedGdriveStorage(_settings);
+  Map<String, dynamic> get _params => _gdriveStorage.params;
   String get _rootPath => (_params['rootPath'] ?? '').toString().trim();
   String get _accessToken => (_params['accessToken'] ?? '').toString().trim();
   String get _refreshToken => (_params['refreshToken'] ?? '').toString().trim();
   DateTime? get _expiresAt => AppSettings.parseDateTimeOrNull(_params['expiresAt']);
 
-  static BackupDestination _resolveSelectedGdriveDestination(AppSettings settings) {
-    final selectedId = settings.backupDestinationId?.trim() ?? '';
+  static BackupStorage _resolveSelectedGdriveStorage(AppSettings settings) {
+    final selectedId = settings.backupStorageId?.trim() ?? '';
     if (selectedId.isEmpty) {
-      throw StateError('Google Drive settings require backupDestinationId.');
+      throw StateError('Google Drive settings require backupStorageId.');
     }
-    for (final destination in settings.destinations) {
-      if (destination.id == selectedId) {
-        if (destination.driverId != 'gdrive') {
-          throw StateError('Selected destination "$selectedId" is not a Google Drive destination.');
+    for (final storage in settings.storage) {
+      if (storage.id == selectedId) {
+        if (storage.driverId != 'gdrive') {
+          throw StateError('Selected storage "$selectedId" is not a Google Drive storage.');
         }
-        return destination;
+        return storage;
       }
     }
-    throw StateError('Google Drive destination "$selectedId" not found.');
+    throw StateError('Google Drive storage "$selectedId" not found.');
   }
 
   @override
@@ -113,7 +113,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   );
 
   @override
-  String get destination => _cacheRoot.path;
+  String get storage => _cacheRoot.path;
 
   @override
   bool get discardWrites => false;
@@ -912,8 +912,8 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }
 
   Future<void> _persistRefreshedToken({required String refreshToken, required String accessToken, required DateTime? expiresAt}) async {
-    final destination = _gdriveDestination;
-    final updatedParams = Map<String, dynamic>.from(destination.params);
+    final storage = _gdriveStorage;
+    final updatedParams = Map<String, dynamic>.from(storage.params);
     updatedParams['refreshToken'] = refreshToken;
     updatedParams['accessToken'] = accessToken;
     if (expiresAt == null) {
@@ -922,14 +922,14 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       updatedParams['expiresAt'] = expiresAt.toUtc().toIso8601String();
     }
 
-    final updatedDestinations = <BackupDestination>[];
-    for (final candidate in _settings.destinations) {
-      if (candidate.id != destination.id) {
-        updatedDestinations.add(candidate);
+    final updatedStorages = <BackupStorage>[];
+    for (final candidate in _settings.storage) {
+      if (candidate.id != storage.id) {
+        updatedStorages.add(candidate);
         continue;
       }
-      updatedDestinations.add(
-        BackupDestination(
+      updatedStorages.add(
+        BackupStorage(
           id: candidate.id,
           name: candidate.name,
           driverId: candidate.driverId,
@@ -944,7 +944,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       );
     }
 
-    _settings = _settings.copyWith(destinations: updatedDestinations);
+    _settings = _settings.copyWith(storage: updatedStorages);
     await _persistSettings(_settings);
   }
 

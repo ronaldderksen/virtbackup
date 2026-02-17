@@ -40,7 +40,7 @@ class DriverParamDefinition {
 
 abstract class BackupDriver {
   BackupDriverCapabilities get capabilities;
-  String get destination;
+  String get storage;
   bool get discardWrites;
   int get bufferedBytes;
 

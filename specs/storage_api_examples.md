@@ -1,12 +1,12 @@
-# Destinations API Examples Spec
+# Storages API Examples Spec
 
 ## Purpose
-This document provides concrete request/response examples for destination-driven flows.
+This document provides concrete request/response examples for storage-driven flows.
 
 ## Preconditions
 - Agent config contains at least:
-- filesystem destination (`id=filesystem`)
-- one enabled non-filesystem destination (for example `dest_sftp`)
+- filesystem storage (`id=filesystem`)
+- one enabled non-filesystem storage (for example `dest_sftp`)
 
 ## GET /config
 
@@ -19,7 +19,7 @@ Authorization: Bearer <token>
 Response example (trimmed):
 ```json
 {
-  "destinations": [
+  "storage": [
     {
       "id": "filesystem",
       "name": "Filesystem",
@@ -43,21 +43,21 @@ Response example (trimmed):
       }
     }
   ],
-  "backupDestinationId": "dest_sftp",
-  "restoreDestinationId": null,
+  "backupStorageId": "dest_sftp",
+  "restoreStorageId": null,
   "backupDriverId": "sftp"
 }
 ```
 
 ## POST /servers/{id}/backup
 
-### Success with destinationId
+### Success with storageId
 
 Request:
 ```json
 {
   "vmName": "vm-prod-01",
-  "destinationId": "dest_sftp"
+  "storageId": "dest_sftp"
 }
 ```
 
@@ -68,13 +68,13 @@ Response:
 }
 ```
 
-### Success with destinationId + driverParams (legacy path still accepted)
+### Success with storageId + driverParams (legacy path still accepted)
 
 Request:
 ```json
 {
   "vmName": "vm-prod-01",
-  "destinationId": "dest_dummy",
+  "storageId": "dest_dummy",
   "driverParams": {
     "throttleMbps": 50
   }
@@ -88,20 +88,20 @@ Response:
 }
 ```
 
-### Error unknown destinationId
+### Error unknown storageId
 
 Request:
 ```json
 {
   "vmName": "vm-prod-01",
-  "destinationId": "missing_destination"
+  "storageId": "missing_storage"
 }
 ```
 
 Response:
 ```json
 {
-  "error": "destination not found or unavailable"
+  "error": "storage not found or unavailable"
 }
 ```
 
@@ -111,7 +111,7 @@ Request:
 ```json
 {
   "vmName": "vm-prod-01",
-  "destinationId": "dest_sftp",
+  "storageId": "dest_sftp",
   "driverId": "unknown_driver"
 }
 ```
@@ -126,7 +126,7 @@ Response:
 
 ## GET /restore/entries
 
-### Default destination scope
+### Default storage scope
 
 Request:
 ```http
@@ -148,11 +148,11 @@ Response example:
 ]
 ```
 
-### Destination override
+### Storage override
 
 Request:
 ```http
-GET /restore/entries?destinationId=dest_sftp
+GET /restore/entries?storageId=dest_sftp
 ```
 
 Response:
@@ -170,27 +170,27 @@ Response:
 ]
 ```
 
-### Destination takes precedence over driverId
+### Storage takes precedence over driverId
 
 Request:
 ```http
-GET /restore/entries?destinationId=dest_sftp&driverId=filesystem
+GET /restore/entries?storageId=dest_sftp&driverId=filesystem
 ```
 
 Expected behavior:
-- backend resolves using `destinationId=dest_sftp`
+- backend resolves using `storageId=dest_sftp`
 - `driverId` query is ignored for effective selection in this case
 
 ## POST /servers/{id}/restore/start
 
-### Success with destinationId
+### Success with storageId
 
 Request:
 ```json
 {
   "xmlPath": "/cache/sftp/manifests/server-a/vm-prod-01/2026-02-13T10-00-00__domain.xml",
   "decision": "overwrite",
-  "destinationId": "dest_sftp"
+  "storageId": "dest_sftp"
 }
 ```
 
@@ -201,30 +201,30 @@ Response:
 }
 ```
 
-### Error unknown destinationId
+### Error unknown storageId
 
 Request:
 ```json
 {
   "xmlPath": "/x.xml",
   "decision": "overwrite",
-  "destinationId": "missing_destination"
+  "storageId": "missing_storage"
 }
 ```
 
 Response:
 ```json
 {
-  "error": "destination not found or unavailable"
+  "error": "storage not found or unavailable"
 }
 ```
 
-## POST /config (destination persistence)
+## POST /config (storage persistence)
 
 Request example (trimmed):
 ```json
 {
-  "destinations": [
+  "storage": [
     {
       "id": "filesystem",
       "name": "Filesystem",
@@ -248,7 +248,7 @@ Request example (trimmed):
       }
     }
   ],
-  "backupDestinationId": "dest_sftp",
+  "backupStorageId": "dest_sftp",
   "backupDriverId": "sftp"
 }
 ```

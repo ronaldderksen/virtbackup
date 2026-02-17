@@ -194,8 +194,8 @@ class AgentApiClient {
     return decoded is Map && decoded['success'] == true;
   }
 
-  Future<AgentJobStart> startBackup(String serverId, String vmName, {required String destinationId, Map<String, dynamic>? driverParams}) async {
-    final payload = <String, dynamic>{'vmName': vmName, 'destinationId': destinationId};
+  Future<AgentJobStart> startBackup(String serverId, String vmName, {required String storageId, Map<String, dynamic>? driverParams}) async {
+    final payload = <String, dynamic>{'vmName': vmName, 'storageId': storageId};
     if (driverParams != null && driverParams.isNotEmpty) {
       payload['driverParams'] = driverParams;
     }
@@ -233,9 +233,9 @@ class AgentApiClient {
     }
   }
 
-  Future<List<RestoreEntry>> fetchRestoreEntries({String? destinationId}) async {
-    final normalizedDestinationId = destinationId?.trim() ?? '';
-    final query = normalizedDestinationId.isEmpty ? '' : '?destinationId=${Uri.encodeQueryComponent(normalizedDestinationId)}';
+  Future<List<RestoreEntry>> fetchRestoreEntries({required String storageId}) async {
+    final normalizedStorageId = storageId.trim();
+    final query = '?storageId=${Uri.encodeQueryComponent(normalizedStorageId)}';
     final response = await _get('/restore/entries$query');
     if (response.statusCode != 200) {
       throw 'Agent responded ${response.statusCode}';
@@ -247,12 +247,9 @@ class AgentApiClient {
     return decoded.whereType<Map>().map((item) => RestoreEntry.fromMap(Map<String, dynamic>.from(item))).toList();
   }
 
-  Future<RestorePrecheckResult> restorePrecheck(String serverId, String xmlPath, {String? destinationId}) async {
-    final normalizedDestinationId = destinationId?.trim() ?? '';
-    final payload = <String, dynamic>{'xmlPath': xmlPath};
-    if (normalizedDestinationId.isNotEmpty) {
-      payload['destinationId'] = normalizedDestinationId;
-    }
+  Future<RestorePrecheckResult> restorePrecheck(String serverId, String xmlPath, {required String storageId}) async {
+    final normalizedStorageId = storageId.trim();
+    final payload = <String, dynamic>{'xmlPath': xmlPath, 'storageId': normalizedStorageId};
     final response = await _post('/servers/$serverId/restore/precheck', payload);
     if (response.statusCode != 200) {
       throw 'Agent responded ${response.statusCode}';
@@ -260,12 +257,9 @@ class AgentApiClient {
     return RestorePrecheckResult.fromMap(Map<String, dynamic>.from(jsonDecode(response.body)));
   }
 
-  Future<AgentJobStart> startRestore(String serverId, String xmlPath, String decision, {String? destinationId}) async {
-    final normalizedDestinationId = destinationId?.trim() ?? '';
-    final payload = <String, dynamic>{'xmlPath': xmlPath, 'decision': decision};
-    if (normalizedDestinationId.isNotEmpty) {
-      payload['destinationId'] = normalizedDestinationId;
-    }
+  Future<AgentJobStart> startRestore(String serverId, String xmlPath, String decision, {required String storageId}) async {
+    final normalizedStorageId = storageId.trim();
+    final payload = <String, dynamic>{'xmlPath': xmlPath, 'decision': decision, 'storageId': normalizedStorageId};
     final response = await _post('/servers/$serverId/restore/start', payload);
     if (response.statusCode != 200) {
       throw 'Agent responded ${response.statusCode}';
@@ -273,8 +267,16 @@ class AgentApiClient {
     return AgentJobStart.fromMap(Map<String, dynamic>.from(jsonDecode(response.body)));
   }
 
-  Future<AgentJobStart> startSanityCheck(String xmlPath, String timestamp) async {
-    final response = await _post('/restore/sanity', {'xmlPath': xmlPath, 'timestamp': timestamp});
+  Future<AgentJobStart> startSanityCheck(String xmlPath, String timestamp, {required String storageId}) async {
+    final response = await _post('/restore/sanity', {'xmlPath': xmlPath, 'timestamp': timestamp, 'storageId': storageId.trim()});
+    if (response.statusCode != 200) {
+      throw 'Agent responded ${response.statusCode}';
+    }
+    return AgentJobStart.fromMap(Map<String, dynamic>.from(jsonDecode(response.body)));
+  }
+
+  Future<AgentJobStart> startQuickCheck(String xmlPath, String timestamp, {required String storageId}) async {
+    final response = await _post('/restore/quick-check', {'xmlPath': xmlPath, 'timestamp': timestamp, 'storageId': storageId.trim()});
     if (response.statusCode != 200) {
       throw 'Agent responded ${response.statusCode}';
     }

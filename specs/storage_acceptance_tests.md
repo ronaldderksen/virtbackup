@@ -1,33 +1,33 @@
-# Destinations Acceptance Test Scenarios
+# Storages Acceptance Test Scenarios
 
 ## Purpose
-This document defines end-to-end acceptance scenarios for destination behavior.
+This document defines end-to-end acceptance scenarios for storage behavior.
 
 ## Test data baseline
-- Destinations:
+- Storages:
 - `filesystem` (enabled, valid path)
 - `dest_sftp_a` (enabled, valid credentials A)
 - `dest_sftp_b` (enabled, valid credentials B)
 - `dest_gdrive` (enabled, valid refresh token)
 - `dest_dummy` (enabled)
-- one disabled destination for negative tests
+- one disabled storage for negative tests
 
 - At least one VM available for backup.
 
 ## Scenario 1: Mandatory filesystem invariant
 
 Steps:
-1. Submit `/config` without a filesystem destination.
+1. Submit `/config` without a filesystem storage.
 2. Read back `/config`.
 
 Expected:
-- `filesystem` destination exists and is enabled.
+- `filesystem` storage exists and is enabled.
 - filesystem path is present (empty allowed if not configured).
 
-## Scenario 2: Backup uses explicit destinationId
+## Scenario 2: Backup uses explicit storageId
 
 Steps:
-1. Start backup with `destinationId=dest_sftp_b`.
+1. Start backup with `storageId=dest_sftp_b`.
 2. Observe job logs and connection target.
 
 Expected:
@@ -35,60 +35,60 @@ Expected:
 - effective driver is `sftp`.
 - runtime settings reflect `dest_sftp_b` credentials, not `dest_sftp_a`.
 
-## Scenario 3: Backup default destination fallback
+## Scenario 3: Backup default storage fallback
 
 Steps:
-1. Set `backupDestinationId=dest_dummy`.
-2. Start backup without `destinationId`.
+1. Set `backupStorageId=dest_dummy`.
+2. Start backup without `storageId`.
 
 Expected:
-- selected destination resolves to `dest_dummy`.
+- selected storage resolves to `dest_dummy`.
 - job runs on `dummy` driver.
 
-## Scenario 4: Disabled destination rejection
+## Scenario 4: Disabled storage rejection
 
 Steps:
 1. Disable `dest_sftp_b`.
-2. Start backup with `destinationId=dest_sftp_b`.
+2. Start backup with `storageId=dest_sftp_b`.
 
 Expected:
-- request fails with destination unavailable error.
+- request fails with storage unavailable error.
 
-## Scenario 5: Restore entries destination scope
+## Scenario 5: Restore entries storage scope
 
 Steps:
-1. Query `/restore/entries?destinationId=dest_sftp_a`.
-2. Query `/restore/entries?destinationId=dest_gdrive`.
+1. Query `/restore/entries?storageId=dest_sftp_a`.
+2. Query `/restore/entries?storageId=dest_gdrive`.
 
 Expected:
-- each result set is scoped to its destination/driver context.
-- no cross-contamination of entries from other destinations.
+- each result set is scoped to its storage/driver context.
+- no cross-contamination of entries from other storage.
 
-## Scenario 6: Restore start with explicit destinationId
+## Scenario 6: Restore start with explicit storageId
 
 Steps:
-1. Select XML from destination A.
-2. Start restore with `destinationId` for destination A.
+1. Select XML from storage A.
+2. Start restore with `storageId` for storage A.
 
 Expected:
-- restore worker uses destination A settings.
-- job starts and progresses without destination mismatch errors.
+- restore worker uses storage A settings.
+- job starts and progresses without storage mismatch errors.
 
-## Scenario 7: Unknown destinationId errors
+## Scenario 7: Unknown storageId errors
 
 Steps:
-1. Start backup with missing destination id.
-2. Start restore with missing destination id.
-3. Query restore entries with missing destination id.
+1. Start backup with missing storage id.
+2. Start restore with missing storage id.
+3. Query restore entries with missing storage id.
 
 Expected:
-- backup/restore start reject with destination-not-found error.
-- restore entries returns empty list for unknown destination id.
+- backup/restore start reject with storage-not-found error.
+- restore entries returns empty list for unknown storage id.
 
 ## Scenario 8: Legacy driverId override compatibility
 
 Steps:
-1. Start backup with `destinationId=dest_sftp_a` and `driverId=dummy`.
+1. Start backup with `storageId=dest_sftp_a` and `driverId=dummy`.
 
 Expected:
 - request accepted (legacy compatibility).
@@ -110,30 +110,30 @@ Expected:
 ## Scenario 10: Worker serialization integrity
 
 Steps:
-1. Start backup with `destinationId=dest_sftp_b`.
+1. Start backup with `storageId=dest_sftp_b`.
 2. Confirm worker payload reconstructs correct SFTP settings.
 
 Expected:
 - `AppSettings.toMap()/fromMap()` round-trip keeps projected top-level SFTP fields.
-- no fallback to first `sftp` destination.
+- no fallback to first `sftp` storage.
 
 ## Scenario 11: GUI selection resilience
 
 Steps:
-1. Set selected destination in GUI to an enabled destination.
-2. Disable/remove that destination.
+1. Set selected storage in GUI to an enabled storage.
+2. Disable/remove that storage.
 3. Re-open backup tab.
 
 Expected:
 - GUI auto-selects:
 1. existing valid selection, else
-2. `backupDestinationId` if still enabled, else
-3. first enabled destination
+2. `backupStorageId` if still enabled, else
+3. first enabled storage
 
 ## Scenario 12: Filesystem path requirement enforcement
 
 Steps:
-1. Configure filesystem destination with empty path.
+1. Configure filesystem storage with empty path.
 2. Start backup/restore using filesystem driver context.
 
 Expected:

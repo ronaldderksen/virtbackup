@@ -18,7 +18,7 @@ Status: implemented. This document describes the dedup storage and manifest form
 ## Storage layout (agent-defined, driver-independent)
 The agent defines the logical backup layout. Drivers only perform generic read/write operations on relative paths.
 
-For filesystem destinations, the files are stored under `backup.base_path/VirtBackup`:
+For filesystem storage, the files are stored under `backup.base_path/VirtBackup`:
 ```
 backup.base_path/
   VirtBackup/
@@ -32,7 +32,7 @@ backup.base_path/
     tmp/
 ```
 
-Remote drivers (Google Drive/SFTP) use the same agent-defined relative layout under their own destination roots.
+Remote drivers (Google Drive/SFTP) use the same agent-defined relative layout under their own storage roots.
 
 ## Manifest format (text, gzipped)
 One manifest is written per VM timestamp and stored as `<timestamp>.manifest.gz`.

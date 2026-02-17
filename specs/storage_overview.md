@@ -1,10 +1,10 @@
-# Destinations Overview Spec
+# Storages Overview Spec
 
 ## Purpose
-This spec defines how storage destinations are modeled, persisted, selected, and propagated through backup and restore flows.
+This spec defines how storage storage are modeled, persisted, selected, and propagated through backup and restore flows.
 
 ## Canonical model
-A destination is represented by `BackupDestination` in `lib/common/models.dart`.
+A storage is represented by `BackupStorage` in `lib/common/models.dart`.
 
 Fields:
 - `id`: unique identifier used by API and UI selection.
@@ -13,7 +13,7 @@ Fields:
 - `enabled`: controls eligibility for selection.
 - `params`: driver-specific configuration map.
 
-## Destination params by driver
+## Storage params by driver
 Current expected params by built-in driver:
 
 - `filesystem`
@@ -37,11 +37,11 @@ Current expected params by built-in driver:
 - `accountEmail` (string)
 - `expiresAt` (ISO timestamp)
 
-## Settings-level fields related to destinations
+## Settings-level fields related to storage
 `AppSettings` in `lib/common/settings.dart` stores:
-- `destinations`
-- `backupDestinationId`
-- `restoreDestinationId`
+- `storage`
+- `backupStorageId`
+- `restoreStorageId`
 - `backupDriverId`
 
 It also stores projected driver runtime fields used by workers/drivers:
@@ -50,53 +50,53 @@ It also stores projected driver runtime fields used by workers/drivers:
 
 ## Invariants
 
-- Filesystem destination is mandatory.
-- `AppSettings.fromMap()` always ensures a destination with:
+- Filesystem storage is mandatory.
+- `AppSettings.fromMap()` always ensures a storage with:
 - `id = filesystem`
 - `name = Filesystem`
 - `driverId = filesystem`
 - `enabled = true`
 
-- If `backupDestinationId` is missing/empty, default backup destination is:
-1. first enabled destination
-2. otherwise first destination
+- If `backupStorageId` is missing/empty, default backup storage is:
+1. first enabled storage
+2. otherwise first storage
 
-- Destination parse rules:
+- Storage parse rules:
 - entries with empty `id` or empty `driverId` are dropped.
 - `enabled` defaults to `true` unless explicitly `false`.
 
 ## Selection precedence (high level)
 
 Backup and restore entry resolution use this order:
-1. explicit `destinationId` request (API body or query)
-2. configured `backupDestinationId` (for default backup destination)
-3. first enabled destination
-4. first destination
+1. explicit `storageId` request (API body or query)
+2. configured `backupStorageId` (for default backup storage)
+3. first enabled storage
+4. first storage
 
 Driver selection can also be forced with legacy `driverId` override on job start.
 
 ## Compatibility and migration status
 
-- Preferred model: destination-driven (`destinationId` + `destinations[*].params`).
+- Preferred model: storage-driven (`storageId` + `storage[*].params`).
 - Legacy compatibility retained:
 - backup/restore APIs still accept `driverId` and optional `driverParams`.
 - some legacy fields under `backup.*` are still read by tooling fallback paths.
 
 ## Security at rest
 
-`lib/agent/settings_store.dart` encrypts destination secrets:
-- SFTP password to `destinations[*].params.passwordEnc`
-- GDrive tokens to `destinations[*].params.accessTokenEnc` and `refreshTokenEnc`
+`lib/agent/settings_store.dart` encrypts storage secrets:
+- SFTP password to `storage[*].params.passwordEnc`
+- GDrive tokens to `storage[*].params.accessTokenEnc` and `refreshTokenEnc`
 
 At runtime, decrypted plain values are populated into `params.password`, `params.accessToken`, `params.refreshToken`.
 
 ## Runtime projection contract
 
-Before spawning backup/restore workers, HTTP server resolves a concrete destination and projects destination params into an `AppSettings` instance (`_settingsForDestination`).
+Before spawning backup/restore workers, HTTP server resolves a concrete storage and projects storage params into an `AppSettings` instance (`_settingsForStorage`).
 
-This projected settings object is serialized and sent to isolate workers. `AppSettings.toMap()` and `fromMap()` must preserve projected top-level SFTP/GDrive fields to avoid selecting credentials from unrelated destinations.
+This projected settings object is serialized and sent to isolate workers. `AppSettings.toMap()` and `fromMap()` must preserve projected top-level SFTP/GDrive fields to avoid selecting credentials from unrelated storage.
 
 ## Companion specs
 
-- API examples: `specs/destinations_api_examples.md`
-- Acceptance scenarios: `specs/destinations_acceptance_tests.md`
+- API examples: `specs/storages_api_examples.md`
+- Acceptance scenarios: `specs/storages_acceptance_tests.md`

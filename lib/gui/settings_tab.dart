@@ -254,7 +254,7 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                   width: double.infinity,
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.45), borderRadius: BorderRadius.circular(12)),
-                  child: const Text('Backup destinations are managed from the Backup tab (Destination -> Manage).'),
+                  child: const Text('Backup storage are managed from the Backup tab (Storage -> Manage).'),
                 ),
                 const SizedBox(height: 20),
                 Divider(color: colorScheme.outline.withValues(alpha: 0.2), height: 24),

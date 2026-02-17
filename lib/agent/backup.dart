@@ -176,7 +176,7 @@ class BackupAgent {
       _blobDirectoryCache = blobLister == null ? null : _BlobDirectoryCache(driver: blobLister, createShard: (hash) => driver.ensureBlobDir(hash));
       _startBlobCacheWorker();
       await driver.prepareBackup(serverFolderName, vmFolderName);
-      final manifestsBase = Directory('${driver.destination}${Platform.pathSeparator}manifests${Platform.pathSeparator}$serverFolderName${Platform.pathSeparator}$vmFolderName');
+      final manifestsBase = Directory('${driver.storage}${Platform.pathSeparator}manifests${Platform.pathSeparator}$serverFolderName${Platform.pathSeparator}$vmFolderName');
       final backupTimestamp = _dependencies.sanitizeFileName(DateTime.now().toIso8601String());
 
       final xmlResult = await _dependencies.runSshCommand(server, 'virsh dumpxml "${vm.name}"');

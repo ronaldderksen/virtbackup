@@ -55,17 +55,15 @@ void backupWorkerMain(Map<String, dynamic> init) {
     final blockSizeMBOverride = _parseBlockSizeMBOverride(payload['blockSizeMB']);
     final freshRequested = payload['fresh'] == true;
     final settingsMap = Map<String, dynamic>.from(payload['settings'] as Map? ?? const {});
-    final destinationMap = Map<String, dynamic>.from(payload['destination'] as Map? ?? const {});
+    final storageMap = Map<String, dynamic>.from(payload['storage'] as Map? ?? const {});
     final serverMap = Map<String, dynamic>.from(payload['server'] as Map? ?? const {});
     final vmMap = Map<String, dynamic>.from(payload['vm'] as Map? ?? const {});
 
     final settings = AppSettings.fromMap(settingsMap);
     final effectiveSettings = blockSizeMBOverride == null ? settings : settings.copyWith(blockSizeMB: blockSizeMBOverride);
-    final selectedDestination = destinationMap.isEmpty ? null : BackupDestination.fromMap(destinationMap);
-    final isFilesystemDestination = selectedDestination?.id == AppSettings.filesystemDestinationId;
-    final uploadConcurrency = isFilesystemDestination
-        ? null
-        : selectedDestination?.uploadConcurrency ?? (throw StateError('uploadConcurrency is required for destination "${selectedDestination?.id ?? ''}".'));
+    final selectedStorage = storageMap.isEmpty ? null : BackupStorage.fromMap(storageMap);
+    final isFilesystemStorage = selectedStorage?.id == AppSettings.filesystemStorageId;
+    final uploadConcurrency = isFilesystemStorage ? null : selectedStorage?.uploadConcurrency ?? (throw StateError('uploadConcurrency is required for storage "${selectedStorage?.id ?? ''}".'));
     final server = ServerConfig.fromMap(serverMap);
     final vm = VmEntry.fromMap(vmMap);
     await LogWriter.configureSourcePath(

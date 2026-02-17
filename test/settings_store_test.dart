@@ -14,15 +14,9 @@ void main() {
       final settings = AppSettings(
         backupPath: '/tmp/virtbackup',
         logLevel: 'info',
-        destinations: <BackupDestination>[
-          BackupDestination(
-            id: AppSettings.filesystemDestinationId,
-            name: AppSettings.filesystemDestinationName,
-            driverId: 'filesystem',
-            enabled: true,
-            params: <String, dynamic>{'path': '/tmp/virtbackup'},
-          ),
-          BackupDestination(
+        storage: <BackupStorage>[
+          BackupStorage(id: AppSettings.filesystemStorageId, name: AppSettings.filesystemStorageName, driverId: 'filesystem', enabled: true, params: <String, dynamic>{'path': '/tmp/virtbackup'}),
+          BackupStorage(
             id: 'dest-gdrive',
             name: 'Google Drive',
             driverId: 'gdrive',
@@ -30,7 +24,7 @@ void main() {
             params: <String, dynamic>{'refreshToken': 'refresh-token-value', 'accessToken': 'access-token-value'},
           ),
         ],
-        backupDestinationId: 'dest-gdrive',
+        backupStorageId: 'dest-gdrive',
         servers: <ServerConfig>[],
         connectionVerified: true,
         hashblocksLimitBufferMb: 1024,
@@ -41,7 +35,7 @@ void main() {
 
       await store.save(settings);
 
-      final gdriveParams = settings.destinations[1].params;
+      final gdriveParams = settings.storage[1].params;
       expect(gdriveParams['refreshToken'], 'refresh-token-value');
       expect(gdriveParams['accessToken'], 'access-token-value');
     } finally {

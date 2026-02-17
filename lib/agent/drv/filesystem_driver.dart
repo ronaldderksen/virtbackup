@@ -3,9 +3,9 @@ import 'dart:io';
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 
 class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
-  FilesystemBackupDriver(this._destination, {required int blockSizeMB}) : _blockSizeMB = blockSizeMB;
+  FilesystemBackupDriver(this._storageRoot, {required int blockSizeMB}) : _blockSizeMB = blockSizeMB;
 
-  final String _destination;
+  final String _storageRoot;
   final int _blockSizeMB;
   static const String _appFolderName = 'VirtBackup';
 
@@ -21,7 +21,7 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
   );
 
   @override
-  String get destination => _rootDir().path;
+  String get storage => _rootDir().path;
 
   @override
   bool get discardWrites => false;
@@ -29,7 +29,7 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
   @override
   int get bufferedBytes => 0;
 
-  Directory _rootDir() => Directory('$_destination${Platform.pathSeparator}$_appFolderName');
+  Directory _rootDir() => Directory('$_storageRoot${Platform.pathSeparator}$_appFolderName');
 
   @override
   Directory blobsDir() {

@@ -8,7 +8,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:ffi/ffi.dart';
 
 import 'package:virtbackup/agent/drv/backup_storage.dart';
-import 'package:virtbackup/common/models.dart' show BackupDestination;
+import 'package:virtbackup/common/models.dart' show BackupStorage;
 import 'package:virtbackup/common/settings.dart';
 
 class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
@@ -32,7 +32,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   final _SftpPool _blobCachePool = _SftpPool(maxSessions: _blobCacheReservedSessions);
   final _NativeSftpPool _nativePool;
 
-  Map<String, dynamic> get _params => _resolveSelectedSftpDestination(_settings).params;
+  Map<String, dynamic> get _params => _resolveSelectedSftpStorage(_settings).params;
   String get _host => (_params['host'] ?? '').toString().trim();
   int get _port => _parseRequiredPort(_params['port']);
   String get _username => (_params['username'] ?? '').toString().trim();
@@ -41,29 +41,29 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   int get _blockSizeMB => _settings.blockSizeMB;
 
   static int _resolveUploadConcurrency(AppSettings settings) {
-    final destination = _resolveSelectedSftpDestination(settings);
-    return destination.uploadConcurrency ?? _defaultConcurrency;
+    final storage = _resolveSelectedSftpStorage(settings);
+    return storage.uploadConcurrency ?? _defaultConcurrency;
   }
 
   static int _resolveDownloadConcurrency(AppSettings settings) {
-    final destination = _resolveSelectedSftpDestination(settings);
-    return destination.downloadConcurrency ?? _defaultConcurrency;
+    final storage = _resolveSelectedSftpStorage(settings);
+    return storage.downloadConcurrency ?? _defaultConcurrency;
   }
 
-  static BackupDestination _resolveSelectedSftpDestination(AppSettings settings) {
-    final selectedId = settings.backupDestinationId?.trim() ?? '';
+  static BackupStorage _resolveSelectedSftpStorage(AppSettings settings) {
+    final selectedId = settings.backupStorageId?.trim() ?? '';
     if (selectedId.isEmpty) {
-      throw StateError('SFTP settings require backupDestinationId.');
+      throw StateError('SFTP settings require backupStorageId.');
     }
-    for (final destination in settings.destinations) {
-      if (destination.id == selectedId) {
-        if (destination.driverId != 'sftp') {
-          throw StateError('Selected destination "$selectedId" is not an SFTP destination.');
+    for (final storage in settings.storage) {
+      if (storage.id == selectedId) {
+        if (storage.driverId != 'sftp') {
+          throw StateError('Selected storage "$selectedId" is not an SFTP storage.');
         }
-        return destination;
+        return storage;
       }
     }
-    throw StateError('SFTP destination "$selectedId" not found.');
+    throw StateError('SFTP storage "$selectedId" not found.');
   }
 
   static int _parseRequiredPort(Object? value) {
@@ -79,16 +79,16 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     if (basePath.isEmpty) {
       throw StateError('SFTP cache root requires backupPath in settings.');
     }
-    final destinationId = _cacheKeyFromSettings(settings);
-    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}cache${Platform.pathSeparator}$destinationId');
+    final storageId = _cacheKeyFromSettings(settings);
+    return Directory('$basePath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}cache${Platform.pathSeparator}$storageId');
   }
 
   static String _cacheKeyFromSettings(AppSettings settings) {
-    final destinationId = settings.backupDestinationId?.trim() ?? '';
-    if (destinationId.isEmpty) {
-      throw StateError('SFTP cache root requires backupDestinationId in settings.');
+    final storageId = settings.backupStorageId?.trim() ?? '';
+    if (storageId.isEmpty) {
+      throw StateError('SFTP cache root requires backupStorageId in settings.');
     }
-    return destinationId.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    return storageId.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
   }
 
   @override
@@ -104,7 +104,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   );
 
   @override
-  String get destination => _cacheRoot.path;
+  String get storage => _cacheRoot.path;
 
   @override
   bool get discardWrites => false;

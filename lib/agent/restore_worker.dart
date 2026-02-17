@@ -99,25 +99,25 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     final decision = payload['decision']?.toString() ?? 'overwrite';
     final xmlPath = payload['xmlPath']?.toString() ?? '';
     final settingsMap = Map<String, dynamic>.from(payload['settings'] as Map? ?? const {});
-    final destinationMap = Map<String, dynamic>.from(payload['destination'] as Map? ?? const {});
+    final storageMap = Map<String, dynamic>.from(payload['storage'] as Map? ?? const {});
     final serverMap = Map<String, dynamic>.from(payload['server'] as Map? ?? const {});
 
     final settings = AppSettings.fromMap(settingsMap);
-    final selectedDestination = destinationMap.isEmpty ? null : BackupDestination.fromMap(destinationMap);
-    BackupDestination? settingsDestination;
-    final selectedDestinationId = selectedDestination?.id;
-    if (selectedDestinationId != null && selectedDestinationId.isNotEmpty) {
-      for (final destination in settings.destinations) {
-        if (destination.id == selectedDestinationId) {
-          settingsDestination = destination;
+    final selectedStorage = storageMap.isEmpty ? null : BackupStorage.fromMap(storageMap);
+    BackupStorage? settingsStorage;
+    final selectedStorageId = selectedStorage?.id;
+    if (selectedStorageId != null && selectedStorageId.isNotEmpty) {
+      for (final storage in settings.storage) {
+        if (storage.id == selectedStorageId) {
+          settingsStorage = storage;
           break;
         }
       }
     }
-    final isFilesystemDestination = selectedDestination?.id == AppSettings.filesystemDestinationId;
-    final useStoredBlobs = !isFilesystemDestination && selectedDestination?.useBlobs == true;
-    final storeDownloadedBlobs = !isFilesystemDestination && selectedDestination?.storeBlobs == true;
-    final downloadConcurrency = settingsDestination?.downloadConcurrency ?? selectedDestination?.downloadConcurrency ?? 8;
+    final isFilesystemStorage = selectedStorage?.id == AppSettings.filesystemStorageId;
+    final useStoredBlobs = !isFilesystemStorage && selectedStorage?.useBlobs == true;
+    final storeDownloadedBlobs = !isFilesystemStorage && selectedStorage?.storeBlobs == true;
+    final downloadConcurrency = settingsStorage?.downloadConcurrency ?? selectedStorage?.downloadConcurrency ?? 8;
     final server = ServerConfig.fromMap(serverMap);
     await LogWriter.configureSourcePath(
       source: 'agent',
@@ -145,9 +145,9 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     final metadataDriver = buildDriverForSettings(settings.copyWith(blockSizeMB: 1));
     final blobDriversByBlockSizeMB = <int, BackupDriver>{};
     final localBlobDriversByBlockSizeMB = <int, BackupDriver>{};
-    final filesystemPath = (useStoredBlobs || storeDownloadedBlobs) ? _resolveFilesystemDestinationPath(settings) : '';
+    final filesystemPath = (useStoredBlobs || storeDownloadedBlobs) ? _resolveFilesystemStoragePath(settings) : '';
     if ((useStoredBlobs || storeDownloadedBlobs) && filesystemPath.isEmpty) {
-      throw 'restore blob cache failed: filesystem destination path is empty';
+      throw 'restore blob cache failed: filesystem storage path is empty';
     }
     final xmlFile = File(xmlPath);
 
@@ -1026,12 +1026,12 @@ Future<void> _storeLocalBlob(BackupDriver localBlobDriver, String hash, List<int
   }
 }
 
-String _resolveFilesystemDestinationPath(AppSettings settings) {
-  for (final destination in settings.destinations) {
-    if (destination.id != AppSettings.filesystemDestinationId) {
+String _resolveFilesystemStoragePath(AppSettings settings) {
+  for (final storage in settings.storage) {
+    if (storage.id != AppSettings.filesystemStorageId) {
       continue;
     }
-    return destination.params['path']?.toString().trim() ?? '';
+    return storage.params['path']?.toString().trim() ?? '';
   }
   return '';
 }

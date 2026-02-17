@@ -1,6 +1,16 @@
 part of 'main_screen.dart';
 
 extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
+  String _blockSizeLabel(RestoreEntry entry) {
+    if (entry.blockSizeMbValues.isEmpty) {
+      return '(n/a Blocksize)';
+    }
+    if (entry.blockSizeMbValues.length == 1) {
+      return '(${entry.blockSizeMbValues.first} MB Blocksize)';
+    }
+    return '(${entry.blockSizeMbValues.join('/')} MB Blocksizes)';
+  }
+
   ServerConfig? _getRestoreServer() {
     if (_restoreServerId == null) {
       return null;
@@ -17,8 +27,17 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
       _isLoadingRestoreEntries = true;
     });
     try {
-      final destinationId = _selectedBackupDestinationId?.trim();
-      final entries = await _agentApiClient.fetchRestoreEntries(destinationId: destinationId);
+      final storageId = _selectedBackupStorageId?.trim() ?? '';
+      if (storageId.isEmpty) {
+        _updateUi(() {
+          _restoreEntries.clear();
+          _selectedRestoreVmName = null;
+          _selectedRestoreTimestamp = null;
+          _selectedRestoreSourceServerId = null;
+        });
+        return;
+      }
+      final entries = await _agentApiClient.fetchRestoreEntries(storageId: storageId);
       final selectedStillExists =
           _selectedRestoreVmName != null &&
           _selectedRestoreTimestamp != null &&
@@ -103,8 +122,12 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
       return;
     }
     try {
-      final destinationId = _selectedBackupDestinationId?.trim();
-      final precheck = await _agentApiClient.restorePrecheck(server.id, entry.xmlPath, destinationId: destinationId);
+      final storageId = _selectedBackupStorageId?.trim() ?? '';
+      if (storageId.isEmpty) {
+        _showSnackBarInfo('Select a storage first.');
+        return;
+      }
+      final precheck = await _agentApiClient.restorePrecheck(server.id, entry.xmlPath, storageId: storageId);
       var decision = 'overwrite';
       if (precheck.vmExists) {
         final selected = await _confirmRestoreDecision(entry.vmName, canDefineOnly: precheck.canDefineOnly);
@@ -113,7 +136,7 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
         }
         decision = selected;
       }
-      final start = await _agentApiClient.startRestore(server.id, entry.xmlPath, decision, destinationId: destinationId);
+      final start = await _agentApiClient.startRestore(server.id, entry.xmlPath, decision, storageId: storageId);
       _startRestoreJobPolling(start.jobId);
     } catch (error, stackTrace) {
       _logError('Restore failed.', error, stackTrace);
@@ -131,17 +154,47 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
       return;
     }
     try {
-      final start = await _agentApiClient.startSanityCheck(entry.xmlPath, entry.timestamp);
-      _startSanityJobPolling(start.jobId);
+      final storageId = _selectedBackupStorageId?.trim() ?? '';
+      if (storageId.isEmpty) {
+        _showSnackBarInfo('Select a storage first.');
+        return;
+      }
+      final start = await _agentApiClient.startSanityCheck(entry.xmlPath, entry.timestamp, storageId: storageId);
+      _startSanityCheckJobPolling(start.jobId);
     } catch (error, stackTrace) {
       _logError('Sanity check failed.', error, stackTrace);
-      _showSnackBarError('Sanity check failed: $error');
+      _showSnackBarError('Full check failed: $error');
+    }
+  }
+
+  Future<void> _runQuickCheck() async {
+    if (_isSanityChecking) {
+      return;
+    }
+    final entry = _selectedRestoreEntry();
+    if (entry == null) {
+      _showSnackBarError('Select a restore entry first.');
+      return;
+    }
+    try {
+      final storageId = _selectedBackupStorageId?.trim() ?? '';
+      if (storageId.isEmpty) {
+        _showSnackBarInfo('Select a storage first.');
+        return;
+      }
+      final start = await _agentApiClient.startQuickCheck(entry.xmlPath, entry.timestamp, storageId: storageId);
+      _startSanityCheckJobPolling(start.jobId);
+    } catch (error, stackTrace) {
+      _logError('Quick check failed.', error, stackTrace);
+      _showSnackBarError('Quick check failed: $error');
     }
   }
 
   List<Widget> _buildRestoreSection(ColorScheme colorScheme) {
     final selectedEntry = _selectedRestoreEntry();
     final restoreServer = _getRestoreServer();
+    final restoreStorages = _enabledStorages().where((storage) => storage.driverId != 'dummy').toList();
+    final selectedRestoreStorageId = restoreStorages.any((storage) => storage.id == _selectedBackupStorageId) ? _selectedBackupStorageId : null;
     final canRestore = !_isRestoring && restoreServer != null && restoreServer.connectionType == ConnectionType.ssh && selectedEntry != null && selectedEntry.hasAllDisks;
     final canCheck = !_isSanityChecking && !_isRestoring && selectedEntry != null;
     final vmOptions = _restoreEntries.map((entry) => entry.vmName).toSet().toList()..sort();
@@ -169,12 +222,31 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
                 onChanged: _servers.isEmpty ? null : _selectRestoreServerId,
               ),
               const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      initialValue: selectedRestoreStorageId,
+                      decoration: const InputDecoration(labelText: 'Storage', prefixIcon: Icon(Icons.cloud_queue_outlined), border: OutlineInputBorder()),
+                      items: restoreStorages.map((storage) => DropdownMenuItem<String>(value: storage.id, child: Text('${storage.name} (${storage.driverId})'))).toList(),
+                      onChanged: _isRestoring
+                          ? null
+                          : (value) {
+                              unawaited(_setSelectedBackupStorage(value, refreshRestoreEntries: true));
+                            },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  OutlinedButton(onPressed: _isRestoring ? null : _openStorageEditor, child: const Text('Manage')),
+                ],
+              ),
+              const SizedBox(height: 12),
               DropdownButtonFormField<String>(
                 key: const ValueKey('restore_vm'),
                 initialValue: _selectedRestoreVmName,
                 decoration: const InputDecoration(labelText: 'VM', prefixIcon: Icon(Icons.memory_outlined), border: OutlineInputBorder()),
                 items: vmOptions.map((name) => DropdownMenuItem(value: name, child: Text(name))).toList(),
-                onChanged: vmOptions.isEmpty
+                onChanged: _isLoadingRestoreEntries || vmOptions.isEmpty
                     ? null
                     : (value) {
                         _updateUi(() {
@@ -195,8 +267,10 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
                 key: const ValueKey('restore_timestamp'),
                 initialValue: selectedKey,
                 decoration: const InputDecoration(labelText: 'Date', prefixIcon: Icon(Icons.event_outlined), border: OutlineInputBorder()),
-                items: dateEntries.map((entry) => DropdownMenuItem(value: '${entry.timestamp}|${entry.sourceServerId}', child: Text('${entry.timestamp} • ${entry.sourceServerName}'))).toList(),
-                onChanged: dateEntries.isEmpty
+                items: dateEntries
+                    .map((entry) => DropdownMenuItem(value: '${entry.timestamp}|${entry.sourceServerId}', child: Text('${entry.timestamp} • ${entry.sourceServerName} • ${_blockSizeLabel(entry)}')))
+                    .toList(),
+                onChanged: _isLoadingRestoreEntries || dateEntries.isEmpty
                     ? null
                     : (value) {
                         _updateUi(() {
@@ -216,7 +290,17 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
                 children: [
                   FilledButton.icon(onPressed: canRestore ? _runRestore : null, icon: const Icon(Icons.restore), label: Text(_isRestoring ? 'Restoring...' : 'Restore')),
                   const SizedBox(width: 12),
-                  OutlinedButton.icon(onPressed: canCheck ? _runSanityCheck : null, icon: const Icon(Icons.check_circle_outline), label: Text(_isSanityChecking ? 'Checking...' : 'Check')),
+                  OutlinedButton.icon(
+                    onPressed: canCheck ? _runSanityCheck : null,
+                    icon: const Icon(Icons.check_circle_outline),
+                    label: Text(_isSanityChecking ? 'Full check running...' : 'Full check'),
+                  ),
+                  const SizedBox(width: 12),
+                  OutlinedButton.icon(
+                    onPressed: canCheck ? _runQuickCheck : null,
+                    icon: const Icon(Icons.flash_on_outlined),
+                    label: Text(_isSanityChecking ? 'Quick check running...' : 'Quick check'),
+                  ),
                 ],
               ),
               const SizedBox(height: 12),

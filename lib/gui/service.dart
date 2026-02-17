@@ -41,13 +41,13 @@ extension _BackupServerSetupBackupService on _BackupServerSetupScreenState {
       _showSnackBarInfo('Set a Backup base path in Settings first.');
       return;
     }
-    final destinationId = _selectedBackupDestinationId?.trim() ?? '';
-    if (destinationId.isEmpty) {
-      _showSnackBarError('Select a destination first.');
+    final storageId = _selectedBackupStorageId?.trim() ?? '';
+    if (storageId.isEmpty) {
+      _showSnackBarError('Select a storage first.');
       return;
     }
     try {
-      final start = await _agentApiClient.startBackup(server.id, vm.name, destinationId: destinationId);
+      final start = await _agentApiClient.startBackup(server.id, vm.name, storageId: storageId);
       _startBackupJobPolling(start.jobId);
     } catch (error) {
       _showSnackBarError('Backup failed: $error');

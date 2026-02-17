@@ -27,7 +27,8 @@ class _Args {
     required this.fresh,
     required this.driverParams,
     required this.blockSizeMBOverride,
-    this.destinationId,
+    required this.checkMode,
+    this.storageId,
     this.agentTokenFile,
     this.sshKeyPath,
   });
@@ -50,7 +51,8 @@ class _Args {
   final bool fresh;
   final Map<String, dynamic> driverParams;
   final int? blockSizeMBOverride;
-  final String? destinationId;
+  final String? checkMode;
+  final String? storageId;
   final String? agentTokenFile;
   final String? sshKeyPath;
 
@@ -73,7 +75,8 @@ class _Args {
     bool? fresh,
     Map<String, dynamic>? driverParams,
     int? blockSizeMBOverride,
-    String? destinationId,
+    String? checkMode,
+    String? storageId,
     String? agentTokenFile,
     String? sshKeyPath,
   }) {
@@ -96,7 +99,8 @@ class _Args {
       fresh: fresh ?? this.fresh,
       driverParams: driverParams ?? this.driverParams,
       blockSizeMBOverride: blockSizeMBOverride ?? this.blockSizeMBOverride,
-      destinationId: destinationId ?? this.destinationId,
+      checkMode: checkMode ?? this.checkMode,
+      storageId: storageId ?? this.storageId,
       agentTokenFile: agentTokenFile ?? this.agentTokenFile,
       sshKeyPath: sshKeyPath ?? this.sshKeyPath,
     );
@@ -135,6 +139,13 @@ class _JobStatus {
   final int physicalRemainingBytes;
   final int physicalTotalBytes;
   final double physicalProgressPercent;
+}
+
+class _SelectedRestoreEntry {
+  const _SelectedRestoreEntry({required this.xmlPath, required this.timestamp});
+
+  final String xmlPath;
+  final String timestamp;
 }
 
 void main(List<String> args) async {
@@ -239,13 +250,33 @@ void main(List<String> args) async {
       return;
     }
 
-    if (resolved.skipRestore) {
+    if (resolved.skipRestore && resolved.checkMode == null) {
       stdout.writeln('Skipping restore + md5 due to --no-restore');
       return;
     }
 
-    final xmlPath = await _pickLatestRestoreXml(client, resolved);
+    final selectedEntry = await _pickLatestRestoreEntry(client, resolved);
+    final xmlPath = selectedEntry.xmlPath;
     stdout.writeln('Using restore xml: $xmlPath');
+
+    if (resolved.checkMode != null) {
+      final checkJobId = await _startCheck(client, resolved, selectedEntry);
+      activeJobId = checkJobId;
+      stdout.writeln('Started ${resolved.checkMode} check job: $checkJobId');
+      final checkOk = await _waitForJob(client, resolved, checkJobId);
+      if (!checkOk) {
+        exitCode = 1;
+        return;
+      }
+      activeJobId = null;
+      stdout.writeln('Skipping restore + md5 because --check was requested.');
+      return;
+    }
+
+    if (resolved.skipRestore) {
+      stdout.writeln('Skipping restore + md5 due to --no-restore');
+      return;
+    }
 
     await _restorePrecheck(client, resolved, xmlPath);
     final restoreJobId = await _startRestore(client, resolved, xmlPath);
@@ -404,8 +435,9 @@ _Args? _parseArgs(List<String> args) {
   var cancelAfterRandom = false;
   var fresh = false;
   int? blockSizeMBOverride;
+  String? checkMode;
   final driverParams = <String, dynamic>{};
-  String? destinationId;
+  String? storageId;
   String? agentToken;
   String? agentTokenFile;
 
@@ -456,14 +488,17 @@ _Args? _parseArgs(List<String> args) {
       case '--fresh':
         fresh = true;
         break;
-      case '--dest':
-        destinationId = _readValue(args, ++i, arg);
+      case '--storage':
+        storageId = _readValue(args, ++i, arg);
         break;
       case '--driver-param':
         _applyDriverParam(driverParams, _readValue(args, ++i, arg));
         break;
       case '--block-size-mb':
         blockSizeMBOverride = _parseBlockSizeMBOverride(_readValue(args, ++i, arg));
+        break;
+      case '--check':
+        checkMode = _parseCheckMode(_readValue(args, ++i, arg));
         break;
       case '--token':
         agentToken = _readValue(args, ++i, arg);
@@ -503,8 +538,9 @@ _Args? _parseArgs(List<String> args) {
     cancelAfterRandom: cancelAfterRandom,
     fresh: fresh,
     blockSizeMBOverride: blockSizeMBOverride,
+    checkMode: checkMode,
     driverParams: driverParams,
-    destinationId: destinationId,
+    storageId: storageId,
     agentTokenFile: agentTokenFile,
   );
 }
@@ -550,6 +586,14 @@ int _parseBlockSizeMBOverride(String raw) {
     throw ArgumentError('Invalid --block-size-mb. Allowed values: 1, 2, 4, 8.');
   }
   return parsed;
+}
+
+String _parseCheckMode(String raw) {
+  final value = raw.trim().toLowerCase();
+  if (value != 'full' && value != 'quick') {
+    throw ArgumentError('Invalid --check value. Allowed values: full, quick.');
+  }
+  return value;
 }
 
 HttpClient _createHttpClient(Uri baseUri) {
@@ -603,32 +647,32 @@ Future<Map<String, dynamic>> _fetchConfig(http.Client client, _Args args) async 
 }
 
 String _extractBackupPath(Map<String, dynamic> payload, _Args args) {
-  final requestedDestinationId = args.destinationId?.trim() ?? '';
-  if (requestedDestinationId.isNotEmpty) {
-    final destination = _findDestinationById(payload, requestedDestinationId);
-    if (destination == null) {
-      throw StateError('Destination not found: $requestedDestinationId');
+  final requestedStorageId = args.storageId?.trim() ?? '';
+  if (requestedStorageId.isNotEmpty) {
+    final storage = _findStorageById(payload, requestedStorageId);
+    if (storage == null) {
+      throw StateError('Storage not found: $requestedStorageId');
     }
-    final destinationPath = _pathFromDestination(destination);
-    if (destinationPath != null && destinationPath.isNotEmpty) {
-      return destinationPath;
+    final storagePath = _pathFromStorage(storage);
+    if (storagePath != null && storagePath.isNotEmpty) {
+      return storagePath;
     }
-    final driverId = destination['driverId']?.toString().trim();
-    final name = destination['name']?.toString().trim();
-    return 'destination=$requestedDestinationId${name == null || name.isEmpty ? '' : ' ($name)'}${driverId == null || driverId.isEmpty ? '' : ' driver=$driverId'}';
+    final driverId = storage['driverId']?.toString().trim();
+    final name = storage['name']?.toString().trim();
+    return 'storage=$requestedStorageId${name == null || name.isEmpty ? '' : ' ($name)'}${driverId == null || driverId.isEmpty ? '' : ' driver=$driverId'}';
   }
 
-  final selectedDestinationId = payload['backupDestinationId']?.toString().trim() ?? '';
-  if (selectedDestinationId.isNotEmpty) {
-    final destination = _findDestinationById(payload, selectedDestinationId);
-    if (destination != null) {
-      final destinationPath = _pathFromDestination(destination);
-      if (destinationPath != null && destinationPath.isNotEmpty) {
-        return destinationPath;
+  final selectedStorageId = payload['backupStorageId']?.toString().trim() ?? '';
+  if (selectedStorageId.isNotEmpty) {
+    final storage = _findStorageById(payload, selectedStorageId);
+    if (storage != null) {
+      final storagePath = _pathFromStorage(storage);
+      if (storagePath != null && storagePath.isNotEmpty) {
+        return storagePath;
       }
-      final driverId = destination['driverId']?.toString().trim();
-      final name = destination['name']?.toString().trim();
-      return 'destination=$selectedDestinationId${name == null || name.isEmpty ? '' : ' ($name)'}${driverId == null || driverId.isEmpty ? '' : ' driver=$driverId'}';
+      final driverId = storage['driverId']?.toString().trim();
+      final name = storage['name']?.toString().trim();
+      return 'storage=$selectedStorageId${name == null || name.isEmpty ? '' : ' ($name)'}${driverId == null || driverId.isEmpty ? '' : ' driver=$driverId'}';
     }
   }
 
@@ -643,25 +687,25 @@ String _extractBackupPath(Map<String, dynamic> payload, _Args args) {
   throw StateError('Config missing backup path (expected backup.base_path).');
 }
 
-Map<String, dynamic>? _findDestinationById(Map<String, dynamic> payload, String destinationId) {
-  final destinations = payload['destinations'];
-  if (destinations is! List) {
+Map<String, dynamic>? _findStorageById(Map<String, dynamic> payload, String storageId) {
+  final storage = payload['storage'];
+  if (storage is! List) {
     return null;
   }
-  for (final entry in destinations) {
+  for (final entry in storage) {
     if (entry is! Map) {
       continue;
     }
     final map = Map<String, dynamic>.from(entry);
-    if (map['id']?.toString() == destinationId) {
+    if (map['id']?.toString() == storageId) {
       return map;
     }
   }
   return null;
 }
 
-String? _pathFromDestination(Map<String, dynamic> destination) {
-  final paramsRaw = destination['params'];
+String? _pathFromStorage(Map<String, dynamic> storage) {
+  final paramsRaw = storage['params'];
   if (paramsRaw is! Map) {
     return null;
   }
@@ -725,9 +769,9 @@ Future<String> _startBackup(http.Client client, _Args args) async {
   if (args.fresh) {
     payload['fresh'] = true;
   }
-  final destinationId = args.destinationId;
-  if (destinationId != null && destinationId.trim().isNotEmpty) {
-    payload['destinationId'] = destinationId.trim();
+  final storageId = args.storageId;
+  if (storageId != null && storageId.trim().isNotEmpty) {
+    payload['storageId'] = storageId.trim();
   }
   if (args.driverParams.isNotEmpty) {
     payload['driverParams'] = args.driverParams;
@@ -858,9 +902,9 @@ String _formatEta(int? seconds) {
   return '${hours}h ${mins}m';
 }
 
-Future<String> _pickLatestRestoreXml(http.Client client, _Args args) async {
-  final destinationId = args.destinationId;
-  final query = (destinationId != null && destinationId.trim().isNotEmpty) ? {'destinationId': destinationId.trim()} : null;
+Future<_SelectedRestoreEntry> _pickLatestRestoreEntry(http.Client client, _Args args) async {
+  final storageId = args.storageId;
+  final query = (storageId != null && storageId.trim().isNotEmpty) ? {'storageId': storageId.trim()} : null;
   final uri = args.agentUrl.replace(path: '/restore/entries', queryParameters: query);
   final response = await client.get(uri, headers: _authHeaders(args));
   if (response.statusCode != 200) {
@@ -904,23 +948,51 @@ Future<String> _pickLatestRestoreXml(http.Client client, _Args args) async {
     if (bestIncomplete != null) {
       final timestamp = bestIncomplete['timestamp']?.toString() ?? 'unknown';
       final missing = bestIncomplete['missingDiskBasenames'];
-      throw StateError('Latest restore entry for vm ${args.vmName} on selected destination is incomplete (timestamp=$timestamp missingDisks=$missing).');
+      throw StateError('Latest restore entry for vm ${args.vmName} on selected storage is incomplete (timestamp=$timestamp missingDisks=$missing).');
     }
     throw StateError('No restore entry found for vm ${args.vmName}');
   }
   final xmlPath = best['xmlPath']?.toString();
+  final timestamp = best['timestamp']?.toString();
   if (xmlPath == null || xmlPath.isEmpty) {
     throw StateError('Restore entry missing xmlPath');
   }
-  return xmlPath;
+  if (timestamp == null || timestamp.isEmpty) {
+    throw StateError('Restore entry missing timestamp');
+  }
+  return _SelectedRestoreEntry(xmlPath: xmlPath, timestamp: timestamp);
+}
+
+Future<String> _startCheck(http.Client client, _Args args, _SelectedRestoreEntry entry) async {
+  final mode = args.checkMode;
+  if (mode == null || mode.isEmpty) {
+    throw StateError('Missing check mode.');
+  }
+  final storageId = args.storageId?.trim() ?? '';
+  if (storageId.isEmpty) {
+    throw StateError('--storage is required when using --check.');
+  }
+  final path = mode == 'quick' ? '/restore/quick-check' : '/restore/sanity';
+  final uri = args.agentUrl.replace(path: path);
+  final payload = <String, dynamic>{'xmlPath': entry.xmlPath, 'timestamp': entry.timestamp, 'storageId': storageId};
+  final response = await client.post(uri, headers: {..._authHeaders(args), 'content-type': 'application/json'}, body: jsonEncode(payload));
+  if (response.statusCode != 200) {
+    throw StateError('Start $mode check failed: ${response.statusCode} ${response.body}');
+  }
+  final responsePayload = jsonDecode(response.body) as Map<String, dynamic>;
+  final jobId = responsePayload['jobId']?.toString();
+  if (jobId == null || jobId.isEmpty) {
+    throw StateError('$mode check response missing jobId: ${response.body}');
+  }
+  return jobId;
 }
 
 Future<void> _restorePrecheck(http.Client client, _Args args, String xmlPath) async {
   final uri = args.agentUrl.replace(path: '/servers/${args.targetServerId}/restore/precheck');
   final payload = <String, dynamic>{'xmlPath': xmlPath};
-  final destinationId = args.destinationId;
-  if (destinationId != null && destinationId.trim().isNotEmpty) {
-    payload['destinationId'] = destinationId.trim();
+  final storageId = args.storageId;
+  if (storageId != null && storageId.trim().isNotEmpty) {
+    payload['storageId'] = storageId.trim();
   }
   final response = await client.post(uri, headers: {..._authHeaders(args), 'content-type': 'application/json'}, body: jsonEncode(payload));
   if (response.statusCode != 200) {
@@ -931,9 +1003,9 @@ Future<void> _restorePrecheck(http.Client client, _Args args, String xmlPath) as
 Future<String> _startRestore(http.Client client, _Args args, String xmlPath) async {
   final uri = args.agentUrl.replace(path: '/servers/${args.targetServerId}/restore/start');
   final payload = {'xmlPath': xmlPath, 'decision': 'overwrite'};
-  final destinationId = args.destinationId;
-  if (destinationId != null && destinationId.trim().isNotEmpty) {
-    payload['destinationId'] = destinationId.trim();
+  final storageId = args.storageId;
+  if (storageId != null && storageId.trim().isNotEmpty) {
+    payload['storageId'] = storageId.trim();
   }
   final response = await client.post(uri, headers: {..._authHeaders(args), 'content-type': 'application/json'}, body: jsonEncode(payload));
   if (response.statusCode != 200) {
@@ -1067,7 +1139,8 @@ void _printUsage() {
   stdout.writeln('  --target-host <host>      Default nuc02');
   stdout.writeln('  --ssh-user <user>         Default root');
   stdout.writeln('  --ssh-key <path>          Optional private key');
-  stdout.writeln('  --dest <id>               Use destination id for backup + restore');
+  stdout.writeln('  --storage <id>               Use storage id for backup + restore');
+  stdout.writeln('  --check <full|quick>         Run check job only (no restore/md5)');
   stdout.writeln('  --driver-param <k=v>      Driver parameter (repeatable)');
   stdout.writeln('  --block-size-mb <1|2|4|8> Override backup dedup block size for this run only');
   stdout.writeln('  --token <value>           Agent bearer token (overrides token file)');

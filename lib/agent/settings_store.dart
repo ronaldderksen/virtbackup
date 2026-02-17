@@ -128,9 +128,9 @@ class AppSettingsStore {
     final normalized = _normalizeYaml(decoded);
     final updatedLegacyKeys = _removeLegacyRootKeys(normalized);
     final updatedRootOrder = _reorderRootKeys(normalized);
-    final updatedDestinations = _ensureDestinationDefaults(normalized);
+    final updatedStorages = _ensureStorageDefaults(normalized);
     final updatedBlockSize = _ensureBlockSizeMb(normalized);
-    final updated = updatedLegacyKeys || updatedRootOrder || updatedDestinations || updatedBlockSize;
+    final updated = updatedLegacyKeys || updatedRootOrder || updatedStorages || updatedBlockSize;
     if (updated) {
       final encoded = _ensureTrailingNewline(_toYaml(normalized));
       await file.writeAsString(encoded);
@@ -142,34 +142,34 @@ class AppSettingsStore {
     return AppSettings.fromMap(normalized);
   }
 
-  bool _ensureDestinationDefaults(Map<String, dynamic> data) {
-    final destinations = data['destinations'];
-    if (destinations is! List) {
+  bool _ensureStorageDefaults(Map<String, dynamic> data) {
+    final storage = data['storage'];
+    if (storage is! List) {
       return false;
     }
     var changed = false;
-    for (final destination in destinations) {
-      if (destination is! Map) {
+    for (final storage in storage) {
+      if (storage is! Map) {
         continue;
       }
-      final driverId = (destination['driverId'] ?? '').toString().trim();
+      final driverId = (storage['driverId'] ?? '').toString().trim();
       if (driverId == 'filesystem') {
         continue;
       }
-      if (!destination.containsKey('storeBlobs')) {
-        destination['storeBlobs'] = false;
+      if (!storage.containsKey('storeBlobs')) {
+        storage['storeBlobs'] = false;
         changed = true;
       }
-      if (!destination.containsKey('useBlobs')) {
-        destination['useBlobs'] = false;
+      if (!storage.containsKey('useBlobs')) {
+        storage['useBlobs'] = false;
         changed = true;
       }
-      if (!destination.containsKey('uploadConcurrency')) {
-        destination['uploadConcurrency'] = 8;
+      if (!storage.containsKey('uploadConcurrency')) {
+        storage['uploadConcurrency'] = 8;
         changed = true;
       }
-      if (!destination.containsKey('downloadConcurrency')) {
-        destination['downloadConcurrency'] = 8;
+      if (!storage.containsKey('downloadConcurrency')) {
+        storage['downloadConcurrency'] = 8;
         changed = true;
       }
     }
@@ -195,7 +195,7 @@ class AppSettingsStore {
 
   bool _removeLegacyRootKeys(Map<String, dynamic> data) {
     const legacyRootKeys = <String>{
-      'restoreDestinationId',
+      'restoreStorageId',
       'backupDriverId',
       'sftpHost',
       'sftpPort',
@@ -208,6 +208,7 @@ class AppSettingsStore {
       'gdriveRefreshToken',
       'gdriveAccountEmail',
       'gdriveExpiresAt',
+      'selectedServerId',
       'listenAll',
     };
     var changed = false;
@@ -221,15 +222,14 @@ class AppSettingsStore {
     const preferredOrder = <String>[
       'backupPath',
       'log_level',
-      'backupDestinationId',
+      'backupStorageId',
       'connectionVerified',
       'hashblocksLimitBufferMb',
       'blockSizeMB',
       'dummyDriverTmpWrites',
       'ntfymeToken',
-      'selectedServerId',
       'servers',
-      'destinations',
+      'storage',
     ];
     final originalKeys = data.keys.toList();
     final ordered = <String, dynamic>{};
@@ -438,27 +438,27 @@ class AppSettingsStore {
   }
 
   void _encryptGdriveTokensInMap(Map<String, dynamic> data, String token) {
-    _encryptDestinationGdriveTokens(data, token);
+    _encryptStorageGdriveTokens(data, token);
   }
 
   void _decryptGdriveTokensInMap(Map<String, dynamic> data, String? token) {
-    _decryptDestinationGdriveTokens(data, token);
+    _decryptStorageGdriveTokens(data, token);
   }
 
   void _encryptSftpPasswordInMap(Map<String, dynamic> data, String token) {
-    _encryptDestinationSftpPasswords(data, token);
+    _encryptStorageSftpPasswords(data, token);
   }
 
   void _decryptSftpPasswordInMap(Map<String, dynamic> data, String? token) {
-    _decryptDestinationSftpPasswords(data, token);
+    _decryptStorageSftpPasswords(data, token);
   }
 
-  void _encryptDestinationGdriveTokens(Map<String, dynamic> data, String token) {
-    final destinations = data['destinations'];
-    if (destinations is! List) {
+  void _encryptStorageGdriveTokens(Map<String, dynamic> data, String token) {
+    final storage = data['storage'];
+    if (storage is! List) {
       return;
     }
-    for (final entry in destinations) {
+    for (final entry in storage) {
       if (entry is! Map) {
         continue;
       }
@@ -486,12 +486,12 @@ class AppSettingsStore {
     }
   }
 
-  void _decryptDestinationGdriveTokens(Map<String, dynamic> data, String? token) {
-    final destinations = data['destinations'];
-    if (destinations is! List) {
+  void _decryptStorageGdriveTokens(Map<String, dynamic> data, String? token) {
+    final storage = data['storage'];
+    if (storage is! List) {
       return;
     }
-    for (final entry in destinations) {
+    for (final entry in storage) {
       if (entry is! Map) {
         continue;
       }
@@ -517,12 +517,12 @@ class AppSettingsStore {
     }
   }
 
-  void _encryptDestinationSftpPasswords(Map<String, dynamic> data, String token) {
-    final destinations = data['destinations'];
-    if (destinations is! List) {
+  void _encryptStorageSftpPasswords(Map<String, dynamic> data, String token) {
+    final storage = data['storage'];
+    if (storage is! List) {
       return;
     }
-    for (final entry in destinations) {
+    for (final entry in storage) {
       if (entry is! Map) {
         continue;
       }
@@ -543,12 +543,12 @@ class AppSettingsStore {
     }
   }
 
-  void _decryptDestinationSftpPasswords(Map<String, dynamic> data, String? token) {
-    final destinations = data['destinations'];
-    if (destinations is! List) {
+  void _decryptStorageSftpPasswords(Map<String, dynamic> data, String? token) {
+    final storage = data['storage'];
+    if (storage is! List) {
       return;
     }
-    for (final entry in destinations) {
+    for (final entry in storage) {
       if (entry is! Map) {
         continue;
       }

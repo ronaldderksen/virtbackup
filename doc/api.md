@@ -64,15 +64,14 @@ Response:
 {
   "backupPath":"/var",
   "log_level":"info",
-  "backupDestinationId":"dest_filesystem_1739440000000000",
+  "backupStorageId":"dest_filesystem_1739440000000000",
   "connectionVerified":false,
   "hashblocksLimitBufferMb":1024,
   "blockSizeMB":1,
   "dummyDriverTmpWrites":false,
   "ntfymeToken":"",
-  "selectedServerId":"server-id",
   "servers":[],
-  "destinations":[
+  "storage":[
     {
       "id":"dest_filesystem_1739440000000000",
       "name":"Local filesystem",
@@ -171,7 +170,7 @@ Response (success):
 Body:
 ```json
 {
-  "destinationId":"dest_gdrive_1739440000000002",
+  "storageId":"dest_gdrive_1739440000000002",
   "accessToken":"<access token>",
   "refreshToken":"<refresh token>",
   "scope":"https://www.googleapis.com/auth/drive.file",
@@ -181,7 +180,7 @@ Body:
 ```
 
 Notes:
-- `destinationId` is required and must reference a destination with `driverId: "gdrive"`.
+- `storageId` is required and must reference a storage with `driverId: "gdrive"`.
 - `refreshToken` is required.
 - `expiresAt` may be a Unix timestamp in seconds or milliseconds, or an ISO-8601 string.
 
@@ -196,7 +195,7 @@ Response:
 
 Body:
 ```json
-{"destinationId":"dest_gdrive_1739440000000002"}
+{"storageId":"dest_gdrive_1739440000000002"}
 ```
 
 Response:
@@ -279,19 +278,19 @@ Body:
 ```json
 {
   "vmName":"my-vm",
-  "destinationId":"dest_filesystem_1739440000000000",
+  "storageId":"dest_filesystem_1739440000000000",
   "blockSizeMB":4,
   "fresh":false
 }
 ```
 
 Notes:
-- `destinationId` selects one configured destination from root-level `destinations`.
+- `storageId` selects one configured storage from root-level `storage`.
 - `blockSizeMB` is optional and overrides dedup block size for this backup job only (`1`, `2`, `4`, `8`).
 - For backward compatibility, `driverId` and `driverParams` are still accepted when present.
-- The filesystem destination path is resolved from `destinations[id=filesystem].params.path`.
+- The filesystem storage path is resolved from `storage[id=filesystem].params.path`.
 - `fresh: true` triggers a driver "fresh cleanup" (driver-specific behavior). This is only executed when the agent runs in debug mode.
-- `disableFresh: true` on a destination forces `fresh` off for that destination; the backup still starts and the agent logs that `fresh` was ignored.
+- `disableFresh: true` on a storage forces `fresh` off for that storage; the backup still starts and the agent logs that `fresh` was ignored.
 
 Response:
 ```json
@@ -344,9 +343,11 @@ Response:
 
 - `GET /restore/entries`
 
+Required query:
+- `storageId=<id>`: list entries for a specific storage.
+
 Optional query:
-- `driverId=<id>`: list entries for a specific driver (otherwise uses the configured default destination driver).
-- `destinationId=<id>`: list entries for a specific destination (takes precedence over `driverId`).
+- `driverId=<id>`: override driver for compatibility/debug scenarios.
 
 Response (array):
 ```json
@@ -357,6 +358,7 @@ Response (array):
     "timestamp":"2026-01-30T12-00-00",
     "diskBasenames":["disk1.qcow2"],
     "missingDiskBasenames":[],
+    "blockSizeMbValues":[4],
     "sourceServerId":"server-id",
     "sourceServerName":"Server"
   }
@@ -369,7 +371,7 @@ Response (array):
 
 Body:
 ```json
-{"xmlPath":"/path/to/backup.xml"}
+{"xmlPath":"/path/to/backup.xml","storageId":"dest_filesystem_1739440000000000"}
 ```
 
 Response:
@@ -383,11 +385,11 @@ Response:
 
 Body:
 ```json
-{"xmlPath":"/path/to/backup.xml","decision":"overwrite|define","destinationId":"dest_filesystem_1739440000000000"}
+{"xmlPath":"/path/to/backup.xml","decision":"overwrite|define","storageId":"dest_filesystem_1739440000000000"}
 ```
 
 Notes:
-- `destinationId` selects one configured destination for restore reads.
+- `storageId` selects one configured storage for restore reads.
 - For backward compatibility, `driverId` is still accepted.
 
 Response:
@@ -395,13 +397,27 @@ Response:
 {"jobId":"<job-id>"}
 ```
 
-### Sanity check (verify manifests/blobs)
+### Sanity Check (verify manifests/blobs)
 
 - `POST /restore/sanity`
 
 Body:
 ```json
-{"xmlPath":"/path/to/backup.xml","timestamp":"2026-01-30T12-00-00"}
+{"xmlPath":"/path/to/backup.xml","timestamp":"2026-01-30T12-00-00","storageId":"dest_filesystem_1739440000000000"}
+```
+
+Response:
+```json
+{"jobId":"<job-id>"}
+```
+
+### Quick Check (verify blob presence via cached directory scans)
+
+- `POST /restore/quick-check`
+
+Body:
+```json
+{"xmlPath":"/path/to/backup.xml","timestamp":"2026-01-30T12-00-00","storageId":"dest_filesystem_1739440000000000"}
 ```
 
 Response:

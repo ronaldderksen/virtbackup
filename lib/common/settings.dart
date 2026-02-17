@@ -1,60 +1,56 @@
 import 'models.dart';
 
 class AppSettings {
-  static const String filesystemDestinationId = 'filesystem';
-  static const String filesystemDestinationName = 'Filesystem';
+  static const String filesystemStorageId = 'filesystem';
+  static const String filesystemStorageName = 'Filesystem';
 
   AppSettings({
     required this.backupPath,
     required this.logLevel,
-    required this.destinations,
-    required this.backupDestinationId,
+    required this.storage,
+    required this.backupStorageId,
     required this.servers,
     required this.connectionVerified,
     required this.hashblocksLimitBufferMb,
     required this.blockSizeMB,
     required this.dummyDriverTmpWrites,
     required this.ntfymeToken,
-    this.selectedServerId,
   });
 
   final String backupPath;
   final String logLevel;
-  final List<BackupDestination> destinations;
-  final String? backupDestinationId;
+  final List<BackupStorage> storage;
+  final String? backupStorageId;
   final List<ServerConfig> servers;
   final bool connectionVerified;
   final int hashblocksLimitBufferMb;
   final int blockSizeMB;
   final bool dummyDriverTmpWrites;
   final String ntfymeToken;
-  final String? selectedServerId;
 
   AppSettings copyWith({
     String? backupPath,
     String? logLevel,
-    List<BackupDestination>? destinations,
-    String? backupDestinationId,
+    List<BackupStorage>? storage,
+    String? backupStorageId,
     List<ServerConfig>? servers,
     bool? connectionVerified,
     int? hashblocksLimitBufferMb,
     int? blockSizeMB,
     bool? dummyDriverTmpWrites,
     String? ntfymeToken,
-    String? selectedServerId,
   }) {
     return AppSettings(
       backupPath: backupPath ?? this.backupPath,
       logLevel: logLevel ?? this.logLevel,
-      destinations: destinations ?? this.destinations,
-      backupDestinationId: backupDestinationId ?? this.backupDestinationId,
+      storage: storage ?? this.storage,
+      backupStorageId: backupStorageId ?? this.backupStorageId,
       servers: servers ?? this.servers,
       connectionVerified: connectionVerified ?? this.connectionVerified,
       hashblocksLimitBufferMb: hashblocksLimitBufferMb ?? this.hashblocksLimitBufferMb,
       blockSizeMB: blockSizeMB ?? this.blockSizeMB,
       dummyDriverTmpWrites: dummyDriverTmpWrites ?? this.dummyDriverTmpWrites,
       ntfymeToken: ntfymeToken ?? this.ntfymeToken,
-      selectedServerId: selectedServerId ?? this.selectedServerId,
     );
   }
 
@@ -62,23 +58,22 @@ class AppSettings {
     return {
       'backupPath': backupPath,
       'log_level': logLevel,
-      'backupDestinationId': backupDestinationId,
+      'backupStorageId': backupStorageId,
       'connectionVerified': connectionVerified,
       'hashblocksLimitBufferMb': hashblocksLimitBufferMb,
       'blockSizeMB': blockSizeMB,
       'dummyDriverTmpWrites': dummyDriverTmpWrites,
       'ntfymeToken': ntfymeToken,
-      'selectedServerId': selectedServerId,
       'servers': servers.map((server) => server.toMap()).toList(),
-      'destinations': destinations.map((destination) => destination.toMap()).toList(),
+      'storage': storage.map((storage) => storage.toMap()).toList(),
     };
   }
 
   factory AppSettings.fromMap(Map<String, dynamic> json) {
-    final destinations = _ensureFilesystemDestination(_parseDestinations(json));
-    final resolvedBackupPath = _filesystemPathFromDestinations(destinations);
-    final backupDestinationId = json['backupDestinationId']?.toString().trim();
-    final selectedBackupDestination = _resolveDestination(destinations: destinations, requestedId: backupDestinationId);
+    final storage = _ensureFilesystemStorage(_parseStorage(json));
+    final resolvedBackupPath = _filesystemPathFromStorage(storage);
+    final backupStorageId = json['backupStorageId']?.toString().trim();
+    final selectedBackupStorage = _resolveStorage(storage: storage, requestedId: backupStorageId);
 
     final serversJson = json['servers'];
     final servers = <ServerConfig>[];
@@ -93,14 +88,13 @@ class AppSettings {
     return AppSettings(
       backupPath: resolvedBackupPath,
       logLevel: ((json['log_level'] ?? '').toString().trim().isEmpty ? 'info' : json['log_level'].toString().trim()),
-      destinations: destinations,
-      backupDestinationId: backupDestinationId == null || backupDestinationId.isEmpty ? selectedBackupDestination?.id : backupDestinationId,
+      storage: storage,
+      backupStorageId: backupStorageId == null || backupStorageId.isEmpty ? selectedBackupStorage?.id : backupStorageId,
       connectionVerified: json['connectionVerified'] == true,
       hashblocksLimitBufferMb: _parseHashblocksLimitBufferMb(json['hashblocksLimitBufferMb']),
       blockSizeMB: _parseBlockSizeMB(json['blockSizeMB']),
       dummyDriverTmpWrites: json['dummyDriverTmpWrites'] == true,
       ntfymeToken: (json['ntfymeToken'] ?? '').toString(),
-      selectedServerId: json['selectedServerId']?.toString(),
       servers: servers,
     );
   }
@@ -108,63 +102,62 @@ class AppSettings {
   factory AppSettings.empty() => AppSettings(
     backupPath: '',
     logLevel: 'info',
-    destinations: const <BackupDestination>[],
-    backupDestinationId: null,
+    storage: const <BackupStorage>[],
+    backupStorageId: null,
     servers: <ServerConfig>[],
     connectionVerified: false,
     hashblocksLimitBufferMb: 1024,
     blockSizeMB: 1,
     dummyDriverTmpWrites: false,
     ntfymeToken: '',
-    selectedServerId: null,
   );
 
-  static List<BackupDestination> _parseDestinations(Map<String, dynamic> json) {
-    final raw = json['destinations'];
-    final destinations = <BackupDestination>[];
+  static List<BackupStorage> _parseStorage(Map<String, dynamic> json) {
+    final raw = json['storage'];
+    final storage = <BackupStorage>[];
     if (raw is List) {
       for (final entry in raw) {
         if (entry is! Map) {
           continue;
         }
-        final parsed = BackupDestination.fromMap(Map<String, dynamic>.from(entry));
+        final parsed = BackupStorage.fromMap(Map<String, dynamic>.from(entry));
         if (parsed.id.trim().isEmpty || parsed.driverId.trim().isEmpty) {
           continue;
         }
-        destinations.add(parsed);
+        storage.add(parsed);
       }
     }
-    return destinations;
+    return storage;
   }
 
-  static BackupDestination? _resolveDestination({required List<BackupDestination> destinations, required String? requestedId}) {
-    if (destinations.isEmpty) {
+  static BackupStorage? _resolveStorage({required List<BackupStorage> storage, required String? requestedId}) {
+    if (storage.isEmpty) {
       return null;
     }
     final requested = requestedId?.trim() ?? '';
     if (requested.isNotEmpty) {
-      for (final destination in destinations) {
-        if (destination.id == requested) {
-          return destination;
+      for (final storage in storage) {
+        if (storage.id == requested) {
+          return storage;
         }
       }
     }
-    for (final destination in destinations) {
-      if (destination.enabled) {
-        return destination;
+    for (final storage in storage) {
+      if (storage.enabled) {
+        return storage;
       }
     }
-    return destinations.first;
+    return storage.first;
   }
 
-  static List<BackupDestination> _ensureFilesystemDestination(List<BackupDestination> input) {
-    final destinations = List<BackupDestination>.from(input);
+  static List<BackupStorage> _ensureFilesystemStorage(List<BackupStorage> input) {
+    final storage = List<BackupStorage>.from(input);
     var filesystemIndex = -1;
     String? existingPath;
     var existingDisableFresh = false;
-    for (var index = 0; index < destinations.length; index++) {
-      final entry = destinations[index];
-      if (entry.id == filesystemDestinationId) {
+    for (var index = 0; index < storage.length; index++) {
+      final entry = storage[index];
+      if (entry.id == filesystemStorageId) {
         filesystemIndex = index;
         existingDisableFresh = entry.disableFresh;
         final value = entry.params['path']?.toString().trim();
@@ -176,28 +169,28 @@ class AppSettings {
     }
 
     final normalizedPath = existingPath ?? '';
-    final filesystemDestination = BackupDestination(
-      id: filesystemDestinationId,
-      name: filesystemDestinationName,
+    final filesystemStorage = BackupStorage(
+      id: filesystemStorageId,
+      name: filesystemStorageName,
       driverId: 'filesystem',
       enabled: true,
       disableFresh: existingDisableFresh,
       params: <String, dynamic>{'path': normalizedPath},
     );
     if (filesystemIndex >= 0) {
-      destinations[filesystemIndex] = filesystemDestination;
+      storage[filesystemIndex] = filesystemStorage;
     } else {
-      destinations.insert(0, filesystemDestination);
+      storage.insert(0, filesystemStorage);
     }
-    return destinations;
+    return storage;
   }
 
-  static String _filesystemPathFromDestinations(List<BackupDestination> destinations) {
-    for (final destination in destinations) {
-      if (destination.id != filesystemDestinationId) {
+  static String _filesystemPathFromStorage(List<BackupStorage> storage) {
+    for (final storage in storage) {
+      if (storage.id != filesystemStorageId) {
         continue;
       }
-      final path = destination.params['path']?.toString().trim();
+      final path = storage.params['path']?.toString().trim();
       if (path != null) {
         return path;
       }

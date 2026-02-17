@@ -22,7 +22,7 @@ Future<void> main(List<String> args) async {
 
   final store = await AppSettingsStore.fromAgentDefaultPath();
   final settings = await store.load();
-  final destination = _selectedGdriveDestination(settings);
+  final storage = _selectedGdriveStorage(settings);
   final oauth = await GoogleOAuthClientLocator().load(settingsDir: store.file.parent, requireSecret: true);
   if (_gdriveRefreshToken(settings).isEmpty && _gdriveAccessToken(settings).isEmpty) {
     stderr.writeln('No Google Drive tokens found in ${store.file.path}');
@@ -37,12 +37,12 @@ Future<void> main(List<String> args) async {
     var activeSettings = tokenResult.$2;
     final normalizedDest = parsed.destPath.trim().replaceAll('\\', '/');
     final useDriveRoot = normalizedDest.startsWith('/');
-    final driveRoot = await _ensureDriveRoot(destination, client, accessToken);
+    final driveRoot = await _ensureDriveRoot(storage, client, accessToken);
     final baseRoot = useDriveRoot ? driveRoot : await _ensureFolder(driveRoot, 'VirtBackup', client, accessToken);
     final relativeDest = useDriveRoot ? normalizedDest.substring(1) : normalizedDest;
     final destId = relativeDest.isEmpty ? baseRoot : await _ensureFolderPath(baseRoot, relativeDest, client, accessToken);
     final packsId = await _ensureFolder(destId, 'packs', client, accessToken);
-    stdout.writeln('Destination ready: ${parsed.destPath} id=$destId packs=$packsId (baseRoot=$baseRoot)');
+    stdout.writeln('Storage ready: ${parsed.destPath} id=$destId packs=$packsId (baseRoot=$baseRoot)');
     stdout.writeln('Upload mode: resumable (session + PUT)');
 
     var detailsLogged = false;
@@ -143,7 +143,7 @@ void _printUsage() {
   stdout.writeln('Options:');
   stdout.writeln('  --size-mib <int>     File size in MiB (default: ${_defaultFileSizeBytes ~/ (1024 * 1024)})');
   stdout.writeln('  --concurrent <int>   Number of concurrent uploads (default: $_defaultConcurrentUploads)');
-  stdout.writeln('  --dest <path>        Drive folder path (prefix with / for Drive root; default: $_defaultDestPath)');
+  stdout.writeln('  --storage <path>        Drive folder path (prefix with / for Drive root; default: $_defaultDestPath)');
   stdout.writeln('  --help               Show this help');
 }
 
@@ -173,7 +173,7 @@ _ParsedArgs _parseArgs(List<String> args) {
       }
       continue;
     }
-    if (arg == '--dest' && i + 1 < args.length) {
+    if (arg == '--storage' && i + 1 < args.length) {
       destPath = args[++i];
       continue;
     }
@@ -285,34 +285,34 @@ Future<String> _ensureFolderPath(String rootId, String rawPath, http.Client clie
   return current;
 }
 
-Future<String> _ensureDriveRoot(BackupDestination destination, http.Client client, String token) async {
+Future<String> _ensureDriveRoot(BackupStorage storage, http.Client client, String token) async {
   var current = 'root';
-  final rootPath = (destination.params['rootPath'] ?? '').toString().trim();
+  final rootPath = (storage.params['rootPath'] ?? '').toString().trim();
   if (rootPath.isEmpty) {
     return current;
   }
   return _ensureFolderPath(current, rootPath, client, token);
 }
 
-BackupDestination _selectedGdriveDestination(AppSettings settings) {
-  final selectedId = settings.backupDestinationId?.trim() ?? '';
+BackupStorage _selectedGdriveStorage(AppSettings settings) {
+  final selectedId = settings.backupStorageId?.trim() ?? '';
   if (selectedId.isEmpty) {
-    throw StateError('backupDestinationId is required.');
+    throw StateError('backupStorageId is required.');
   }
-  for (final destination in settings.destinations) {
-    if (destination.id != selectedId) {
+  for (final storage in settings.storage) {
+    if (storage.id != selectedId) {
       continue;
     }
-    if (destination.driverId != 'gdrive') {
-      throw StateError('Selected destination "$selectedId" is not a Google Drive destination.');
+    if (storage.driverId != 'gdrive') {
+      throw StateError('Selected storage "$selectedId" is not a Google Drive storage.');
     }
-    return destination;
+    return storage;
   }
-  throw StateError('Google Drive destination "$selectedId" not found.');
+  throw StateError('Google Drive storage "$selectedId" not found.');
 }
 
 Map<String, dynamic> _selectedGdriveParams(AppSettings settings) {
-  return _selectedGdriveDestination(settings).params;
+  return _selectedGdriveStorage(settings).params;
 }
 
 String _gdriveAccessToken(AppSettings settings) {
@@ -328,19 +328,19 @@ DateTime? _gdriveExpiresAt(AppSettings settings) {
 }
 
 AppSettings _withUpdatedGdriveTokens({required AppSettings settings, required String accessToken, required DateTime? expiresAt}) {
-  final destination = _selectedGdriveDestination(settings);
-  final params = Map<String, dynamic>.from(destination.params);
+  final storage = _selectedGdriveStorage(settings);
+  final params = Map<String, dynamic>.from(storage.params);
   params['accessToken'] = accessToken;
   if (expiresAt == null) {
     params.remove('expiresAt');
   } else {
     params['expiresAt'] = expiresAt.toUtc().toIso8601String();
   }
-  final updatedDestinations = settings.destinations.map((entry) {
-    if (entry.id != destination.id) {
+  final updatedStorages = settings.storage.map((entry) {
+    if (entry.id != storage.id) {
       return entry;
     }
-    return BackupDestination(
+    return BackupStorage(
       id: entry.id,
       name: entry.name,
       driverId: entry.driverId,
@@ -353,7 +353,7 @@ AppSettings _withUpdatedGdriveTokens({required AppSettings settings, required St
       downloadConcurrency: entry.downloadConcurrency,
     );
   }).toList();
-  return settings.copyWith(destinations: updatedDestinations);
+  return settings.copyWith(storage: updatedStorages);
 }
 
 Future<String> _ensureFolder(String parentId, String name, http.Client client, String token) async {

@@ -106,8 +106,8 @@ class BackupDriverInfo {
   }
 }
 
-class BackupDestination {
-  BackupDestination({
+class BackupStorage {
+  BackupStorage({
     required this.id,
     required this.name,
     required this.driverId,
@@ -146,10 +146,10 @@ class BackupDestination {
     return map;
   }
 
-  factory BackupDestination.fromMap(Map<String, dynamic> json) {
+  factory BackupStorage.fromMap(Map<String, dynamic> json) {
     final paramsRaw = json['params'];
     final params = paramsRaw is Map ? Map<String, dynamic>.from(paramsRaw) : <String, dynamic>{};
-    return BackupDestination(
+    return BackupStorage(
       id: (json['id'] ?? '').toString(),
       name: (json['name'] ?? '').toString(),
       driverId: (json['driverId'] ?? '').toString(),
@@ -491,6 +491,7 @@ class RestoreEntry {
     required this.timestamp,
     required this.diskBasenames,
     required this.missingDiskBasenames,
+    required this.blockSizeMbValues,
     required this.sourceServerId,
     required this.sourceServerName,
   });
@@ -500,6 +501,7 @@ class RestoreEntry {
   final String timestamp;
   final List<String> diskBasenames;
   final List<String> missingDiskBasenames;
+  final List<int> blockSizeMbValues;
   final String sourceServerId;
   final String sourceServerName;
 
@@ -512,6 +514,7 @@ class RestoreEntry {
       'timestamp': timestamp,
       'diskBasenames': diskBasenames,
       'missingDiskBasenames': missingDiskBasenames,
+      'blockSizeMbValues': blockSizeMbValues,
       'sourceServerId': sourceServerId,
       'sourceServerName': sourceServerName,
     };
@@ -520,12 +523,16 @@ class RestoreEntry {
   factory RestoreEntry.fromMap(Map<String, dynamic> json) {
     final diskBasenamesRaw = json['diskBasenames'];
     final missingRaw = json['missingDiskBasenames'];
+    final blockSizeMbValuesRaw = json['blockSizeMbValues'];
     return RestoreEntry(
       xmlPath: (json['xmlPath'] ?? '').toString(),
       vmName: (json['vmName'] ?? '').toString(),
       timestamp: (json['timestamp'] ?? '').toString(),
       diskBasenames: diskBasenamesRaw is List ? diskBasenamesRaw.map((item) => item.toString()).toList() : const [],
       missingDiskBasenames: missingRaw is List ? missingRaw.map((item) => item.toString()).toList() : const [],
+      blockSizeMbValues: blockSizeMbValuesRaw is List
+          ? blockSizeMbValuesRaw.map((item) => item is num ? item.toInt() : int.tryParse(item.toString()) ?? 0).where((item) => item > 0).toList()
+          : const [],
       sourceServerId: (json['sourceServerId'] ?? '').toString(),
       sourceServerName: (json['sourceServerName'] ?? '').toString(),
     );

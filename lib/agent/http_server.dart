@@ -5,7 +5,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:basic_utils/basic_utils.dart';
-import 'package:crypto/crypto.dart';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:dartssh2/dartssh2.dart';
 import 'package:virtbackup/agent/backup.dart';
 import 'package:virtbackup/agent/backup_host.dart';
@@ -32,10 +32,10 @@ class _DriverDescriptor {
   final drv.BackupDriver Function(Map<String, dynamic> params) create;
 }
 
-class _ResolvedDestination {
-  const _ResolvedDestination({required this.destination, required this.settings, required this.driverId, required this.backupPath, required this.driverParams});
+class _ResolvedStorage {
+  const _ResolvedStorage({required this.storage, required this.settings, required this.driverId, required this.backupPath, required this.driverParams});
 
-  final BackupDestination destination;
+  final BackupStorage storage;
   final AppSettings settings;
   final String driverId;
   final String backupPath;
@@ -462,14 +462,14 @@ class AgentHttpServer {
       }
       if (request.method == 'POST' && path == '/oauth/google') {
         final body = await _readJson(request);
-        final destinationId = (body['destinationId'] ?? '').toString().trim();
-        if (destinationId.isEmpty) {
-          _json(request, 400, {'success': false, 'error': 'missing destinationId'});
+        final storageId = (body['storageId'] ?? '').toString().trim();
+        if (storageId.isEmpty) {
+          _json(request, 400, {'success': false, 'error': 'missing storageId'});
           return;
         }
-        final destination = _destinationById(destinationId);
-        if (destination == null || destination.driverId != 'gdrive') {
-          _json(request, 400, {'success': false, 'error': 'destination is not a Google Drive destination'});
+        final storage = _storageById(storageId);
+        if (storage == null || storage.driverId != 'gdrive') {
+          _json(request, 400, {'success': false, 'error': 'storage is not a Google Drive storage'});
           return;
         }
         final accessToken = (body['accessToken'] ?? '').toString();
@@ -481,7 +481,7 @@ class AgentHttpServer {
         final accountEmail = (body['accountEmail'] ?? '').toString();
         final scope = (body['scope'] ?? '').toString();
         final expiresAt = _parseExpiresAt(body['expiresAt']);
-        final params = Map<String, dynamic>.from(destination.params);
+        final params = Map<String, dynamic>.from(storage.params);
         params['accessToken'] = accessToken;
         params['refreshToken'] = refreshToken;
         params['accountEmail'] = accountEmail;
@@ -495,31 +495,31 @@ class AgentHttpServer {
         } else {
           params['expiresAt'] = expiresAt.toUtc().toIso8601String();
         }
-        final updatedDestinations = _replaceDestinationParams(destinationId: destinationId, params: params);
-        final updated = _agentSettings.copyWith(destinations: updatedDestinations);
+        final updatedStorages = _replaceStorageParams(storageId: storageId, params: params);
+        final updated = _agentSettings.copyWith(storage: updatedStorages);
         await _applyAgentSettings(updated, reason: 'oauth', forceRestartSshListeners: false);
         _json(request, 200, {'success': true});
         return;
       }
       if (request.method == 'POST' && path == '/oauth/google/clear') {
         final body = await _readJson(request);
-        final destinationId = (body['destinationId'] ?? '').toString().trim();
-        if (destinationId.isEmpty) {
-          _json(request, 400, {'success': false, 'error': 'missing destinationId'});
+        final storageId = (body['storageId'] ?? '').toString().trim();
+        if (storageId.isEmpty) {
+          _json(request, 400, {'success': false, 'error': 'missing storageId'});
           return;
         }
-        final destination = _destinationById(destinationId);
-        if (destination == null || destination.driverId != 'gdrive') {
-          _json(request, 400, {'success': false, 'error': 'destination is not a Google Drive destination'});
+        final storage = _storageById(storageId);
+        if (storage == null || storage.driverId != 'gdrive') {
+          _json(request, 400, {'success': false, 'error': 'storage is not a Google Drive storage'});
           return;
         }
-        final params = Map<String, dynamic>.from(destination.params);
+        final params = Map<String, dynamic>.from(storage.params);
         params['accessToken'] = '';
         params['refreshToken'] = '';
         params['accountEmail'] = '';
         params.remove('expiresAt');
-        final updatedDestinations = _replaceDestinationParams(destinationId: destinationId, params: params);
-        final updated = _agentSettings.copyWith(destinations: updatedDestinations);
+        final updatedStorages = _replaceStorageParams(storageId: storageId, params: params);
+        final updated = _agentSettings.copyWith(storage: updatedStorages);
         await _applyAgentSettings(updated, reason: 'oauth', forceRestartSshListeners: false);
         _json(request, 200, {'success': true});
         return;
@@ -618,7 +618,7 @@ class AgentHttpServer {
         }
         final body = await _readJson(request);
         final vmName = (body['vmName'] ?? '').toString();
-        final requestedDestinationId = (body['destinationId'] ?? '').toString().trim();
+        final requestedStorageId = (body['storageId'] ?? '').toString().trim();
         final requestedDriver = (body['driverId'] ?? '').toString().trim();
         final driverParams = body['driverParams'] is Map ? Map<String, dynamic>.from(body['driverParams'] as Map) : <String, dynamic>{};
         final blockSizeMBRaw = body['blockSizeMB'];
@@ -632,22 +632,26 @@ class AgentHttpServer {
           _json(request, 400, {'error': 'missing params'});
           return;
         }
+        if (requestedStorageId.isEmpty) {
+          _json(request, 400, {'error': 'missing storageId'});
+          return;
+        }
         if (requestedDriver.isNotEmpty && !_driverCatalog.containsKey(requestedDriver)) {
           _json(request, 400, {'error': 'unknown driverId', 'known': _driverCatalog.keys.toList()});
           return;
         }
-        final resolvedDestination = _resolveBackupDestination(requestedDestinationId);
-        if (resolvedDestination == null) {
-          _json(request, 400, {'error': 'destination not found or unavailable'});
+        final resolvedStorage = _resolveStorageById(requestedStorageId);
+        if (resolvedStorage == null) {
+          _json(request, 400, {'error': 'storage not found or unavailable'});
           return;
         }
-        final effectiveFreshRequested = freshRequested && !resolvedDestination.destination.disableFresh;
+        final effectiveFreshRequested = freshRequested && !resolvedStorage.storage.disableFresh;
         if (freshRequested && !effectiveFreshRequested) {
-          _hostLog('backup: fresh requested but disabled for destination "${resolvedDestination.destination.name}" (id=${resolvedDestination.destination.id}); continuing without fresh');
+          _hostLog('backup: fresh requested but disabled for storage "${resolvedStorage.storage.name}" (id=${resolvedStorage.storage.id}); continuing without fresh');
         }
-        final resolvedDriverId = requestedDriver.isNotEmpty ? requestedDriver : resolvedDestination.driverId;
-        final backupPath = resolvedDestination.backupPath;
-        final registry = _buildDriverRegistry(backupPath: backupPath, settings: resolvedDestination.settings);
+        final resolvedDriverId = requestedDriver.isNotEmpty ? requestedDriver : resolvedStorage.driverId;
+        final backupPath = resolvedStorage.backupPath;
+        final registry = _buildDriverRegistry(backupPath: backupPath, settings: resolvedStorage.settings);
         final descriptor = registry[resolvedDriverId] ?? registry['filesystem']!;
         if (descriptor.usesPath && backupPath.isEmpty) {
           _json(request, 400, {'error': 'missing backup.base_path'});
@@ -666,9 +670,9 @@ class AgentHttpServer {
           VmEntry(id: vmName, name: vmName, powerState: VmPowerState.stopped),
           backupPath,
           driverIdOverride: resolvedDriverId,
-          driverParams: driverParams.isNotEmpty ? driverParams : resolvedDestination.driverParams,
+          driverParams: driverParams.isNotEmpty ? driverParams : resolvedStorage.driverParams,
           blockSizeMBOverride: blockSizeMBOverride,
-          destination: resolvedDestination,
+          storage: resolvedStorage,
           freshRequested: effectiveFreshRequested,
         );
         return;
@@ -682,22 +686,26 @@ class AgentHttpServer {
         }
         final body = await _readJson(request);
         final xmlPath = (body['xmlPath'] ?? '').toString();
-        final requestedDestinationId = (body['destinationId'] ?? '').toString().trim();
+        final requestedStorageId = (body['storageId'] ?? '').toString().trim();
         final requestedDriver = (body['driverId'] ?? '').toString().trim();
         if (xmlPath.isEmpty) {
           _json(request, 400, {'error': 'missing xmlPath'});
+          return;
+        }
+        if (requestedStorageId.isEmpty) {
+          _json(request, 400, {'error': 'missing storageId'});
           return;
         }
         if (requestedDriver.isNotEmpty && !_driverCatalog.containsKey(requestedDriver)) {
           _json(request, 400, {'error': 'unknown driverId', 'known': _driverCatalog.keys.toList()});
           return;
         }
-        final resolvedDestination = _resolveBackupDestination(requestedDestinationId);
-        if (requestedDestinationId.isNotEmpty && resolvedDestination == null) {
-          _json(request, 400, {'error': 'destination not found or unavailable'});
+        final resolvedStorage = _resolveStorageById(requestedStorageId);
+        if (resolvedStorage == null) {
+          _json(request, 400, {'error': 'storage not found or unavailable'});
           return;
         }
-        final result = await _restorePrecheck(server, xmlPath, destination: resolvedDestination, driverIdOverride: requestedDriver.isEmpty ? null : requestedDriver);
+        final result = await _restorePrecheck(server, xmlPath, storage: resolvedStorage, driverIdOverride: requestedDriver.isEmpty ? null : requestedDriver);
         _json(request, 200, result.toMap());
         return;
       }
@@ -711,43 +719,75 @@ class AgentHttpServer {
         final body = await _readJson(request);
         final xmlPath = (body['xmlPath'] ?? '').toString();
         final decision = (body['decision'] ?? '').toString();
-        final requestedDestinationId = (body['destinationId'] ?? '').toString().trim();
+        final requestedStorageId = (body['storageId'] ?? '').toString().trim();
         final requestedDriver = (body['driverId'] ?? '').toString().trim();
         if (xmlPath.isEmpty || decision.isEmpty) {
           _json(request, 400, {'error': 'missing params'});
+          return;
+        }
+        if (requestedStorageId.isEmpty) {
+          _json(request, 400, {'error': 'missing storageId'});
           return;
         }
         if (requestedDriver.isNotEmpty && !_driverCatalog.containsKey(requestedDriver)) {
           _json(request, 400, {'error': 'unknown driverId', 'known': _driverCatalog.keys.toList()});
           return;
         }
-        final resolvedDestination = _resolveBackupDestination(requestedDestinationId);
-        if (requestedDestinationId.isNotEmpty && resolvedDestination == null) {
-          _json(request, 400, {'error': 'destination not found or unavailable'});
+        final resolvedStorage = _resolveStorageById(requestedStorageId);
+        if (resolvedStorage == null) {
+          _json(request, 400, {'error': 'storage not found or unavailable'});
           return;
         }
-        final defaultDestination = resolvedDestination ?? _resolveBackupDestination(null);
-        if (defaultDestination == null) {
-          _json(request, 400, {'error': 'destination not found or unavailable'});
-          return;
-        }
-        final resolvedDriverId = requestedDriver.isNotEmpty ? requestedDriver : defaultDestination.driverId;
+        final resolvedDriverId = requestedDriver.isNotEmpty ? requestedDriver : resolvedStorage.driverId;
         final jobId = _createJob(AgentJobType.restore);
         _json(request, 200, AgentJobStart(jobId: jobId).toMap());
-        _startRestoreJob(jobId, server, xmlPath, decision, driverIdOverride: resolvedDriverId, destination: defaultDestination);
+        _startRestoreJob(jobId, server, xmlPath, decision, driverIdOverride: resolvedDriverId, storage: resolvedStorage);
         return;
       }
       if (request.method == 'POST' && path == '/restore/sanity') {
         final body = await _readJson(request);
         final xmlPath = (body['xmlPath'] ?? '').toString();
         final timestamp = (body['timestamp'] ?? '').toString();
+        final requestedStorageId = (body['storageId'] ?? '').toString().trim();
         if (xmlPath.isEmpty || timestamp.isEmpty) {
           _json(request, 400, {'error': 'missing params'});
           return;
         }
+        if (requestedStorageId.isEmpty) {
+          _json(request, 400, {'error': 'missing storageId'});
+          return;
+        }
+        final resolvedStorage = _resolveStorageById(requestedStorageId);
+        if (resolvedStorage == null) {
+          _json(request, 400, {'error': 'storage not found or unavailable'});
+          return;
+        }
         final jobId = _createJob(AgentJobType.sanity);
         _json(request, 200, AgentJobStart(jobId: jobId).toMap());
-        _startSanityJob(jobId, xmlPath, timestamp);
+        _startSanityCheckJob(jobId, xmlPath, timestamp, storage: resolvedStorage);
+        return;
+      }
+      if (request.method == 'POST' && path == '/restore/quick-check') {
+        final body = await _readJson(request);
+        final xmlPath = (body['xmlPath'] ?? '').toString();
+        final timestamp = (body['timestamp'] ?? '').toString();
+        final requestedStorageId = (body['storageId'] ?? '').toString().trim();
+        if (xmlPath.isEmpty || timestamp.isEmpty) {
+          _json(request, 400, {'error': 'missing params'});
+          return;
+        }
+        if (requestedStorageId.isEmpty) {
+          _json(request, 400, {'error': 'missing storageId'});
+          return;
+        }
+        final resolvedStorage = _resolveStorageById(requestedStorageId);
+        if (resolvedStorage == null) {
+          _json(request, 400, {'error': 'storage not found or unavailable'});
+          return;
+        }
+        final jobId = _createJob(AgentJobType.sanity);
+        _json(request, 200, AgentJobStart(jobId: jobId).toMap());
+        _startQuickCheckJob(jobId, xmlPath, timestamp, storage: resolvedStorage);
         return;
       }
       if (request.method == 'POST' && path.startsWith('/jobs/') && path.endsWith('/cancel')) {
@@ -780,9 +820,14 @@ class AgentHttpServer {
         return;
       }
       if (request.method == 'GET' && path == '/restore/entries') {
-        final destinationIdOverride = request.uri.queryParameters['destinationId'];
+        final storageIdOverride = request.uri.queryParameters['storageId'];
+        final requestedStorageId = storageIdOverride?.trim() ?? '';
+        if (requestedStorageId.isEmpty) {
+          _json(request, 400, {'error': 'missing storageId'});
+          return;
+        }
         final driverIdOverride = request.uri.queryParameters['driverId'];
-        final entries = await _loadRestoreEntries(driverIdOverride: driverIdOverride, destinationIdOverride: destinationIdOverride);
+        final entries = await _loadRestoreEntries(driverIdOverride: driverIdOverride, storageId: requestedStorageId);
         _json(request, 200, entries.map((entry) => entry.toMap()).toList());
         return;
       }
@@ -917,33 +962,23 @@ class AgentHttpServer {
     return DateTime.tryParse(text);
   }
 
-  Future<List<RestoreEntry>> _loadRestoreEntries({String? driverIdOverride, String? destinationIdOverride}) async {
-    _ResolvedDestination? resolvedDestination;
-    final requestedDestinationId = destinationIdOverride?.trim() ?? '';
-    if (requestedDestinationId.isNotEmpty) {
-      resolvedDestination = _resolveBackupDestination(requestedDestinationId);
-      if (resolvedDestination == null) {
-        return [];
-      }
-    } else if (driverIdOverride == null || driverIdOverride.trim().isEmpty) {
-      resolvedDestination = _resolveBackupDestination(null);
-    }
-    final defaultDestination = resolvedDestination ?? _resolveBackupDestination(null);
-    if (defaultDestination == null) {
+  Future<List<RestoreEntry>> _loadRestoreEntries({String? driverIdOverride, required String storageId}) async {
+    final resolvedStorage = _resolveStorageById(storageId);
+    if (resolvedStorage == null) {
       return [];
     }
-    final resolvedDriverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : defaultDestination.driverId;
+    final resolvedDriverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : resolvedStorage.driverId;
     final driverInfo = _driverCatalog[resolvedDriverId] ?? _driverCatalog['filesystem']!;
-    final backupPath = (resolvedDestination ?? defaultDestination).backupPath;
+    final backupPath = resolvedStorage.backupPath;
     if (driverInfo.usesPath && backupPath.isEmpty) {
       return [];
     }
-    final settings = (resolvedDestination ?? defaultDestination).settings;
+    final settings = resolvedStorage.settings;
     final driver = _driverForSettings(driverInfo.id, backupPath, settings: settings);
     try {
       await driver.ensureReady();
       await _cacheRelativeDirFromDriver(driver: driver, relativeDir: 'manifests');
-      final manifestsRoot = Directory('${driver.destination}${Platform.pathSeparator}manifests');
+      final manifestsRoot = Directory('${driver.storage}${Platform.pathSeparator}manifests');
       final manifestFiles = await _findManifestFiles(manifestsRoot);
       final grouped = <String, List<File>>{};
       for (final manifest in manifestFiles) {
@@ -1023,6 +1058,7 @@ class AgentHttpServer {
       final vmDir = Directory(vmDirPath);
       final diskBasenames = <String>[];
       final requiredDiskIds = <String>{};
+      final blockSizeMbValues = <int>{};
       for (final manifest in manifests) {
         final sourcePaths = await _readManifestFields(manifest, 'source_path');
         for (final sourcePath in sourcePaths) {
@@ -1040,6 +1076,17 @@ class AgentHttpServer {
             requiredDiskIds.add(diskId.trim());
           }
         }
+        final blockSizes = await _readManifestFields(manifest, 'block_size');
+        for (final blockSize in blockSizes) {
+          final parsed = int.tryParse(blockSize.trim());
+          if (parsed == null || parsed <= 0) {
+            continue;
+          }
+          final mb = parsed ~/ (1024 * 1024);
+          if (mb > 0) {
+            blockSizeMbValues.add(mb);
+          }
+        }
       }
       final diskNamesForTimestamp = await _collectDiskNamesForTimestamp(vmDir, timestamp);
       final missing = requiredDiskIds.where((diskId) => !_diskExistsForTimestamp(diskId, diskNamesForTimestamp)).toList();
@@ -1050,6 +1097,7 @@ class AgentHttpServer {
         timestamp: timestamp,
         diskBasenames: diskBasenames,
         missingDiskBasenames: missing,
+        blockSizeMbValues: blockSizeMbValues.toList()..sort(),
         sourceServerId: serverId,
         sourceServerName: serverName.isEmpty ? serverId : serverName,
       );
@@ -1225,96 +1273,74 @@ class AgentHttpServer {
     return descriptor.create(const <String, dynamic>{});
   }
 
-  BackupDestination? _destinationById(String destinationId) {
-    for (final destination in _agentSettings.destinations) {
-      if (destination.id == destinationId) {
-        return destination;
+  BackupStorage? _storageById(String storageId) {
+    for (final storage in _agentSettings.storage) {
+      if (storage.id == storageId) {
+        return storage;
       }
     }
     return null;
   }
 
-  List<BackupDestination> _replaceDestinationParams({required String destinationId, required Map<String, dynamic> params}) {
-    return _agentSettings.destinations.map((destination) {
-      if (destination.id != destinationId) {
-        return destination;
+  List<BackupStorage> _replaceStorageParams({required String storageId, required Map<String, dynamic> params}) {
+    return _agentSettings.storage.map((storage) {
+      if (storage.id != storageId) {
+        return storage;
       }
-      return BackupDestination(
-        id: destination.id,
-        name: destination.name,
-        driverId: destination.driverId,
-        enabled: destination.enabled,
+      return BackupStorage(
+        id: storage.id,
+        name: storage.name,
+        driverId: storage.driverId,
+        enabled: storage.enabled,
         params: params,
-        disableFresh: destination.disableFresh,
-        storeBlobs: destination.storeBlobs,
-        useBlobs: destination.useBlobs,
-        uploadConcurrency: destination.uploadConcurrency,
-        downloadConcurrency: destination.downloadConcurrency,
+        disableFresh: storage.disableFresh,
+        storeBlobs: storage.storeBlobs,
+        useBlobs: storage.useBlobs,
+        uploadConcurrency: storage.uploadConcurrency,
+        downloadConcurrency: storage.downloadConcurrency,
       );
     }).toList();
   }
 
-  _ResolvedDestination? _resolveBackupDestination(String? requestedDestinationId) {
-    final candidates = _agentSettings.destinations.where((destination) => destination.enabled).toList();
-    if (candidates.isEmpty) {
+  _ResolvedStorage? _resolveStorageById(String requestedStorageId) {
+    final requestedId = requestedStorageId.trim();
+    if (requestedId.isEmpty) {
       return null;
     }
-    final requestedId = requestedDestinationId?.trim() ?? '';
-    BackupDestination? destination;
-    if (requestedId.isNotEmpty) {
-      for (final entry in candidates) {
-        if (entry.id == requestedId) {
-          destination = entry;
-          break;
-        }
-      }
-      if (destination == null) {
-        return null;
-      }
+    final storage = _storageById(requestedId);
+    if (storage == null || !storage.enabled) {
+      return null;
     }
-    destination ??= _resolveDefaultBackupDestination(candidates);
-    final driverId = destination.driverId.trim();
+    final driverId = storage.driverId.trim();
     if (driverId.isEmpty) {
       return null;
     }
-    final settings = _settingsForDestination(destination);
-    final backupPath = _backupPathForDestination(destination);
-    final driverParams = Map<String, dynamic>.from(destination.params);
-    return _ResolvedDestination(destination: destination, settings: settings, driverId: driverId, backupPath: backupPath, driverParams: driverParams);
+    final settings = _settingsForStorage(storage);
+    final backupPath = _backupPathForStorage(storage);
+    final driverParams = Map<String, dynamic>.from(storage.params);
+    return _ResolvedStorage(storage: storage, settings: settings, driverId: driverId, backupPath: backupPath, driverParams: driverParams);
   }
 
-  BackupDestination _resolveDefaultBackupDestination(List<BackupDestination> candidates) {
-    final preferredId = _agentSettings.backupDestinationId?.trim() ?? '';
-    if (preferredId.isNotEmpty) {
-      for (final destination in candidates) {
-        if (destination.id == preferredId) {
-          return destination;
-        }
-      }
-    }
-    return candidates.first;
-  }
-
-  String _backupPathForDestination(BackupDestination destination) {
-    if (destination.driverId == 'filesystem') {
-      final path = destination.params['path']?.toString().trim() ?? '';
+  String _backupPathForStorage(BackupStorage storage) {
+    if (storage.driverId == 'filesystem') {
+      final path = storage.params['path']?.toString().trim() ?? '';
       return path;
     }
     return _filesystemBackupPath();
   }
 
   String _filesystemBackupPath() {
-    for (final destination in _agentSettings.destinations) {
-      if (destination.id != AppSettings.filesystemDestinationId) {
+    for (final storage in _agentSettings.storage) {
+      if (storage.id != AppSettings.filesystemStorageId) {
         continue;
       }
-      return destination.params['path']?.toString().trim() ?? '';
+      return storage.params['path']?.toString().trim() ?? '';
     }
     return '';
   }
 
-  AppSettings _settingsForDestination(BackupDestination destination) {
-    return _agentSettings.copyWith(backupDestinationId: destination.id);
+  AppSettings _settingsForStorage(BackupStorage storage) {
+    return _agentSettings.copyWith(backupStorageId: storage.id);
   }
 
   Map<String, BackupDriverInfo> _buildDriverCatalog() {
@@ -1368,7 +1394,7 @@ class AgentHttpServer {
         capabilities: gdrive.capabilities,
         validateStart: () {
           try {
-            final params = _requireSelectedDestinationParams(settings: sourceSettings, expectedDriverId: 'gdrive');
+            final params = _requireSelectedStorageParams(settings: sourceSettings, expectedDriverId: 'gdrive');
             final refreshToken = (params['refreshToken'] ?? '').toString().trim();
             return refreshToken.isEmpty ? 'google drive is not connected' : null;
           } catch (_) {
@@ -1396,7 +1422,7 @@ class AgentHttpServer {
         capabilities: sftpCapabilities,
         validateStart: () {
           try {
-            final params = _requireSelectedDestinationParams(settings: sourceSettings, expectedDriverId: 'sftp');
+            final params = _requireSelectedStorageParams(settings: sourceSettings, expectedDriverId: 'sftp');
             final host = (params['host'] ?? '').toString().trim();
             final user = (params['username'] ?? '').toString().trim();
             final password = (params['password'] ?? '').toString();
@@ -1421,13 +1447,13 @@ class AgentHttpServer {
 
   drv.BackupDriverCapabilities _catalogSftpCapabilities(AppSettings settings) {
     var maxConcurrentWrites = 8;
-    final selectedId = settings.backupDestinationId?.trim() ?? '';
+    final selectedId = settings.backupStorageId?.trim() ?? '';
     if (selectedId.isNotEmpty) {
-      for (final destination in settings.destinations) {
-        if (destination.id != selectedId || destination.driverId != 'sftp') {
+      for (final storage in settings.storage) {
+        if (storage.id != selectedId || storage.driverId != 'sftp') {
           continue;
         }
-        maxConcurrentWrites = destination.uploadConcurrency ?? 8;
+        maxConcurrentWrites = storage.uploadConcurrency ?? 8;
         break;
       }
     }
@@ -1443,21 +1469,21 @@ class AgentHttpServer {
     );
   }
 
-  Map<String, dynamic> _requireSelectedDestinationParams({required AppSettings settings, required String expectedDriverId}) {
-    final selectedId = settings.backupDestinationId?.trim() ?? '';
+  Map<String, dynamic> _requireSelectedStorageParams({required AppSettings settings, required String expectedDriverId}) {
+    final selectedId = settings.backupStorageId?.trim() ?? '';
     if (selectedId.isEmpty) {
-      throw StateError('backupDestinationId is required.');
+      throw StateError('backupStorageId is required.');
     }
-    for (final destination in settings.destinations) {
-      if (destination.id != selectedId) {
+    for (final storage in settings.storage) {
+      if (storage.id != selectedId) {
         continue;
       }
-      if (destination.driverId != expectedDriverId) {
-        throw StateError('Destination "$selectedId" is not a "$expectedDriverId" destination.');
+      if (storage.driverId != expectedDriverId) {
+        throw StateError('Storage "$selectedId" is not a "$expectedDriverId" storage.');
       }
-      return destination.params;
+      return storage.params;
     }
-    throw StateError('Destination "$selectedId" not found.');
+    throw StateError('Storage "$selectedId" not found.');
   }
 
   BackupDriverCapabilities _mapCapabilities(drv.BackupDriverCapabilities caps) {
@@ -1569,16 +1595,16 @@ class AgentHttpServer {
     String? driverIdOverride,
     Map<String, dynamic>? driverParams,
     int? blockSizeMBOverride,
-    _ResolvedDestination? destination,
+    _ResolvedStorage? storage,
     bool freshRequested = false,
   }) {
-    final defaultDriverId = destination?.driverId ?? 'filesystem';
+    final defaultDriverId = storage?.driverId ?? 'filesystem';
     final driverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : defaultDriverId;
     final driverInfo = _driverCatalog[driverId] ?? _driverCatalog['filesystem']!;
     _setJobContext(
       jobId,
       source: _formatJobSource(server, vm.name),
-      target: _formatBackupTarget(driverInfo, backupPath, driverId, destinationName: destination?.destination.name),
+      target: _formatBackupTarget(driverInfo, backupPath, driverId, storageName: storage?.storage.name),
       driverLabel: driverInfo.label,
     );
     _hostLog('Backup job $jobId using driver: $driverId');
@@ -1606,8 +1632,8 @@ class AgentHttpServer {
           'driverParams': driverParams ?? const <String, dynamic>{},
           'blockSizeMB': blockSizeMBOverride,
           'fresh': freshRequested,
-          'settings': (destination?.settings ?? _agentSettings).toMap(),
-          'destination': destination?.destination.toMap(),
+          'settings': (storage?.settings ?? _agentSettings).toMap(),
+          'storage': storage?.storage.toMap(),
           'server': server.toMap(),
           'vm': vm.toMap(),
         });
@@ -1711,28 +1737,28 @@ class AgentHttpServer {
     return parsed;
   }
 
-  void _startSanityJob(String jobId, String xmlPath, String timestamp) {
+  void _startSanityCheckJob(String jobId, String xmlPath, String timestamp, {required _ResolvedStorage storage}) {
+    _startRestoreCheckJob(jobId, xmlPath, timestamp, storage: storage, mode: _RestoreCheckMode.full);
+  }
+
+  void _startQuickCheckJob(String jobId, String xmlPath, String timestamp, {required _ResolvedStorage storage}) {
+    _startRestoreCheckJob(jobId, xmlPath, timestamp, storage: storage, mode: _RestoreCheckMode.quick);
+  }
+
+  void _startRestoreCheckJob(String jobId, String xmlPath, String timestamp, {required _ResolvedStorage storage, required _RestoreCheckMode mode}) {
     unawaited(() async {
+      final checkDriversByBlockSizeMB = <int, drv.BackupDriver>{};
+      final quickCachesByBlockSizeMB = <int, _BlobDirectoryLookupCache>{};
+      final checkLabel = mode == _RestoreCheckMode.quick ? 'Quick check' : 'Sanity check';
       try {
-        final destination = _resolveBackupDestination(null);
-        if (destination == null) {
-          throw 'No enabled destination configured';
-        }
-        final driverInfo = _driverCatalog[destination.driverId] ?? _driverCatalog['filesystem']!;
-        final backupPath = destination.backupPath;
+        final driverInfo = _driverCatalog[storage.driverId] ?? _driverCatalog['filesystem']!;
+        final backupPath = storage.backupPath;
         if (driverInfo.usesPath && backupPath.isEmpty) {
           throw 'Backup path is not configured';
         }
-        final driver = _driverForSettings(driverInfo.id, backupPath, settings: destination.settings);
         final vmDir = _vmDirFromXmlPath(xmlPath);
         if (!await vmDir.exists()) {
           throw 'Cannot resolve restore location for $xmlPath';
-        }
-        if (driver is! drv.RemoteBlobDriver) {
-          final blobsDir = driver.blobsDir();
-          if (!await blobsDir.exists()) {
-            throw 'Blobs directory not found: ${blobsDir.path}';
-          }
         }
         final manifests = await _listManifestFilesForTimestamp(vmDir, timestamp);
         if (manifests.isEmpty) {
@@ -1740,6 +1766,7 @@ class AgentHttpServer {
         }
 
         var totalBytes = 0;
+        var totalBlocks = 0;
         for (final manifest in manifests) {
           final lines = await _readManifestLines(manifest);
           var blockSize = 1024 * 1024;
@@ -1768,10 +1795,8 @@ class AgentHttpServer {
             }
             if (trimmed.endsWith('-> ZERO')) {
               final range = _parseZeroRange(trimmed);
-              if (range != null) {
-                if (range.$2 > maxIndex) {
-                  maxIndex = range.$2;
-                }
+              if (range != null && range.$2 > maxIndex) {
+                maxIndex = range.$2;
               }
               continue;
             }
@@ -1783,10 +1808,15 @@ class AgentHttpServer {
             if (index == null) {
               continue;
             }
+            final hash = parts.last.trim();
+            if (hash.isNotEmpty && hash != 'ZERO') {
+              totalBlocks += 1;
+            }
             if (index > maxIndex) {
               maxIndex = index;
             }
           }
+          _blockSizeMbFromManifestBytes(blockSize, manifest.path);
           if (fileSize != null && fileSize > 0) {
             totalBytes += fileSize;
           } else if (maxIndex >= 0) {
@@ -1794,33 +1824,70 @@ class AgentHttpServer {
           }
         }
 
-        _updateJob(jobId, _jobs[jobId]!.copyWith(totalUnits: totalBytes, completedUnits: 0, bytesTransferred: 0, speedBytesPerSec: 0, totalBytes: totalBytes, message: 'Sanity check...'));
+        _updateJob(jobId, _jobs[jobId]!.copyWith(totalUnits: totalBlocks, completedUnits: 0, bytesTransferred: 0, speedBytesPerSec: 0, totalBytes: totalBytes, message: '$checkLabel...'));
 
         var bytesChecked = 0;
         var bytesSinceTick = 0;
         var smoothedSpeed = 0.0;
+        var speedTrackingStarted = false;
         var lastSpeedUpdate = DateTime.now();
         var lastProgressUpdate = DateTime.now();
         var mismatches = 0;
         var checked = 0;
+        final maxConcurrentDownloads = storage.storage.downloadConcurrency ?? 8;
+        if (maxConcurrentDownloads <= 0) {
+          throw '$checkLabel requires downloadConcurrency > 0.';
+        }
+        final blocksByBlockSizeMB = <int, List<_CheckBlockRef>>{};
 
         void handleBytes(int bytes, {String? message}) {
           if (bytes <= 0) {
             return;
           }
           bytesChecked += bytes;
-          bytesSinceTick += bytes;
+          if (speedTrackingStarted) {
+            bytesSinceTick += bytes;
+          }
           final now = DateTime.now();
-          final elapsedMs = now.difference(lastSpeedUpdate).inMilliseconds;
-          if (elapsedMs >= 1000) {
-            final instant = bytesSinceTick / (elapsedMs / 1000);
-            smoothedSpeed = _smoothSpeed(smoothedSpeed, instant);
-            bytesSinceTick = 0;
-            lastSpeedUpdate = now;
+          if (speedTrackingStarted) {
+            final elapsedMs = now.difference(lastSpeedUpdate).inMilliseconds;
+            if (elapsedMs >= 1000) {
+              final instant = bytesSinceTick / (elapsedMs / 1000);
+              smoothedSpeed = _smoothSpeed(smoothedSpeed, instant);
+              bytesSinceTick = 0;
+              lastSpeedUpdate = now;
+            }
           }
           if (now.difference(lastProgressUpdate).inMilliseconds >= 500) {
             lastProgressUpdate = now;
-            _updateJob(jobId, _jobs[jobId]!.copyWith(bytesTransferred: bytesChecked, speedBytesPerSec: smoothedSpeed, message: message ?? _jobs[jobId]!.message));
+            _updateJob(
+              jobId,
+              _jobs[jobId]!.copyWith(totalUnits: totalBlocks, completedUnits: checked, bytesTransferred: bytesChecked, speedBytesPerSec: smoothedSpeed, message: message ?? _jobs[jobId]!.message),
+            );
+          }
+        }
+
+        Future<void> digestChunkCooperative(List<int> chunk, Sink<List<int>> digestInput, {required String message}) async {
+          if (chunk.isEmpty) {
+            return;
+          }
+          const maxSyncBytes = 256 * 1024;
+          if (chunk.length <= maxSyncBytes) {
+            digestInput.add(chunk);
+            handleBytes(chunk.length, message: message);
+            return;
+          }
+          var offset = 0;
+          while (offset < chunk.length) {
+            var end = offset + maxSyncBytes;
+            if (end > chunk.length) {
+              end = chunk.length;
+            }
+            final part = chunk is Uint8List ? Uint8List.sublistView(chunk, offset, end) : chunk.sublist(offset, end);
+            digestInput.add(part);
+            handleBytes(end - offset, message: message);
+            offset = end;
+            await Future<void>.delayed(Duration.zero);
           }
         }
 
@@ -1828,6 +1895,7 @@ class AgentHttpServer {
           _ensureJobNotCanceled(jobId);
           final lines = await _readManifestLines(manifest);
           var blockSize = 1024 * 1024;
+          var blockSizeMB = 1;
           int? fileSize;
           String? diskId;
           var inBlocks = false;
@@ -1842,6 +1910,7 @@ class AgentHttpServer {
                 final parsed = int.tryParse(value);
                 if (parsed != null && parsed > 0) {
                   blockSize = parsed;
+                  blockSizeMB = _blockSizeMbFromManifestBytes(blockSize, manifest.path);
                 }
               } else if (trimmed.startsWith('file_size:')) {
                 final value = trimmed.substring('file_size:'.length).trim();
@@ -1854,7 +1923,7 @@ class AgentHttpServer {
               continue;
             }
             _ensureJobNotCanceled(jobId);
-            final message = diskId == null || diskId.isEmpty ? 'Sanity check...' : 'Sanity check: $diskId';
+            final message = diskId == null || diskId.isEmpty ? '$checkLabel...' : '$checkLabel: $diskId';
             if (trimmed.endsWith('-> ZERO')) {
               final range = _parseZeroRange(trimmed);
               if (range != null) {
@@ -1875,63 +1944,201 @@ class AgentHttpServer {
             if (hash.isEmpty || hash == 'ZERO') {
               continue;
             }
-            final remote = driver is drv.RemoteBlobDriver ? driver as drv.RemoteBlobDriver : null;
-            if (remote != null) {
-              final bytes = await remote.readBlobBytes(hash);
-              if (bytes == null) {
-                mismatches++;
-                _hostLog('Sanity check missing blob index=$index hash=$hash');
-              } else {
-                final actual = sha256.convert(bytes).toString();
-                if (actual != hash) {
-                  mismatches++;
-                  _hostLog('Sanity check hash mismatch index=$index expected=$hash got=$actual');
+            final expectedLength = _blockLengthForIndex(index, fileSize, blockSize);
+            if (mode == _RestoreCheckMode.quick) {
+              final driverForBlockSize = checkDriversByBlockSizeMB.putIfAbsent(blockSizeMB, () {
+                final settingsForBlockSize = storage.settings.copyWith(blockSizeMB: blockSizeMB);
+                return _driverForSettings(driverInfo.id, backupPath, settings: settingsForBlockSize);
+              });
+              final cache = quickCachesByBlockSizeMB.putIfAbsent(blockSizeMB, () {
+                final lister = driverForBlockSize is drv.BlobDirectoryLister ? driverForBlockSize as drv.BlobDirectoryLister : null;
+                if (lister == null) {
+                  throw 'Quick check requires BlobDirectoryLister support.';
                 }
+                return _BlobDirectoryLookupCache(lister);
+              });
+              final exists = await cache.blobExists(hash);
+              checked += 1;
+              if (!exists) {
+                mismatches += 1;
+                _hostLog('$checkLabel missing blob index=$index hash=$hash');
               }
-            } else {
-              final blobFile = driver.blobFile(hash);
-              if (!await blobFile.exists()) {
-                mismatches++;
-                _hostLog('Sanity check missing blob index=$index hash=$hash');
-              } else {
-                final bytes = await blobFile.readAsBytes();
-                final actual = sha256.convert(bytes).toString();
-                if (actual != hash) {
-                  mismatches++;
-                  _hostLog('Sanity check hash mismatch index=$index expected=$hash got=$actual');
-                }
-              }
+              handleBytes(expectedLength, message: message);
+              continue;
             }
-            checked++;
-            handleBytes(_blockLengthForIndex(index, fileSize, blockSize), message: message);
+            final refs = blocksByBlockSizeMB.putIfAbsent(blockSizeMB, () => <_CheckBlockRef>[]);
+            refs.add(_CheckBlockRef(hash: hash, expectedLength: expectedLength, index: index, message: message));
           }
         }
 
-        final resultMessage = mismatches == 0 ? 'Sanity check OK ($checked blocks checked)' : 'Sanity check: $mismatches mismatch(es) out of $checked blocks';
-        _updateJob(jobId, _jobs[jobId]!.copyWith(state: AgentJobState.success, message: resultMessage, bytesTransferred: bytesChecked, speedBytesPerSec: 0));
+        if (mode == _RestoreCheckMode.full) {
+          for (final blockGroup in blocksByBlockSizeMB.entries) {
+            _ensureJobNotCanceled(jobId);
+            final blockSizeMB = blockGroup.key;
+            final blocks = blockGroup.value;
+            if (blocks.isEmpty) {
+              continue;
+            }
+            final driverForBlockSize = checkDriversByBlockSizeMB.putIfAbsent(blockSizeMB, () {
+              final settingsForBlockSize = storage.settings.copyWith(blockSizeMB: blockSizeMB);
+              return _driverForSettings(driverInfo.id, backupPath, settings: settingsForBlockSize);
+            });
+            final remote = driverForBlockSize is drv.RemoteBlobDriver ? driverForBlockSize as drv.RemoteBlobDriver : null;
+            if (driverInfo.id != 'filesystem' && remote == null) {
+              throw '$checkLabel requires remote blob reads for driver ${driverInfo.id}.';
+            }
+
+            Future<_CheckBlockFetchResult> startFetch(int position) async {
+              final block = blocks[position];
+              if (_isJobCanceled(jobId)) {
+                return _CheckBlockFetchResult(position: position, block: block, bytes: const <int>[], missing: false, canceled: true);
+              }
+              try {
+                if (driverInfo.id == 'filesystem') {
+                  final blobFile = driverForBlockSize.blobFile(block.hash);
+                  try {
+                    final bytes = await blobFile.readAsBytes();
+                    return _CheckBlockFetchResult(position: position, block: block, bytes: bytes, missing: false, canceled: false);
+                  } on FileSystemException {
+                    return _CheckBlockFetchResult(position: position, block: block, bytes: const <int>[], missing: true, canceled: false);
+                  }
+                }
+                final builder = BytesBuilder(copy: false);
+                await for (final chunk in remote!.openBlobStream(block.hash, length: block.expectedLength)) {
+                  _ensureJobNotCanceled(jobId);
+                  builder.add(chunk);
+                }
+                final bytes = builder.takeBytes();
+                return _CheckBlockFetchResult(position: position, block: block, bytes: bytes, missing: bytes.isEmpty, canceled: false);
+              } on _JobCanceled {
+                return _CheckBlockFetchResult(position: position, block: block, bytes: const <int>[], missing: false, canceled: true);
+              }
+            }
+
+            var nextFetch = 0;
+            var nextConsume = 0;
+            final inFlight = <int, Future<_CheckBlockFetchResult>>{};
+            final startedFetches = <Future<_CheckBlockFetchResult>>[];
+
+            void scheduleFetches() {
+              while (inFlight.length < maxConcurrentDownloads && nextFetch < blocks.length) {
+                if (_isJobCanceled(jobId)) {
+                  break;
+                }
+                final position = nextFetch;
+                final future = startFetch(position);
+                startedFetches.add(future);
+                inFlight[position] = future;
+                nextFetch += 1;
+              }
+            }
+
+            try {
+              scheduleFetches();
+              while (nextConsume < blocks.length) {
+                if (_isJobCanceled(jobId)) {
+                  throw const _JobCanceled();
+                }
+                scheduleFetches();
+                final future = inFlight[nextConsume];
+                if (future == null) {
+                  if (_isJobCanceled(jobId)) {
+                    throw const _JobCanceled();
+                  }
+                  await Future<void>.delayed(const Duration(milliseconds: 1));
+                  continue;
+                }
+                final fetched = await future;
+                inFlight.remove(nextConsume);
+                nextConsume += 1;
+                if (fetched.canceled) {
+                  throw const _JobCanceled();
+                }
+                checked += 1;
+
+                if (fetched.missing || fetched.bytes.isEmpty) {
+                  mismatches += 1;
+                  _hostLog('$checkLabel missing blob index=${fetched.block.index} hash=${fetched.block.hash}');
+                  handleBytes(fetched.block.expectedLength, message: fetched.block.message);
+                  continue;
+                }
+                if (!speedTrackingStarted) {
+                  speedTrackingStarted = true;
+                  bytesSinceTick = 0;
+                  smoothedSpeed = 0;
+                  lastSpeedUpdate = DateTime.now();
+                }
+
+                final digestSink = _DigestAccumulator();
+                final digestInput = crypto.sha256.startChunkedConversion(digestSink);
+                await digestChunkCooperative(fetched.bytes, digestInput, message: fetched.block.message);
+                digestInput.close();
+                final actual = digestSink.value?.toString() ?? '';
+                if (actual != fetched.block.hash) {
+                  mismatches += 1;
+                  _hostLog('$checkLabel hash mismatch index=${fetched.block.index} expected=${fetched.block.hash} got=$actual');
+                }
+                if (fetched.bytes.length < fetched.block.expectedLength) {
+                  handleBytes(fetched.block.expectedLength - fetched.bytes.length, message: fetched.block.message);
+                }
+              }
+            } finally {
+              if (startedFetches.isNotEmpty) {
+                if (_isJobCanceled(jobId)) {
+                  for (final future in startedFetches) {
+                    unawaited(() async {
+                      try {
+                        await future;
+                      } catch (_) {}
+                    }());
+                  }
+                } else {
+                  await Future.wait(
+                    startedFetches.map((future) async {
+                      try {
+                        await future;
+                      } catch (_) {}
+                    }),
+                  );
+                }
+              }
+            }
+          }
+        }
+
+        final resultMessage = mismatches == 0 ? '$checkLabel OK ($checked blocks checked)' : '$checkLabel: $mismatches mismatch(es) out of $checked blocks';
+        _updateJob(
+          jobId,
+          _jobs[jobId]!.copyWith(state: AgentJobState.success, message: resultMessage, totalUnits: totalBlocks, completedUnits: checked, bytesTransferred: bytesChecked, speedBytesPerSec: 0),
+        );
       } catch (error, stackTrace) {
         final isCanceled = error is _JobCanceled;
-        if (!isCanceled) {
-          _hostLogError('Sanity check failed.', error, stackTrace);
+        if (isCanceled) {
+          _hostLog('$checkLabel canceled.');
+        } else {
+          _hostLogError('$checkLabel failed.', error, stackTrace);
         }
         _updateJob(jobId, _jobs[jobId]!.copyWith(state: isCanceled ? AgentJobState.canceled : AgentJobState.failure, message: isCanceled ? 'Canceled' : error.toString(), speedBytesPerSec: 0));
+      } finally {
+        for (final driver in checkDriversByBlockSizeMB.values) {
+          try {
+            await driver.closeConnections();
+          } catch (_) {}
+        }
       }
     }());
   }
 
-  Future<RestorePrecheckResult> _restorePrecheck(ServerConfig server, String xmlPath, {_ResolvedDestination? destination, String? driverIdOverride}) async {
-    final resolvedDestination = destination ?? _resolveBackupDestination(null);
-    if (resolvedDestination == null) {
-      return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
-    }
+  Future<RestorePrecheckResult> _restorePrecheck(ServerConfig server, String xmlPath, {required _ResolvedStorage storage, String? driverIdOverride}) async {
+    final resolvedStorage = storage;
     final requestedDriverId = driverIdOverride?.trim() ?? '';
-    final effectiveDriverId = requestedDriverId.isEmpty ? resolvedDestination.driverId : requestedDriverId;
+    final effectiveDriverId = requestedDriverId.isEmpty ? resolvedStorage.driverId : requestedDriverId;
     final driverInfo = _driverCatalog[effectiveDriverId] ?? _driverCatalog['filesystem']!;
-    final backupPath = resolvedDestination.backupPath;
+    final backupPath = resolvedStorage.backupPath;
     if (driverInfo.usesPath && backupPath.isEmpty) {
       return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
     }
-    final driver = _driverForSettings(driverInfo.id, backupPath, settings: resolvedDestination.settings);
+    final driver = _driverForSettings(driverInfo.id, backupPath, settings: resolvedStorage.settings);
     try {
       await driver.ensureReady();
       await _cacheRelativeDirFromDriver(driver: driver, relativeDir: 'manifests');
@@ -1996,7 +2203,7 @@ class AgentHttpServer {
       if (normalizedPath.isEmpty) {
         continue;
       }
-      final localFilePath = '${driver.destination}${Platform.pathSeparator}${normalizedPath.replaceAll('/', Platform.pathSeparator)}';
+      final localFilePath = '${driver.storage}${Platform.pathSeparator}${normalizedPath.replaceAll('/', Platform.pathSeparator)}';
       final localFile = File(localFilePath);
       final tempFile = File('${localFile.path}.inprogress.${DateTime.now().microsecondsSinceEpoch}');
       await tempFile.parent.create(recursive: true);
@@ -2008,12 +2215,12 @@ class AgentHttpServer {
     }
   }
 
-  void _startRestoreJob(String jobId, ServerConfig server, String xmlPath, String decision, {_ResolvedDestination? destination, String? driverIdOverride}) {
-    final defaultDriverId = destination?.driverId ?? 'filesystem';
+  void _startRestoreJob(String jobId, ServerConfig server, String xmlPath, String decision, {_ResolvedStorage? storage, String? driverIdOverride}) {
+    final defaultDriverId = storage?.driverId ?? 'filesystem';
     final driverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : defaultDriverId;
     final driverInfo = _driverCatalog[driverId] ?? _driverCatalog['filesystem']!;
     _setJobContext(jobId, source: xmlPath, driverLabel: driverInfo.label);
-    final backupPath = destination?.backupPath ?? _filesystemBackupPath();
+    final backupPath = storage?.backupPath ?? _filesystemBackupPath();
     if (driverInfo.usesPath && backupPath.isEmpty) {
       final current = _jobs[jobId];
       if (current != null) {
@@ -2046,8 +2253,8 @@ class AgentHttpServer {
           'backupPath': backupPath,
           'decision': decision,
           'xmlPath': xmlPath,
-          'settings': (destination?.settings ?? _agentSettings).toMap(),
-          'destination': destination?.destination.toMap(),
+          'settings': (storage?.settings ?? _agentSettings).toMap(),
+          'storage': storage?.storage.toMap(),
           'server': server.toMap(),
         });
         return;
@@ -2130,10 +2337,10 @@ class AgentHttpServer {
     return '$serverName:$vm';
   }
 
-  String _formatBackupTarget(BackupDriverInfo driverInfo, String backupPath, String driverId, {String? destinationName}) {
-    final destinationLabel = destinationName?.trim() ?? '';
-    if (destinationLabel.isNotEmpty) {
-      return destinationLabel;
+  String _formatBackupTarget(BackupDriverInfo driverInfo, String backupPath, String driverId, {String? storageName}) {
+    final storageLabel = storageName?.trim() ?? '';
+    if (storageLabel.isNotEmpty) {
+      return storageLabel;
     }
     if (driverInfo.usesPath) {
       final trimmedPath = backupPath.trim();
@@ -2156,10 +2363,10 @@ class AgentHttpServer {
     final control = _jobControls[jobId];
     final duration = control?.startedAt == null ? null : DateTime.now().difference(control!.startedAt).inSeconds;
     final status = state == AgentJobState.success ? 'success' : 'failed';
-    final destinationLabel = _resolveDestinationLabel(target: control?.target, driverLabel: control?.driverLabel);
+    final storageLabel = _resolveStorageLabel(target: control?.target, driverLabel: control?.driverLabel);
     final messageText = _buildNtfymeMessage(type, status, control?.source, control?.target);
-    final pushMessage = _buildNtfymePushMessage(messageText, destinationLabel);
-    final payload = <String, dynamic>{'topic': _ntfymeTopic, 'msg': messageText, 'push_msg': pushMessage, 'type': type.name, 'status': status, 'destination': destinationLabel};
+    final pushMessage = _buildNtfymePushMessage(messageText, storageLabel);
+    final payload = <String, dynamic>{'topic': _ntfymeTopic, 'msg': messageText, 'push_msg': pushMessage, 'type': type.name, 'status': status, 'storage': storageLabel};
     if (duration != null) {
       payload['duration_sec'] = duration;
     }
@@ -2185,21 +2392,21 @@ class AgentHttpServer {
     return '$label $statusText';
   }
 
-  String _buildNtfymePushMessage(String message, String? destinationLabel) {
-    final label = destinationLabel?.trim() ?? '';
+  String _buildNtfymePushMessage(String message, String? storageLabel) {
+    final label = storageLabel?.trim() ?? '';
     if (label.isEmpty) {
       return message;
     }
     return '$message on $label';
   }
 
-  String _resolveDestinationLabel({String? target, String? driverLabel}) {
+  String _resolveStorageLabel({String? target, String? driverLabel}) {
     final targetLabel = target?.trim() ?? '';
     if (targetLabel.isNotEmpty) {
       return targetLabel;
     }
     final fallback = driverLabel?.trim() ?? '';
-    return fallback.isEmpty ? 'Unknown destination' : fallback;
+    return fallback.isEmpty ? 'Unknown storage' : fallback;
   }
 
   String _formatBytes(int bytes) {
@@ -2344,6 +2551,21 @@ class AgentHttpServer {
     return length < 0 ? 0 : length;
   }
 
+  int _blockSizeMbFromManifestBytes(int blockSizeBytes, String manifestPath) {
+    const bytesPerMb = 1024 * 1024;
+    if (blockSizeBytes <= 0) {
+      throw 'restore invalid manifest block_size=$blockSizeBytes in $manifestPath (must be > 0 bytes)';
+    }
+    if (blockSizeBytes % bytesPerMb != 0) {
+      throw 'restore invalid manifest block_size=$blockSizeBytes in $manifestPath (must be divisible by $bytesPerMb)';
+    }
+    final blockSizeMB = blockSizeBytes ~/ bytesPerMb;
+    if (blockSizeMB != 1 && blockSizeMB != 2 && blockSizeMB != 4 && blockSizeMB != 8) {
+      throw 'restore invalid manifest block_size=$blockSizeBytes in $manifestPath (allowed: 1048576, 2097152, 4194304, 8388608)';
+    }
+    return blockSizeMB;
+  }
+
   (int, int)? _parseZeroRange(String line) {
     if (!line.endsWith('-> ZERO')) {
       return null;
@@ -2402,6 +2624,80 @@ class _JobControl {
   String? source;
   String? target;
   String? driverLabel;
+}
+
+enum _RestoreCheckMode { full, quick }
+
+class _DigestAccumulator implements Sink<crypto.Digest> {
+  crypto.Digest? value;
+
+  @override
+  void add(crypto.Digest data) {
+    value = data;
+  }
+
+  @override
+  void close() {}
+}
+
+class _BlobDirectoryLookupCache {
+  _BlobDirectoryLookupCache(this._driver);
+
+  final drv.BlobDirectoryLister _driver;
+  Set<String>? _shards;
+  final Map<String, Set<String>> _blobNamesByShard = <String, Set<String>>{};
+
+  Future<bool> blobExists(String hash) async {
+    if (hash.length < 2) {
+      return false;
+    }
+    final shard = hash.substring(0, 2);
+    final shards = await _loadShards();
+    if (!shards.contains(shard)) {
+      return false;
+    }
+    final names = await _loadBlobNames(shard);
+    return names.contains(hash);
+  }
+
+  Future<Set<String>> _loadShards() async {
+    final cached = _shards;
+    if (cached != null) {
+      return cached;
+    }
+    final names = await _driver.listBlobShards();
+    _shards = names;
+    return names;
+  }
+
+  Future<Set<String>> _loadBlobNames(String shard) async {
+    final cached = _blobNamesByShard[shard];
+    if (cached != null) {
+      return cached;
+    }
+    final names = await _driver.listBlobNames(shard);
+    _blobNamesByShard[shard] = names;
+    return names;
+  }
+}
+
+class _CheckBlockRef {
+  const _CheckBlockRef({required this.hash, required this.expectedLength, required this.index, required this.message});
+
+  final String hash;
+  final int expectedLength;
+  final int index;
+  final String message;
+}
+
+class _CheckBlockFetchResult {
+  const _CheckBlockFetchResult({required this.position, required this.block, required this.bytes, required this.missing, required this.canceled});
+
+  final int position;
+  final _CheckBlockRef block;
+  final List<int> bytes;
+  final bool missing;
+  final bool canceled;
 }
 
 class _JobCanceled implements Exception {
