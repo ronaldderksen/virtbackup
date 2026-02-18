@@ -11,7 +11,7 @@ typedef SnapshotCreator = Future<void> Function(ServerConfig server, VmEntry vm,
 typedef SnapshotCommitter = Future<void> Function(ServerConfig server, VmEntry vm, List<MapEntry<String, String>> disks);
 typedef OverlayCleaner = Future<void> Function(ServerConfig server, VmEntry vm, List<MapEntry<String, String>> activeDisks, List<MapEntry<String, String>> inactiveDisks);
 typedef SftpUploader = Future<void> Function(ServerConfig server, String localPath, String remotePath, {void Function(int bytes)? onBytes});
-typedef HashblocksEnsurer = Future<String?> Function(ServerConfig server);
+typedef HashblocksEnsurer = Future<String> Function(ServerConfig server);
 typedef HashblocksStreamer =
     Future<void> Function(
       ServerConfig server,

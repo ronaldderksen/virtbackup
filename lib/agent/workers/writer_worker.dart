@@ -3,7 +3,6 @@ part of '../backup.dart';
 class _WriterWorker {
   _WriterWorker({
     required this.maxConcurrentWrites,
-    required this.blockTimeout,
     required this.logInterval,
     required this.backlogLimitBytes,
     required this.driverBufferedBytes,
@@ -16,7 +15,6 @@ class _WriterWorker {
   });
 
   final int maxConcurrentWrites;
-  final Duration blockTimeout;
   final Duration logInterval;
   final int backlogLimitBytes;
   final int Function() driverBufferedBytes;
@@ -159,12 +157,7 @@ class _WriterWorker {
           _queuedBytes -= entry.bytes.length;
           _inFlightBytes += entry.bytes.length;
           _reportMetrics();
-          final future = scheduleWrite(entry.hash, entry.bytes).timeout(
-            blockTimeout,
-            onTimeout: () {
-              throw TimeoutException('hashblocks writer timeout after ${blockTimeout.inSeconds}s');
-            },
-          );
+          final future = scheduleWrite(entry.hash, entry.bytes);
           writeFutures.add(future);
           writeSizes[future] = entry.bytes.length;
           scheduled = true;

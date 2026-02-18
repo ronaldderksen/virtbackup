@@ -105,6 +105,16 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
   }
 
   @override
+  Future<bool> deleteFile(String relativePath) async {
+    final file = _relativeFile(relativePath);
+    if (!await file.exists()) {
+      return false;
+    }
+    await file.delete();
+    return true;
+  }
+
+  @override
   Future<void> freshCleanup() async {
     await _deleteDirIfExists(Directory('${_rootDir().path}${Platform.pathSeparator}manifests'));
     await _deleteDirIfExists(blobsDir());

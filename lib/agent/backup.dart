@@ -4,7 +4,6 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart';
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 import 'package:virtbackup/agent/logging_config.dart';
 import 'package:virtbackup/common/models.dart';
@@ -177,7 +176,9 @@ class BackupAgent {
       _startBlobCacheWorker();
       await driver.prepareBackup(serverFolderName, vmFolderName);
       final manifestsBase = Directory('${driver.storage}${Platform.pathSeparator}manifests${Platform.pathSeparator}$serverFolderName${Platform.pathSeparator}$vmFolderName');
-      final backupTimestamp = _dependencies.sanitizeFileName(DateTime.now().toIso8601String());
+      final timestampSeconds = DateTime.now().toIso8601String().split('.').first;
+      final blockSizeMb = _blockSize ~/ (1024 * 1024);
+      final backupTimestamp = '$timestampSeconds-${blockSizeMb}MB';
 
       final xmlResult = await _dependencies.runSshCommand(server, 'virsh dumpxml "${vm.name}"');
       if ((xmlResult.exitCode ?? 0) != 0) {
@@ -274,19 +275,7 @@ class BackupAgent {
           _logInfo('Streaming disk ${_progress.completedDisks + 1}/${_progress.totalDisks} for ${vm.name}: $diskId');
           _setProgress(_progress.copyWith(statusMessage: 'Streaming ${_progress.completedDisks + 1} of ${_progress.totalDisks}: $diskId'));
           _setProgress(_progress.copyWith(statusMessage: 'Backup ${_progress.completedDisks + 1} of ${_progress.totalDisks}: $diskId'));
-          final usedHashblocks = await _writeDiskUsingHashblocks(driver: driver, manifestSink: vmManifestSink, diskId: diskId, sourcePath: sourcePath, server: server, chain: plan.chain);
-          if (!usedHashblocks) {
-            _setProgress(_progress.copyWith(statusMessage: 'Backup ${_progress.completedDisks + 1} of ${_progress.totalDisks}: $diskId'));
-            await _writeDiskStreamToDedupStore(
-              driver: driver,
-              manifestSink: vmManifestSink,
-              diskId: diskId,
-              sourcePath: sourcePath,
-              server: server,
-              chain: plan.chain,
-              streamRemoteFile: (onChunk) => _dependencies.streamRemoteFile(server, sourcePath, onChunk: onChunk),
-            );
-          }
+          await _writeDiskUsingHashblocks(driver: driver, manifestSink: vmManifestSink, diskId: diskId, sourcePath: sourcePath, server: server, chain: plan.chain);
           _setProgress(_progress.copyWith(completedDisks: _progress.completedDisks + 1));
         }
       }
@@ -403,10 +392,6 @@ class BackupAgent {
       await future;
     }
     worker.throwIfError();
-  }
-
-  void _enqueueBlobDir(String hash) {
-    _blobCacheWorker?.enqueue(hash);
   }
 
   void _prefetchBlobCache(String hash) {
@@ -657,124 +642,7 @@ class BackupAgent {
     return 'backup: $trimmed';
   }
 
-  Future<void> _writeDiskStreamToDedupStore({
-    required BackupDriver driver,
-    required IOSink manifestSink,
-    required String diskId,
-    required String sourcePath,
-    required ServerConfig server,
-    required List<_DiskChainItem> chain,
-    required Future<void> Function(Future<void> Function(List<int> chunk) onChunk) streamRemoteFile,
-  }) async {
-    _ensureNotCanceled();
-    final sink = manifestSink;
-    int? fileSize;
-    try {
-      fileSize = await _dependencies.getRemoteFileSize(server, sourcePath);
-    } catch (_) {}
-    sink.writeln('disk_id: $diskId');
-    sink.writeln('source_path: $sourcePath');
-    if (fileSize != null && fileSize > 0) {
-      sink.writeln('file_size: $fileSize');
-    }
-    _writeManifestChainMetadata(sink, chain: chain);
-    sink.writeln('blocks: $sourcePath');
-
-    var index = 0;
-    int zeroRunStart = -1;
-    int zeroRunEnd = -1;
-    final buffer = Uint8List(_blockSize);
-    var bufferOffset = 0;
-    try {
-      await streamRemoteFile((chunk) async {
-        _ensureNotCanceled();
-        _markSftpRead(chunk.length);
-        var offset = 0;
-        while (offset < chunk.length) {
-          final remaining = _blockSize - bufferOffset;
-          final toCopy = (chunk.length - offset) < remaining ? (chunk.length - offset) : remaining;
-          buffer.setRange(bufferOffset, bufferOffset + toCopy, chunk, offset);
-          bufferOffset += toCopy;
-          offset += toCopy;
-          if (bufferOffset == _blockSize) {
-            if (_isAllZero(buffer, _blockSize)) {
-              if (zeroRunStart < 0) {
-                zeroRunStart = index;
-              }
-              zeroRunEnd = index;
-            } else {
-              if (zeroRunStart >= 0) {
-                _writeZeroRun(sink, zeroRunStart, zeroRunEnd);
-                zeroRunStart = -1;
-                zeroRunEnd = -1;
-              }
-              final hash = sha256.convert(buffer).toString();
-              final exists = await _blobExists(hash);
-              if (exists) {
-                sink.writeln('$index -> $hash');
-                final blockLength = (fileSize != null && fileSize > 0) ? _blockLengthForIndex(index, fileSize) : _blockSize;
-                _handleBytes(blockLength);
-                index++;
-                bufferOffset = 0;
-                continue;
-              }
-              _enqueueBlobDir(hash);
-              await _scheduleWriteBlob(hash, buffer, driver);
-              _handlePhysicalBytes(buffer.length);
-              sink.writeln('$index -> $hash');
-            }
-            final blockLength = (fileSize != null && fileSize > 0) ? _blockLengthForIndex(index, fileSize) : _blockSize;
-            _handleBytes(blockLength);
-            index++;
-            bufferOffset = 0;
-          }
-        }
-      });
-      if (bufferOffset > 0) {
-        _ensureNotCanceled();
-        final tail = Uint8List.sublistView(buffer, 0, bufferOffset);
-        if (_isAllZero(tail, bufferOffset)) {
-          if (zeroRunStart < 0) {
-            zeroRunStart = index;
-          }
-          zeroRunEnd = index;
-        } else {
-          var tailHandled = false;
-          if (zeroRunStart >= 0) {
-            _writeZeroRun(sink, zeroRunStart, zeroRunEnd);
-            zeroRunStart = -1;
-            zeroRunEnd = -1;
-          }
-          final hash = sha256.convert(tail).toString();
-          final exists = await _blobExists(hash);
-          if (exists) {
-            sink.writeln('$index -> $hash');
-            _handleBytes(bufferOffset);
-            index++;
-            tailHandled = true;
-          }
-          if (!tailHandled) {
-            _enqueueBlobDir(hash);
-            await _scheduleWriteBlob(hash, tail, driver);
-            _handlePhysicalBytes(tail.length);
-            sink.writeln('$index -> $hash');
-          }
-        }
-        _handleBytes(bufferOffset);
-        index++;
-      }
-      if (zeroRunStart >= 0) {
-        _writeZeroRun(sink, zeroRunStart, zeroRunEnd);
-        zeroRunStart = -1;
-        zeroRunEnd = -1;
-      }
-    } finally {
-      await _drainPendingWrites();
-      await sink.flush();
-    }
-  }
-
-  Future<bool> _writeDiskUsingHashblocks({
+  Future<void> _writeDiskUsingHashblocks({
     required BackupDriver driver,
     required IOSink manifestSink,
     required String diskId,
@@ -783,9 +651,6 @@ class BackupAgent {
     required List<_DiskChainItem> chain,
   }) async {
     final remoteHashblocksPath = await _dependencies.ensureHashblocks(server);
-    if (remoteHashblocksPath == null) {
-      return false;
-    }
     _ensureNotCanceled();
 
     final fileSize = await _dependencies.getRemoteFileSize(server, sourcePath);
@@ -939,11 +804,9 @@ class BackupAgent {
       }
     }
 
-    final writerTimeout = const Duration(minutes: 5);
     final cache = _blobDirectoryCache;
     writerWorker = _WriterWorker(
       maxConcurrentWrites: _writerConcurrencyOverride ?? max(1, driver.capabilities.maxConcurrentWrites),
-      blockTimeout: writerTimeout,
       logInterval: agentLogInterval,
       backlogLimitBytes: _writerBacklogBytesLimit,
       driverBufferedBytes: () => driver.bufferedBytes,
@@ -1137,8 +1000,6 @@ class BackupAgent {
       final elapsedSec = elapsedMs / 1000.0;
       _logInfo('SFTP read window: ${elapsedSec.toStringAsFixed(2)}s');
     }
-
-    return true;
   }
 
   _LocalManifestWrite _startManifestWrite({required BackupDriver driver, required String serverFolderName, required String vmFolderName, required String backupTimestamp}) {
@@ -1242,15 +1103,6 @@ class BackupAgent {
       return false;
     }
     return cache.blobExists(hash);
-  }
-
-  bool _isAllZero(Uint8List data, int length) {
-    for (var i = 0; i < length; i += 1) {
-      if (data[i] != 0) {
-        return false;
-      }
-    }
-    return true;
   }
 
   void _writeZeroRun(IOSink sink, int start, int end) {

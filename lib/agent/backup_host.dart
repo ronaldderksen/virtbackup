@@ -40,6 +40,14 @@ class BackupAgentHost {
 
   bool get nativeSftpAvailable => _nativeSftp != null;
 
+  String sha256Hex(Uint8List bytes) {
+    _logNativeSftpStatusOnce();
+    if (_nativeSftp == null) {
+      throw StateError('Native hashing is required but not available.');
+    }
+    return _nativeSftp.sha256Hex(bytes);
+  }
+
   BackupAgentDependencies buildDependencies() {
     return BackupAgentDependencies(
       runSshCommand: _runSshCommandForServer,
@@ -566,11 +574,10 @@ class BackupAgentHost {
     }
   }
 
-  Future<String?> _ensureHashblocksOnServer(ServerConfig server) async {
+  Future<String> _ensureHashblocksOnServer(ServerConfig server) async {
     final localPath = _findLocalHashblocks();
     if (localPath == null) {
-      LogWriter.logAgentSync(level: 'info', message: 'hashblocks not found next to agent; falling back to Dart dedup.');
-      return null;
+      throw StateError('hashblocks binary not found next to agent.');
     }
     const remotePath = '/var/tmp/hashblocks';
     try {
@@ -1273,7 +1280,8 @@ class _NativeSftpBindings {
       _openWrite = lib.lookupFunction<_SftpOpenWriteC, _SftpOpenWriteDart>('vb_sftp_open_write'),
       _read = lib.lookupFunction<_SftpReadC, _SftpReadDart>('vb_sftp_read'),
       _write = lib.lookupFunction<_SftpWriteC, _SftpWriteDart>('vb_sftp_write'),
-      _closeFile = lib.lookupFunction<_SftpCloseFileC, _SftpCloseFileDart>('vb_sftp_close_file');
+      _closeFile = lib.lookupFunction<_SftpCloseFileC, _SftpCloseFileDart>('vb_sftp_close_file'),
+      _sha256Hex = lib.lookupFunction<_Sha256HexC, _Sha256HexDart>('vb_sha256_hex');
   final _SftpConnectDart _connect;
   final _SftpDisconnectDart _disconnect;
   final _SftpOpenReadDart _openRead;
@@ -1281,6 +1289,7 @@ class _NativeSftpBindings {
   final _SftpReadDart _read;
   final _SftpWriteDart _write;
   final _SftpCloseFileDart _closeFile;
+  final _Sha256HexDart _sha256Hex;
 
   static _NativeSftpBindings? tryLoad() {
     final candidates = <String>[];
@@ -1343,6 +1352,27 @@ class _NativeSftpBindings {
   void closeFile(Pointer<Void> file) {
     _closeFile(file);
   }
+
+  String sha256Hex(Uint8List bytes) {
+    Pointer<Uint8>? inputPtr;
+    if (bytes.isNotEmpty) {
+      inputPtr = calloc<Uint8>(bytes.length);
+      inputPtr.asTypedList(bytes.length).setAll(0, bytes);
+    }
+    final outputPtr = calloc<Uint8>(65);
+    try {
+      final rc = _sha256Hex(inputPtr ?? nullptr.cast<Uint8>(), bytes.length, outputPtr, 65);
+      if (rc != 0) {
+        throw StateError('Native SHA256 failed.');
+      }
+      return outputPtr.cast<Utf8>().toDartString();
+    } finally {
+      if (inputPtr != null) {
+        calloc.free(inputPtr);
+      }
+      calloc.free(outputPtr);
+    }
+  }
 }
 
 typedef _SftpConnectC = Pointer<Void> Function(Pointer<Utf8> host, Int32 port, Pointer<Utf8> user, Pointer<Utf8> password);
@@ -1359,3 +1389,5 @@ typedef _SftpWriteC = Int32 Function(Pointer<Void> file, Pointer<Uint8> buffer, 
 typedef _SftpWriteDart = int Function(Pointer<Void> file, Pointer<Uint8> buffer, int length);
 typedef _SftpCloseFileC = Void Function(Pointer<Void> file);
 typedef _SftpCloseFileDart = void Function(Pointer<Void> file);
+typedef _Sha256HexC = Int32 Function(Pointer<Uint8> data, Int32 length, Pointer<Uint8> outHex, Int32 outLen);
+typedef _Sha256HexDart = int Function(Pointer<Uint8> data, int length, Pointer<Uint8> outHex, int outLen);

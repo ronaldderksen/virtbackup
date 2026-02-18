@@ -78,15 +78,13 @@ Notes:
 ## Backup flow (agent)
 The agent creates one VM manifest and appends per-disk sections while the backup is running.
 
-There are two paths:
+There is one path:
 1. **Hashblocks path (primair)**
    - The `hashblocks` binary is uploaded to the remote host and executed there.
    - The agent consumes block hashes (and ZERO runs) from the remote output.
    - For hashes: it checks blob existence via the driver; only missing blocks are fetched via SFTP range reads and written as blobs.
    - Backpressure: the agent sends `LIMIT` updates to hashblocks based on writer backlog.
-2. **Stream fallback path**
-   - If `hashblocks` is not available, the agent streams the entire disk file via SFTP.
-   - The agent chunks using configured `blockSizeMB`, hashes locally, and writes only missing blobs.
+   - If `hashblocks` is not available, backup fails (no fallback path).
 
 ## Restore flow (agent)
 1. The agent resolves the correct `*.manifest.gz` for the selected VM timestamp.

@@ -355,7 +355,7 @@ Response (array):
   {
     "xmlPath":"/path/to/backup.xml",
     "vmName":"my-vm",
-    "timestamp":"2026-01-30T12-00-00",
+    "timestamp":"2026-01-30T12:00:00-4MB",
     "diskBasenames":["disk1.qcow2"],
     "missingDiskBasenames":[],
     "blockSizeMbValues":[4],
@@ -403,13 +403,16 @@ Response:
 
 Body:
 ```json
-{"xmlPath":"/path/to/backup.xml","timestamp":"2026-01-30T12-00-00","storageId":"dest_filesystem_1739440000000000"}
+{"xmlPath":"/path/to/backup.xml","timestamp":"2026-01-30T12:00:00-4MB","storageId":"dest_filesystem_1739440000000000"}
 ```
 
 Response:
 ```json
 {"jobId":"<job-id>"}
 ```
+
+Notes:
+- Full check computes blob SHA-256 via `virtbackup_native` (native library required on the agent host).
 
 ### Quick Check (verify blob presence via cached directory scans)
 
@@ -417,10 +420,28 @@ Response:
 
 Body:
 ```json
-{"xmlPath":"/path/to/backup.xml","timestamp":"2026-01-30T12-00-00","storageId":"dest_filesystem_1739440000000000"}
+{"xmlPath":"/path/to/backup.xml","timestamp":"2026-01-30T12:00:00-4MB","storageId":"dest_filesystem_1739440000000000"}
 ```
 
 Response:
 ```json
 {"jobId":"<job-id>"}
 ```
+
+### Delete restore manifests
+
+- `POST /restore/manifests/delete`
+
+Body:
+```json
+{"xmlPath":"/path/to/backup.xml","timestamp":"2026-01-30T12:00:00-4MB","storageId":"dest_filesystem_1739440000000000"}
+```
+
+Response:
+```json
+{"success":true,"deletedCount":2}
+```
+
+Notes:
+- Deletes only manifest files for the selected restore timestamp.
+- Blob data is not deleted.

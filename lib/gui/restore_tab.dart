@@ -1,16 +1,6 @@
 part of 'main_screen.dart';
 
 extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
-  String _blockSizeLabel(RestoreEntry entry) {
-    if (entry.blockSizeMbValues.isEmpty) {
-      return '(n/a Blocksize)';
-    }
-    if (entry.blockSizeMbValues.length == 1) {
-      return '(${entry.blockSizeMbValues.first} MB Blocksize)';
-    }
-    return '(${entry.blockSizeMbValues.join('/')} MB Blocksizes)';
-  }
-
   ServerConfig? _getRestoreServer() {
     if (_restoreServerId == null) {
       return null;
@@ -101,6 +91,58 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
       },
     );
     return result;
+  }
+
+  Future<bool> _confirmDeleteRestoreEntry(RestoreEntry entry) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Delete restore manifest?'),
+          content: Text('Delete manifest files for "${entry.vmName}" at "${entry.timestamp}"?\n\nThis removes only the manifest files. Blob data is not deleted.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.of(dialogContext).pop(true), child: const Text('Delete')),
+          ],
+        );
+      },
+    );
+    return result == true;
+  }
+
+  Future<void> _deleteSelectedRestoreEntry() async {
+    if (_isDeletingRestoreEntry || _isLoadingRestoreEntries) {
+      return;
+    }
+    final entry = _selectedRestoreEntry();
+    if (entry == null) {
+      _showSnackBarInfo('Select a restore entry first.');
+      return;
+    }
+    final storageId = _selectedBackupStorageId?.trim() ?? '';
+    if (storageId.isEmpty) {
+      _showSnackBarInfo('Select a storage first.');
+      return;
+    }
+    final confirmed = await _confirmDeleteRestoreEntry(entry);
+    if (!confirmed) {
+      return;
+    }
+    _updateUi(() {
+      _isDeletingRestoreEntry = true;
+    });
+    try {
+      final deletedCount = await _agentApiClient.deleteRestoreManifests(xmlPath: entry.xmlPath, timestamp: entry.timestamp, storageId: storageId);
+      await _loadRestoreEntries();
+      _showSnackBarInfo('Deleted $deletedCount manifest file(s). Blob data was not deleted.');
+    } catch (error, stackTrace) {
+      _logError('Restore manifest delete failed.', error, stackTrace);
+      _showSnackBarError('Delete failed: $error');
+    } finally {
+      _updateUi(() {
+        _isDeletingRestoreEntry = false;
+      });
+    }
   }
 
   Future<void> _runRestore() async {
@@ -195,8 +237,9 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
     final restoreServer = _getRestoreServer();
     final restoreStorages = _enabledStorages().where((storage) => storage.driverId != 'dummy').toList();
     final selectedRestoreStorageId = restoreStorages.any((storage) => storage.id == _selectedBackupStorageId) ? _selectedBackupStorageId : null;
-    final canRestore = !_isRestoring && restoreServer != null && restoreServer.connectionType == ConnectionType.ssh && selectedEntry != null && selectedEntry.hasAllDisks;
-    final canCheck = !_isSanityChecking && !_isRestoring && selectedEntry != null;
+    final canRestore = !_isRestoring && !_isDeletingRestoreEntry && restoreServer != null && restoreServer.connectionType == ConnectionType.ssh && selectedEntry != null && selectedEntry.hasAllDisks;
+    final canCheck = !_isSanityChecking && !_isRestoring && !_isDeletingRestoreEntry && selectedEntry != null;
+    final canDeleteEntry = !_isDeletingRestoreEntry && !_isLoadingRestoreEntries && !_isRestoring && selectedEntry != null;
     final vmOptions = _restoreEntries.map((entry) => entry.vmName).toSet().toList()..sort();
     final selectedVm = _selectedRestoreVmName;
     final dateEntries = _restoreEntries.where((entry) => selectedVm == null ? true : entry.vmName == selectedVm).toList()..sort((a, b) => b.timestamp.compareTo(a.timestamp));
@@ -240,6 +283,16 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
                   OutlinedButton(onPressed: _isRestoring ? null : _openStorageEditor, child: const Text('Manage')),
                 ],
               ),
+              if (_isLoadingRestoreEntries) ...[
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                    const SizedBox(width: 10),
+                    Text('Loading VM and date options...', style: Theme.of(context).textTheme.bodyMedium),
+                  ],
+                ),
+              ],
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
                 key: const ValueKey('restore_vm'),
@@ -263,27 +316,37 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
                       },
               ),
               const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                key: const ValueKey('restore_timestamp'),
-                initialValue: selectedKey,
-                decoration: const InputDecoration(labelText: 'Date', prefixIcon: Icon(Icons.event_outlined), border: OutlineInputBorder()),
-                items: dateEntries
-                    .map((entry) => DropdownMenuItem(value: '${entry.timestamp}|${entry.sourceServerId}', child: Text('${entry.timestamp} • ${entry.sourceServerName} • ${_blockSizeLabel(entry)}')))
-                    .toList(),
-                onChanged: _isLoadingRestoreEntries || dateEntries.isEmpty
-                    ? null
-                    : (value) {
-                        _updateUi(() {
-                          if (value == null) {
-                            _selectedRestoreTimestamp = null;
-                            _selectedRestoreSourceServerId = null;
-                          } else {
-                            final parts = value.split('|');
-                            _selectedRestoreTimestamp = parts.isNotEmpty ? parts.first : null;
-                            _selectedRestoreSourceServerId = parts.length > 1 ? parts.last : null;
-                          }
-                        });
-                      },
+              Row(
+                children: [
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      key: const ValueKey('restore_timestamp'),
+                      isExpanded: true,
+                      initialValue: selectedKey,
+                      decoration: const InputDecoration(labelText: 'Date', prefixIcon: Icon(Icons.event_outlined), border: OutlineInputBorder()),
+                      items: dateEntries.map((entry) => DropdownMenuItem(value: '${entry.timestamp}|${entry.sourceServerId}', child: Text('${entry.timestamp} • ${entry.sourceServerName}'))).toList(),
+                      onChanged: _isLoadingRestoreEntries || dateEntries.isEmpty || _isDeletingRestoreEntry
+                          ? null
+                          : (value) {
+                              _updateUi(() {
+                                if (value == null) {
+                                  _selectedRestoreTimestamp = null;
+                                  _selectedRestoreSourceServerId = null;
+                                } else {
+                                  final parts = value.split('|');
+                                  _selectedRestoreTimestamp = parts.isNotEmpty ? parts.first : null;
+                                  _selectedRestoreSourceServerId = parts.length > 1 ? parts.last : null;
+                                }
+                              });
+                            },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  OutlinedButton(
+                    onPressed: canDeleteEntry ? _deleteSelectedRestoreEntry : null,
+                    child: _isDeletingRestoreEntry ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Delete'),
+                  ),
+                ],
               ),
               const SizedBox(height: 12),
               Row(

@@ -256,6 +256,34 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }
 
   @override
+  Future<bool> deleteFile(String relativePath) async {
+    final normalized = _normalizeRelativePath(relativePath);
+    if (normalized.isEmpty) {
+      return false;
+    }
+    final parts = _splitRelativePath(normalized);
+    if (parts.isEmpty) {
+      return false;
+    }
+    final name = parts.last;
+    final folderParts = parts.take(parts.length - 1).toList();
+    final folderId = folderParts.isEmpty ? await _resolveDriveRootId() : await _findFolderByPath(folderParts);
+    if (folderId == null || folderId.isEmpty) {
+      return false;
+    }
+    final fileRef = await _findFileByName(folderId, name, includeSize: false);
+    if (fileRef == null) {
+      return false;
+    }
+    await _deleteDriveFile(fileRef.id, normalized);
+    final localFile = _relativeCacheFile(normalized);
+    if (await localFile.exists()) {
+      await localFile.delete();
+    }
+    return true;
+  }
+
+  @override
   Future<void> freshCleanup() async {
     _logInfo('gdrive: fresh cleanup clearing local cache and in-memory state');
     _folderCache.clear();
@@ -974,6 +1002,11 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return '${blobsDir().path}${Platform.pathSeparator}$shard${Platform.pathSeparator}$hash';
   }
 
+  File _relativeCacheFile(String relativePath) {
+    final normalized = _normalizeRelativePath(relativePath).replaceAll('/', Platform.pathSeparator);
+    return File('${_cacheRoot.path}${Platform.pathSeparator}$normalized');
+  }
+
   String _normalizeRelativePath(String relativePath) {
     return _splitRelativePath(relativePath).join('/');
   }
@@ -986,6 +1019,38 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     final fields = includeSize ? 'nextPageToken,files(id,name,parents,size)' : 'nextPageToken,files(id,name,parents)';
     final files = await _listFilesRaw("'$parentId' in parents and name='${_escapeQuery(name)}' and trashed=false", fields: fields);
     return files.isEmpty ? null : files.first;
+  }
+
+  Future<void> _deleteDriveFile(String fileId, String relativePath) async {
+    await _withRetry('delete file', () async {
+      var token = await _ensureAccessToken();
+      var uri = Uri.parse('https://www.googleapis.com/drive/v3/files/$fileId');
+      var response = await _requestWithApiLog(
+        action: 'delete',
+        target: relativePath,
+        method: 'DELETE',
+        uri: uri,
+        send: () => _client.delete(uri, headers: _authHeaders(token)),
+      );
+      if (response.statusCode == 401) {
+        token = await _refreshAccessToken();
+        uri = Uri.parse('https://www.googleapis.com/drive/v3/files/$fileId');
+        response = await _requestWithApiLog(
+          action: 'delete',
+          target: relativePath,
+          detail: 'retry-auth',
+          method: 'DELETE',
+          uri: uri,
+          send: () => _client.delete(uri, headers: _authHeaders(token)),
+        );
+      }
+      if (response.statusCode == 404) {
+        return;
+      }
+      if (response.statusCode >= 300) {
+        throw 'Drive delete failed: ${response.statusCode} ${response.body}';
+      }
+    });
   }
 
   Future<void> _listDriveFilesRecursively({required String folderId, required String relativePrefix, required List<String> out}) async {

@@ -11,28 +11,28 @@ VMS=(
 )
 
 DESTINATONS=(
-  #nas
-  #filesystem
-  #stack
-  #strato
-  #dummy
+  nas
+  filesystem
+  stack
+  strato
   gdrive
+  #dummy
 )
 
 BS=(
-  1
+  #1
   2
   4
-  8
+  #8
 )
 
 EXTRA_PARAMS=( )
 #EXTRA_PARAMS=( --no-restore )
 #EXTRA_PARAMS=( --no-backup )
 
-for dest in ${DESTINATONS[@]}; do
-  for vm in ${VMS[@]}; do
-    for bs in ${BS[@]}; do
+for vm in ${VMS[@]}; do
+  for bs in ${BS[@]}; do
+    for dest in ${DESTINATONS[@]}; do
       echo "[$(date '+%Y-%m-%d %H:%M:%S')] vm=${vm} dest=${dest}"
       [ "${dest}" = dummy ] && EXTRA_PARAMS+=( --no-restore )
       echo "+ dart run tools/backup_verify.dart --vm ${vm} --storage ${dest} ${EXTRA_PARAMS[@]} --block-size-mb ${bs}"

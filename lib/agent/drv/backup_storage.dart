@@ -47,6 +47,7 @@ abstract class BackupDriver {
   Future<void> ensureReady();
   Future<void> prepareBackup(String serverId, String vmName);
   Future<void> uploadFile({required String relativePath, required File localFile});
+  Future<bool> deleteFile(String relativePath);
   Future<List<String>> listRelativeFiles(String relativeDir);
   Future<List<int>?> readFileBytes(String relativePath);
   Future<void> freshCleanup();

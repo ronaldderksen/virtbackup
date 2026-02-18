@@ -43,7 +43,7 @@ Key modules under `lib/agent`:
 
 ### Restore
 
-1. API call: `POST /servers/{id}/restore/start` (optional `driverId` in body to override the driver for this job only), `POST /restore/sanity`, or `POST /restore/quick-check`.
+1. API call: `POST /servers/{id}/restore/start` (optional `driverId` in body to override the driver for this job only), `POST /restore/sanity`, `POST /restore/quick-check`, or `POST /restore/manifests/delete`.
 2. `AgentHttpServer` resolves manifests and disk chains from stored metadata.
 3. Restore stream uploads reconstructed data to remote disks via SFTP.
 4. VM XML is uploaded and defined with `virsh define`.
@@ -85,17 +85,13 @@ The backup uses a deduplication model based on fixed-size blocks:
 - Manifests record hash or zero-runs for each block.
 - Blobs are stored per hash and are only written if missing.
 
-There are two paths:
+Backup uses a single path:
 
-1. **Hashblocks path (primary)**
+1. **Hashblocks path**
    - A small helper binary (`hashblocks`) is uploaded to the remote host.
    - It streams hashes for the remote disk, and allows backpressure via `LIMIT`.
    - Missing blocks are fetched via SFTP range reads and written as blobs.
-
-2. **Stream fallback path**
-   - The agent streams the full disk through SFTP.
-   - Hashes are computed locally for each block.
-   - Blocks are written if missing.
+   - If `hashblocks` is unavailable, backup fails (no stream fallback path).
 
 ### End-to-End Flow (Hashblocks Path)
 
@@ -185,6 +181,7 @@ The hashblocks path is divided into logical workers:
   - De-queues blocks and writes blobs.
   - Waits only for blob-cache `writeReady` before scheduling writes.
   - Maintains continuous slot-based concurrency (no batch write loop).
+  - Write tasks are not wrapped in a per-block timeout.
   - No shard-ready gating in writer scheduling.
 
 ### Backpressure Control
@@ -225,6 +222,7 @@ Endpoints include:
 - `POST /servers/{id}/restore/start`: start restore job (supports `storageId`; legacy `driverId` is still accepted).
 - `POST /restore/sanity`: validate manifests/blobs (`storageId` required).
 - `POST /restore/quick-check`: validate blob presence using cached blob directory scans (`storageId` required, no blob content hashing).
+- `POST /restore/manifests/delete`: delete restore manifests for a selected timestamp (`storageId` required, blobs are unchanged).
 - `GET /jobs`, `GET /jobs/{id}`: job status.
 - `POST /jobs/{id}/cancel`: cancel jobs.
 - `GET /events`: SSE stream.

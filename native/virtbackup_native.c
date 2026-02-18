@@ -1,5 +1,6 @@
 #include <libssh2.h>
 #include <libssh2_sftp.h>
+#include <openssl/evp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -29,9 +30,12 @@ typedef struct {
 static pthread_mutex_t g_libssh2_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_libssh2_refcount = 0;
 static const int VB_SFTP_TIMEOUT_MS = 8000;
+static const int VB_SHA256_DIGEST_LENGTH = 32;
+static const int VB_SHA256_HEX_LENGTH = 65;
 
 static double now_seconds(void);
 static int wait_socket_ready(vb_sftp_session *sess);
+static void hex_encode(const unsigned char *src, int src_len, char *dst);
 
 static int ensure_libssh2_init(void) {
   pthread_mutex_lock(&g_libssh2_lock);
@@ -89,6 +93,36 @@ static int wait_socket_ready(vb_sftp_session *sess) {
   timeout.tv_usec = (VB_SFTP_TIMEOUT_MS % 1000) * 1000;
   int rc = select(sess->sock + 1, &readfds, &writefds, NULL, &timeout);
   return rc > 0 ? 0 : -1;
+}
+
+static void hex_encode(const unsigned char *src, int src_len, char *dst) {
+  static const char hexdigits[] = "0123456789abcdef";
+  for (int i = 0; i < src_len; i++) {
+    const unsigned char b = src[i];
+    dst[i * 2] = hexdigits[(b >> 4) & 0x0f];
+    dst[i * 2 + 1] = hexdigits[b & 0x0f];
+  }
+  dst[src_len * 2] = '\0';
+}
+
+int vb_sha256_hex(const unsigned char *data, int length, char *out_hex, int out_len) {
+  if (!out_hex || out_len < VB_SHA256_HEX_LENGTH || length < 0) {
+    return -1;
+  }
+  if (length > 0 && !data) {
+    return -1;
+  }
+
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int digest_len = 0;
+  if (EVP_Digest(data, (size_t)length, digest, &digest_len, EVP_sha256(), NULL) != 1) {
+    return -1;
+  }
+  if ((int)digest_len != VB_SHA256_DIGEST_LENGTH) {
+    return -1;
+  }
+  hex_encode(digest, VB_SHA256_DIGEST_LENGTH, out_hex);
+  return 0;
 }
 
 static int connect_tcp(const char *host, int port) {

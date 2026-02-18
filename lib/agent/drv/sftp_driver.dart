@@ -258,6 +258,31 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   }
 
   @override
+  Future<bool> deleteFile(String relativePath) async {
+    final normalized = _normalizeRelativePath(relativePath);
+    if (normalized.isEmpty) {
+      return false;
+    }
+    final remotePath = _remoteRelativePath(normalized);
+    var deletedRemote = false;
+    await _withSftp('delete file', (sftp) async {
+      try {
+        await _remoteRemove(sftp, remotePath);
+        deletedRemote = true;
+      } catch (_) {
+        if (await _remoteExists(sftp, remotePath)) {
+          rethrow;
+        }
+      }
+    });
+    final localFile = _relativeCacheFile(normalized);
+    if (await localFile.exists()) {
+      await localFile.delete();
+    }
+    return deletedRemote;
+  }
+
+  @override
   Future<void> freshCleanup() async {
     _validateConfig();
     final base = _normalizeRemotePath(_basePath);
@@ -673,6 +698,11 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   String _remoteBlobDir(String hash) => _remoteJoin(_remoteBlobsRoot(), hash.substring(0, 2));
   String _remoteBlobPath(String hash) => _remoteJoin(_remoteBlobDir(hash), hash);
+
+  File _relativeCacheFile(String relativePath) {
+    final normalized = _normalizeRelativePath(relativePath).replaceAll('/', Platform.pathSeparator);
+    return File('${_cacheRoot.path}${Platform.pathSeparator}$normalized');
+  }
 
   Future<void> _commitSmallRemoteFile({required File localFile, required String remotePath}) async {
     if (!await localFile.exists()) {

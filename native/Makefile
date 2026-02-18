@@ -1,7 +1,7 @@
 CC ?= gcc
 CFLAGS ?= -O2 -fPIC
 LDFLAGS ?=
-LIBS ?= -lssh2
+LIBS ?= -lssh2 -lcrypto
 
 PKG_CONFIG ?= pkg-config
 HAVE_PKG_CONFIG := $(shell command -v $(PKG_CONFIG) >/dev/null 2>&1 && echo yes)

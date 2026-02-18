@@ -283,6 +283,19 @@ class AgentApiClient {
     return AgentJobStart.fromMap(Map<String, dynamic>.from(jsonDecode(response.body)));
   }
 
+  Future<int> deleteRestoreManifests({required String xmlPath, required String timestamp, required String storageId}) async {
+    final response = await _post('/restore/manifests/delete', {'xmlPath': xmlPath, 'timestamp': timestamp, 'storageId': storageId.trim()});
+    if (response.statusCode != 200) {
+      throw 'Agent responded ${response.statusCode}';
+    }
+    final decoded = Map<String, dynamic>.from(jsonDecode(response.body) as Map);
+    final deletedCountValue = decoded['deletedCount'];
+    if (deletedCountValue is num) {
+      return deletedCountValue.toInt();
+    }
+    return int.tryParse((deletedCountValue ?? '').toString()) ?? 0;
+  }
+
   Stream<AgentEvent> eventStream() async* {
     final client = _createHttpClient();
     try {

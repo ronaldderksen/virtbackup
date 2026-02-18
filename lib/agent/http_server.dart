@@ -5,7 +5,6 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:basic_utils/basic_utils.dart';
-import 'package:crypto/crypto.dart' as crypto;
 import 'package:dartssh2/dartssh2.dart';
 import 'package:virtbackup/agent/backup.dart';
 import 'package:virtbackup/agent/backup_host.dart';
@@ -790,6 +789,28 @@ class AgentHttpServer {
         _startQuickCheckJob(jobId, xmlPath, timestamp, storage: resolvedStorage);
         return;
       }
+      if (request.method == 'POST' && path == '/restore/manifests/delete') {
+        final body = await _readJson(request);
+        final xmlPath = (body['xmlPath'] ?? '').toString();
+        final timestamp = (body['timestamp'] ?? '').toString();
+        final requestedStorageId = (body['storageId'] ?? '').toString().trim();
+        final requestedDriver = (body['driverId'] ?? '').toString().trim();
+        if (xmlPath.isEmpty || timestamp.isEmpty) {
+          _json(request, 400, {'error': 'missing params'});
+          return;
+        }
+        if (requestedStorageId.isEmpty) {
+          _json(request, 400, {'error': 'missing storageId'});
+          return;
+        }
+        if (requestedDriver.isNotEmpty && !_driverCatalog.containsKey(requestedDriver)) {
+          _json(request, 400, {'error': 'unknown driverId', 'known': _driverCatalog.keys.toList()});
+          return;
+        }
+        final deletedCount = await _deleteRestoreManifests(xmlPath: xmlPath, timestamp: timestamp, storageId: requestedStorageId, driverIdOverride: requestedDriver.isEmpty ? null : requestedDriver);
+        _json(request, 200, {'success': true, 'deletedCount': deletedCount});
+        return;
+      }
       if (request.method == 'POST' && path.startsWith('/jobs/') && path.endsWith('/cancel')) {
         final parts = path.split('/');
         if (parts.length < 4) {
@@ -1010,6 +1031,45 @@ class AgentHttpServer {
       }
       entries.sort((a, b) => b.timestamp.compareTo(a.timestamp));
       return entries;
+    } finally {
+      await driver.closeConnections();
+    }
+  }
+
+  Future<int> _deleteRestoreManifests({required String xmlPath, required String timestamp, required String storageId, String? driverIdOverride}) async {
+    final resolvedStorage = _resolveStorageById(storageId);
+    if (resolvedStorage == null) {
+      throw 'storage not found or unavailable';
+    }
+    final resolvedDriverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : resolvedStorage.driverId;
+    final driverInfo = _driverCatalog[resolvedDriverId] ?? _driverCatalog['filesystem']!;
+    final backupPath = resolvedStorage.backupPath;
+    if (driverInfo.usesPath && backupPath.isEmpty) {
+      throw 'missing backup.base_path';
+    }
+    final settings = resolvedStorage.settings;
+    final driver = _driverForSettings(driverInfo.id, backupPath, settings: settings);
+    try {
+      await driver.ensureReady();
+      await _cacheRelativeDirFromDriver(driver: driver, relativeDir: 'manifests');
+      final manifestsRoot = Directory('${driver.storage}${Platform.pathSeparator}manifests');
+      final vmDir = _vmDirFromXmlPath(xmlPath);
+      final manifests = await _listManifestFilesForTimestamp(vmDir, timestamp);
+      if (manifests.isEmpty) {
+        return 0;
+      }
+      var deleted = 0;
+      for (final manifest in manifests) {
+        final relativePath = _relativePath(fromDir: manifestsRoot, toPath: manifest.path);
+        if (relativePath.isEmpty) {
+          continue;
+        }
+        final deletedFile = await driver.deleteFile('manifests/$relativePath');
+        if (deletedFile) {
+          deleted += 1;
+        }
+      }
+      return deleted;
     } finally {
       await driver.closeConnections();
     }
@@ -1867,30 +1927,6 @@ class AgentHttpServer {
           }
         }
 
-        Future<void> digestChunkCooperative(List<int> chunk, Sink<List<int>> digestInput, {required String message}) async {
-          if (chunk.isEmpty) {
-            return;
-          }
-          const maxSyncBytes = 256 * 1024;
-          if (chunk.length <= maxSyncBytes) {
-            digestInput.add(chunk);
-            handleBytes(chunk.length, message: message);
-            return;
-          }
-          var offset = 0;
-          while (offset < chunk.length) {
-            var end = offset + maxSyncBytes;
-            if (end > chunk.length) {
-              end = chunk.length;
-            }
-            final part = chunk is Uint8List ? Uint8List.sublistView(chunk, offset, end) : chunk.sublist(offset, end);
-            digestInput.add(part);
-            handleBytes(end - offset, message: message);
-            offset = end;
-            await Future<void>.delayed(Duration.zero);
-          }
-        }
-
         for (final manifest in manifests) {
           _ensureJobNotCanceled(jobId);
           final lines = await _readManifestLines(manifest);
@@ -2018,7 +2054,6 @@ class AgentHttpServer {
             var nextFetch = 0;
             var nextConsume = 0;
             final inFlight = <int, Future<_CheckBlockFetchResult>>{};
-            final startedFetches = <Future<_CheckBlockFetchResult>>[];
 
             void scheduleFetches() {
               while (inFlight.length < maxConcurrentDownloads && nextFetch < blocks.length) {
@@ -2027,7 +2062,6 @@ class AgentHttpServer {
                 }
                 final position = nextFetch;
                 final future = startFetch(position);
-                startedFetches.add(future);
                 inFlight[position] = future;
                 nextFetch += 1;
               }
@@ -2069,11 +2103,9 @@ class AgentHttpServer {
                   lastSpeedUpdate = DateTime.now();
                 }
 
-                final digestSink = _DigestAccumulator();
-                final digestInput = crypto.sha256.startChunkedConversion(digestSink);
-                await digestChunkCooperative(fetched.bytes, digestInput, message: fetched.block.message);
-                digestInput.close();
-                final actual = digestSink.value?.toString() ?? '';
+                final hashInput = fetched.bytes is Uint8List ? fetched.bytes as Uint8List : Uint8List.fromList(fetched.bytes);
+                final actual = _host.sha256Hex(hashInput);
+                handleBytes(hashInput.length, message: fetched.block.message);
                 if (actual != fetched.block.hash) {
                   mismatches += 1;
                   _hostLog('$checkLabel hash mismatch index=${fetched.block.index} expected=${fetched.block.hash} got=$actual');
@@ -2083,9 +2115,10 @@ class AgentHttpServer {
                 }
               }
             } finally {
-              if (startedFetches.isNotEmpty) {
+              final pending = inFlight.values.toList();
+              if (pending.isNotEmpty) {
                 if (_isJobCanceled(jobId)) {
-                  for (final future in startedFetches) {
+                  for (final future in pending) {
                     unawaited(() async {
                       try {
                         await future;
@@ -2094,7 +2127,7 @@ class AgentHttpServer {
                   }
                 } else {
                   await Future.wait(
-                    startedFetches.map((future) async {
+                    pending.map((future) async {
                       try {
                         await future;
                       } catch (_) {}
@@ -2627,18 +2660,6 @@ class _JobControl {
 }
 
 enum _RestoreCheckMode { full, quick }
-
-class _DigestAccumulator implements Sink<crypto.Digest> {
-  crypto.Digest? value;
-
-  @override
-  void add(crypto.Digest data) {
-    value = data;
-  }
-
-  @override
-  void close() {}
-}
 
 class _BlobDirectoryLookupCache {
   _BlobDirectoryLookupCache(this._driver);

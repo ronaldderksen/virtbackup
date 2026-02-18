@@ -112,6 +112,8 @@ class _JobStatus {
     required this.state,
     required this.message,
     required this.type,
+    required this.totalUnits,
+    required this.completedUnits,
     required this.totalBytes,
     required this.bytesTransferred,
     required this.speedBytesPerSec,
@@ -128,6 +130,8 @@ class _JobStatus {
   final String state;
   final String message;
   final String type;
+  final int totalUnits;
+  final int completedUnits;
   final int totalBytes;
   final int bytesTransferred;
   final double speedBytesPerSec;
@@ -426,7 +430,7 @@ _Args? _parseArgs(List<String> args) {
   var targetHost = 'nuc02';
   var sshUser = 'root';
   String? sshKeyPath;
-  var pollInterval = const Duration(seconds: 30);
+  var pollInterval = const Duration(seconds: 5);
   var timeout = const Duration(hours: 2);
   var sourceHostExplicit = false;
   var targetHostExplicit = false;
@@ -471,7 +475,7 @@ _Args? _parseArgs(List<String> args) {
         sshKeyPath = _readValue(args, ++i, arg);
         break;
       case '--poll-interval':
-        pollInterval = Duration(seconds: int.parse(_readValue(args, ++i, arg)));
+        pollInterval = Duration(seconds: _parsePositiveSeconds(_readValue(args, ++i, arg), arg));
         break;
       case '--timeout-minutes':
         timeout = Duration(minutes: int.parse(_readValue(args, ++i, arg)));
@@ -594,6 +598,14 @@ String _parseCheckMode(String raw) {
     throw ArgumentError('Invalid --check value. Allowed values: full, quick.');
   }
   return value;
+}
+
+int _parsePositiveSeconds(String raw, String flag) {
+  final parsed = int.tryParse(raw.trim());
+  if (parsed == null || parsed <= 0) {
+    throw ArgumentError('Invalid $flag value. Expected a positive integer number of seconds.');
+  }
+  return parsed;
 }
 
 HttpClient _createHttpClient(Uri baseUri) {
@@ -802,6 +814,8 @@ Future<_JobStatus> _fetchJob(http.Client client, _Args args, String jobId) async
     state: payload['state']?.toString() ?? 'unknown',
     message: payload['message']?.toString() ?? '',
     type: payload['type']?.toString() ?? 'unknown',
+    totalUnits: (payload['totalUnits'] as num?)?.toInt() ?? 0,
+    completedUnits: (payload['completedUnits'] as num?)?.toInt() ?? 0,
     totalBytes: (payload['totalBytes'] as num?)?.toInt() ?? 0,
     bytesTransferred: (payload['bytesTransferred'] as num?)?.toInt() ?? 0,
     speedBytesPerSec: (payload['speedBytesPerSec'] as num?)?.toDouble() ?? 0,
@@ -832,6 +846,7 @@ Future<bool> _waitForJob(http.Client client, _Args args, String jobId, {bool Fun
     final total = status.totalBytes;
     final logical = status.bytesTransferred;
     final isRestore = status.type == 'restore';
+    final isSanity = status.type == 'sanity';
     final percent = total > 0 ? (logical / total * 100).clamp(0, 100) : null;
     final progress = percent == null ? _formatBytes(logical) : '${percent.toStringAsFixed(1)}% (${_formatBytes(logical)} / ${_formatBytes(total)})';
     final eta = _formatEta(status.etaSeconds);
@@ -840,13 +855,16 @@ Future<bool> _waitForJob(http.Client client, _Args args, String jobId, {bool Fun
         : _formatBytes(status.physicalBytesTransferred);
     if (isRestore) {
       stdout.writeln('${DateTime.now().toIso8601String()} job=$jobId progress=$progress uploaded=${_formatSpeed(status.speedBytesPerSec)}');
+    } else if (isSanity) {
+      stdout.writeln('${DateTime.now().toIso8601String()} job=$jobId progress=Speed: ${_formatGuiSpeed(status.speedBytesPerSec)} • Blocks: ${status.completedUnits}/${status.totalUnits}');
     } else {
       stdout.writeln(
         '${DateTime.now().toIso8601String()} job=$jobId progress=$progress avg=${_formatSpeed(status.averageSpeedBytesPerSec)} eta=$eta | flush $flush speed=${_formatSpeed(status.physicalSpeedBytesPerSec)} remaining=${_formatBytes(status.physicalRemainingBytes)}',
       );
     }
     if (status.message.isNotEmpty) {
-      stdout.writeln('${DateTime.now().toIso8601String()} job=$jobId message=${status.message}');
+      final message = isSanity ? _fullCheckCliText(status.message) : status.message;
+      stdout.writeln('${DateTime.now().toIso8601String()} job=$jobId message=$message');
     }
     if (status.state == 'success') {
       return true;
@@ -883,6 +901,18 @@ String _formatSpeed(double bytesPerSec) {
     return '0 B/s';
   }
   return '${_formatBytes(bytesPerSec.round())}/s';
+}
+
+String _formatGuiSpeed(double bytesPerSecond) {
+  if (bytesPerSecond <= 0) {
+    return '0 MB/s';
+  }
+  final mbPerSec = bytesPerSecond / (1024 * 1024);
+  return '${mbPerSec.toStringAsFixed(1)} MB/s';
+}
+
+String _fullCheckCliText(String text) {
+  return text.replaceAll('Sanity check', 'Full check').replaceAll('Sanity Check', 'Full Check');
 }
 
 String _formatEta(int? seconds) {
@@ -1149,6 +1179,6 @@ void _printUsage() {
   stdout.writeln('  --no-backup               Skip backup and restore latest backup');
   stdout.writeln('  --cancel                  Auto-cancel backup after 60-80s');
   stdout.writeln('  --fresh                   Request agent cleanup before backup (debug builds only)');
-  stdout.writeln('  --poll-interval <sec>     Default 30');
+  stdout.writeln('  --poll-interval <sec>     Default 5');
   stdout.writeln('  --timeout-minutes <min>   Default 120');
 }
