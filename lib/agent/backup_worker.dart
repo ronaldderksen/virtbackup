@@ -97,7 +97,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
       blockSizeBytes: effectiveSettings.blockSizeMB * 1024 * 1024,
       onInfo: (message) => LogWriter.logAgentSync(level: 'info', message: message),
       onError: (message, error, stackTrace) {
-        LogWriter.logAgentSync(level: 'info', message: '$message $error');
+        LogWriter.logAgentSync(level: 'error', message: '$message $error');
         LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
       },
       hashblocksLimitBufferMb: effectiveSettings.hashblocksLimitBufferMb,
@@ -115,7 +115,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
       final result = await agent!.runVmBackup(server: server, vm: vm, driver: driver);
       mainPort.send({'type': _typeResult, 'jobId': jobId, 'result': result.toMap()});
     } catch (error, _) {
-      LogWriter.logAgentSync(level: 'info', message: 'Backup worker failed: $error');
+      LogWriter.logAgentSync(level: 'error', message: 'Backup worker failed: $error');
       mainPort.send({'type': _typeResult, 'jobId': jobId, 'result': BackupAgentResult(success: false, message: error.toString()).toMap()});
     }
   }

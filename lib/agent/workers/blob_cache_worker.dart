@@ -34,16 +34,16 @@ class _BlobCacheWorker {
 
   void throwIfError() {
     if (_error != null) {
-      LogWriter.logAgentSync(level: 'info', message: 'blob-cache worker abort: $_error');
+      LogWriter.logAgentSync(level: 'error', message: 'worker=blob_cache abort: $_error');
       Error.throwWithStackTrace(_error!, _errorStack ?? StackTrace.current);
     }
   }
 
   Future<void> run() async {
     try {
-      LogWriter.logAgentSync(level: 'info', message: 'blob-cache worker started');
+      LogWriter.logAgentSync(level: 'info', message: 'worker=blob_cache started');
       await initialize();
-      LogWriter.logAgentSync(level: 'info', message: 'blob-cache worker initial scan done');
+      LogWriter.logAgentSync(level: 'info', message: 'worker=blob_cache initial scan done');
 
       while (!_done || _queue.isNotEmpty || _inFlightTasks > 0) {
         while (_queue.isNotEmpty) {
@@ -55,7 +55,7 @@ class _BlobCacheWorker {
             } catch (error, stackTrace) {
               _error = error;
               _errorStack = stackTrace;
-              LogWriter.logAgentSync(level: 'info', message: 'blob-cache worker error: $error');
+              LogWriter.logAgentSync(level: 'error', message: 'worker=blob_cache error: $error');
             } finally {
               _inFlightTasks -= 1;
             }
@@ -69,7 +69,7 @@ class _BlobCacheWorker {
     } catch (error, stackTrace) {
       _error = error;
       _errorStack = stackTrace;
-      LogWriter.logAgentSync(level: 'info', message: 'blob-cache worker failed: $error');
+      LogWriter.logAgentSync(level: 'error', message: 'worker=blob_cache failed: $error');
     }
   }
 }

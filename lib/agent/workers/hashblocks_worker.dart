@@ -71,10 +71,10 @@ class _HashblocksWorker {
 
   void logStats({String? prefix}) {
     if (prefix == null || prefix.isEmpty) {
-      LogWriter.logAgentSync(level: 'info', message: 'hashblocks stats: lines=$totalLines existing=$existingBlocks missing=$missingBlocks zero=$zeroBlocks');
+      LogWriter.logAgentSync(level: 'info', message: 'worker=hashblocks stats: lines=$totalLines existing=$existingBlocks missing=$missingBlocks zero=$zeroBlocks');
       return;
     }
-    LogWriter.logAgentSync(level: 'info', message: '$prefix lines=$totalLines existing=$existingBlocks missing=$missingBlocks zero=$zeroBlocks');
+    LogWriter.logAgentSync(level: 'info', message: 'worker=hashblocks $prefix lines=$totalLines existing=$existingBlocks missing=$missingBlocks zero=$zeroBlocks');
   }
 
   void markExisting() {

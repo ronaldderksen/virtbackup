@@ -324,13 +324,13 @@ class BackupAgentHost {
             onStopped?.call();
           })
           .catchError((Object error, StackTrace stackTrace) {
-            LogWriter.logAgentSync(level: 'info', message: 'VM event listener failed. $error');
+            LogWriter.logAgentSync(level: 'error', message: 'VM event listener failed. $error');
             LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
             stopVmEventListener(server.id);
             onError?.call(error, stackTrace);
           });
     } catch (error, stackTrace) {
-      LogWriter.logAgentSync(level: 'info', message: 'VM event listener start failed. $error');
+      LogWriter.logAgentSync(level: 'error', message: 'VM event listener start failed. $error');
       LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
       await stopVmEventListener(server.id);
       onError?.call(error, stackTrace);
@@ -707,7 +707,7 @@ class BackupAgentHost {
       }
       return false;
     } catch (error, stackTrace) {
-      LogWriter.logAgentSync(level: 'info', message: 'Overlay check failed for ${vm.name}. $error');
+      LogWriter.logAgentSync(level: 'error', message: 'Overlay check failed for ${vm.name}. $error');
       LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
       return false;
     }
@@ -834,7 +834,7 @@ class BackupAgentHost {
         }
       }
     } catch (error, stackTrace) {
-      LogWriter.logAgentSync(level: 'info', message: 'Cleanup overlay resolution failed for ${vm.name}. $error');
+      LogWriter.logAgentSync(level: 'error', message: 'Cleanup overlay resolution failed for ${vm.name}. $error');
       LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
     }
     return trimmed;

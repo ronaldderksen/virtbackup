@@ -67,7 +67,7 @@ class _WriterWorker {
 
   void throwIfError() {
     if (_writerError != null) {
-      LogWriter.logAgentSync(level: 'info', message: 'hashblocks writer abort: $_writerError');
+      LogWriter.logAgentSync(level: 'error', message: 'worker=writer abort: $_writerError');
       Error.throwWithStackTrace(_writerError!, _writerStack ?? StackTrace.current);
     }
   }
@@ -102,7 +102,7 @@ class _WriterWorker {
         if (_writtenBlocks % 512 == 0) {
           final now = DateTime.now();
           if (_lastQueueStatsLogAt == null || now.difference(_lastQueueStatsLogAt!) >= logInterval) {
-            LogWriter.logAgentSync(level: 'info', message: 'hashblocks queue stats: queued=$_queuedBlocks written=$_writtenBlocks backlogBytes=${backlogBytes()}');
+            LogWriter.logAgentSync(level: 'info', message: 'worker=writer queue stats: queued=$_queuedBlocks written=$_writtenBlocks backlogBytes=${backlogBytes()}');
             _lastQueueStatsLogAt = now;
           }
         }
@@ -186,7 +186,7 @@ class _WriterWorker {
     } catch (error, stackTrace) {
       _writerError = error;
       _writerStack = stackTrace;
-      LogWriter.logAgentSync(level: 'info', message: 'hashblocks writer error: $error');
+      LogWriter.logAgentSync(level: 'error', message: 'worker=writer error: $error');
       if (_wakeWriter != null && !_wakeWriter!.isCompleted) {
         _wakeWriter!.complete();
       }
@@ -205,7 +205,7 @@ class _WriterWorker {
     _lastLoopDebugLogAt = now;
     LogWriter.logAgentSync(
       level: 'debug',
-      message: 'writer debug: reason=$reason queuedBlocks=$_queuedBlocks queuedBytes=$_queuedBytes inFlightWrites=$inFlightWrites inFlightBytes=$_inFlightBytes queueDepth=$_queuedBlocks',
+      message: 'worker=writer debug: reason=$reason queuedBlocks=$_queuedBlocks queuedBytes=$_queuedBytes inFlightWrites=$inFlightWrites inFlightBytes=$_inFlightBytes queueDepth=$_queuedBlocks',
     );
   }
 

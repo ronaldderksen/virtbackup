@@ -8,6 +8,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:ffi/ffi.dart';
 
 import 'package:virtbackup/agent/drv/backup_storage.dart';
+import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/models.dart' show BackupStorage;
 import 'package:virtbackup/common/settings.dart';
 
@@ -429,10 +430,21 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   }
 
   Future<_SshSftpSession> _connect() async {
-    final socket = await SSHSocket.connect(_host, _port, timeout: const Duration(seconds: 10));
-    final client = SSHClient(socket, username: _username, onPasswordRequest: () => _password);
-    final sftp = await client.sftp();
-    return _SshSftpSession(socket: socket, client: client, sftp: sftp);
+    final opStopwatch = Stopwatch()..start();
+    _logDebug('connect start host=$_host port=$_port user=$_username');
+    try {
+      final socket = await SSHSocket.connect(_host, _port, timeout: const Duration(seconds: 10));
+      final client = SSHClient(socket, username: _username, onPasswordRequest: () => _password);
+      final sftp = await client.sftp();
+      opStopwatch.stop();
+      _logDebug('connect success host=$_host port=$_port durationMs=${opStopwatch.elapsedMilliseconds}');
+      return _SshSftpSession(socket: socket, client: client, sftp: sftp);
+    } catch (error, stackTrace) {
+      opStopwatch.stop();
+      _logDebug('connect failed host=$_host port=$_port durationMs=${opStopwatch.elapsedMilliseconds} error=$error');
+      _logDebug(stackTrace.toString());
+      rethrow;
+    }
   }
 
   Future<_NativeSftpSession> _connectNative() async {
@@ -440,11 +452,22 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     if (bindings == null) {
       throw 'Native SFTP is not available.';
     }
-    final session = bindings.connect(_host, _port, _username, _password);
-    if (session == nullptr) {
-      throw 'Native SFTP connect failed.';
+    final opStopwatch = Stopwatch()..start();
+    _logDebug('native connect start host=$_host port=$_port user=$_username');
+    try {
+      final session = bindings.connect(_host, _port, _username, _password);
+      if (session == nullptr) {
+        throw 'Native SFTP connect failed.';
+      }
+      opStopwatch.stop();
+      _logDebug('native connect success host=$_host port=$_port durationMs=${opStopwatch.elapsedMilliseconds}');
+      return _NativeSftpSession(bindings: bindings, session: session);
+    } catch (error, stackTrace) {
+      opStopwatch.stop();
+      _logDebug('native connect failed host=$_host port=$_port durationMs=${opStopwatch.elapsedMilliseconds} error=$error');
+      _logDebug(stackTrace.toString());
+      rethrow;
     }
-    return _NativeSftpSession(bindings: bindings, session: session);
   }
 
   Future<void> _nativeWriteAll(String remotePath, Uint8List data, {required bool truncate}) async {
@@ -576,6 +599,8 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     return _withRetry(label, () async {
       final pool = _poolForLabel(label);
       final lease = await pool.lease(_connect);
+      final opStopwatch = Stopwatch()..start();
+      _logDebug('driver=sftp op start label="$label" mode=${_nativeSftp != null ? 'native' : 'dartssh2'} lease={${_formatLeaseMetrics(lease.metrics)}}');
       var released = false;
       try {
         if (_nativeSftp != null) {
@@ -592,19 +617,28 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
           await _remoteRename(lease.sftp, remoteTemp, remotePath);
         } catch (error) {
           if (_isSftpFailureCode(error, 4)) {
+            _logDebug('driver=sftp rename code=4 label="$label" remotePath="$remotePath" checking idempotent-success');
             final recovered = await _isRenameIdempotentSuccess(sftp: lease.sftp, hash: hash, remotePath: remotePath, expectedBytes: data.length);
             if (recovered) {
+              _logDebug('driver=sftp rename recovered label="$label" remotePath="$remotePath"');
               lease.release();
               released = true;
+              opStopwatch.stop();
+              _logDebug('driver=sftp op success label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}}');
               return;
             }
+            _logDebug('driver=sftp rename recovery failed label="$label" remotePath="$remotePath"');
           }
           await _tryRemoveRemoteFile(lease.sftp, remoteTemp);
           rethrow;
         }
         lease.release();
         released = true;
+        opStopwatch.stop();
+        _logDebug('driver=sftp op success label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}}');
       } catch (error) {
+        opStopwatch.stop();
+        _logDebug('driver=sftp op failed label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}} error=$error');
         lease.invalidate();
         released = true;
         rethrow;
@@ -641,15 +675,18 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       final pool = _poolForLabel(label);
       final lease = await pool.lease(_connect);
       final opStopwatch = Stopwatch()..start();
+      _logDebug('driver=sftp op start label="$label" mode=dartssh2 lease={${_formatLeaseMetrics(lease.metrics)}}');
       var released = false;
       try {
         final result = await action(lease.sftp);
         opStopwatch.stop();
+        _logDebug('driver=sftp op success label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}}');
         lease.release();
         released = true;
         return result;
-      } catch (_) {
+      } catch (error) {
         opStopwatch.stop();
+        _logDebug('driver=sftp op failed label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}} error=$error');
         lease.invalidate();
         released = true;
         rethrow;
@@ -668,18 +705,32 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     while (true) {
       try {
         return await action();
-      } catch (error) {
+      } catch (error, stackTrace) {
         if (attempt >= maxRetries) {
+          LogWriter.logAgentSync(level: 'debug', message: 'driver=sftp retry failed label="$label" attempt=${attempt + 1}/${maxRetries + 1} error=$error');
+          LogWriter.logAgentSync(level: 'debug', message: stackTrace.toString());
           rethrow;
         }
+        _logDebug('driver=sftp retry invalidating pools sftp={${_pool.debugState()}} blob={${_blobCachePool.debugState()}} native={${_nativePool.debugState()}}');
         _pool.invalidateIdle();
         _blobCachePool.invalidateIdle();
         _nativePool.invalidateIdle();
+        final nextAttempt = attempt + 1;
+        LogWriter.logAgentSync(level: 'debug', message: 'driver=sftp retrying label="$label" attempt=${nextAttempt + 1}/${maxRetries + 1} delay=${delaySeconds}s error=$error');
+        LogWriter.logAgentSync(level: 'debug', message: stackTrace.toString());
         attempt += 1;
         await Future.delayed(Duration(seconds: delaySeconds));
         delaySeconds *= 2;
       }
     }
+  }
+
+  String _formatLeaseMetrics(_SftpLeaseMetrics metrics) {
+    return 'waitMs=${metrics.waitMs} connectMs=${metrics.connectMs} reused=${metrics.reused} queued=${metrics.queued}';
+  }
+
+  void _logDebug(String message) {
+    LogWriter.logAgentSync(level: 'debug', message: 'driver=sftp $message');
   }
 
   _SftpPool _poolForLabel(String label) {
@@ -1013,6 +1064,10 @@ class _SftpPool {
     _connecting = 0;
   }
 
+  String debugState() {
+    return 'max=$maxSessions all=${_all.length} idle=${_idle.length} waiters=${_waiters.length} connecting=$_connecting closed=$_closed';
+  }
+
   bool _isExpired(_SshSftpSession session) {
     return DateTime.now().difference(session.createdAt) >= _maxSessionAge;
   }
@@ -1330,6 +1385,10 @@ class _NativeSftpPool {
     _all.clear();
     _idle.clear();
     _connecting = 0;
+  }
+
+  String debugState() {
+    return 'max=$maxSessions all=${_all.length} idle=${_idle.length} waiters=${_waiters.length} connecting=$_connecting closed=$_closed';
   }
 }
 

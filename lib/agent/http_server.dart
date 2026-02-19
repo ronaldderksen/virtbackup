@@ -2640,7 +2640,7 @@ class AgentHttpServer {
   }
 
   void _hostLogError(String message, Object error, StackTrace stackTrace) {
-    LogWriter.logAgentSync(level: 'info', message: '$message $error');
+    LogWriter.logAgentSync(level: 'error', message: '$message $error');
     LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
   }
 }

@@ -357,7 +357,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
               throw 'restore size mismatch for ${target.diskBaseName}: expected ${target.fileSize}, got ${remoteSize.stdout.trim()}';
             }
           } catch (error, stackTrace) {
-            LogWriter.logAgentSync(level: 'info', message: 'restore: size check failed for ${target.diskBaseName}: $error\\n$stackTrace');
+            LogWriter.logAgentSync(level: 'error', message: 'restore: size check failed for ${target.diskBaseName}: $error\\n$stackTrace');
             throw 'restore size check failed for ${target.diskBaseName}: $error';
           }
         }
@@ -408,7 +408,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     } catch (error, stackTrace) {
       final isCanceled = error is _Canceled;
       if (!isCanceled) {
-        LogWriter.logAgentSync(level: 'info', message: 'Restore failed: $error\n$stackTrace');
+        LogWriter.logAgentSync(level: 'error', message: 'Restore failed: $error\n$stackTrace');
       }
       sendResult(
         AgentJobStatus(
