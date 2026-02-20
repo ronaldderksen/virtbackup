@@ -100,7 +100,6 @@ void backupWorkerMain(Map<String, dynamic> init) {
         LogWriter.logAgentSync(level: 'error', message: '$message $error');
         LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
       },
-      hashblocksLimitBufferMb: effectiveSettings.hashblocksLimitBufferMb,
       writerConcurrencyOverride: uploadConcurrency,
     );
 

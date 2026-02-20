@@ -13,6 +13,8 @@ import 'package:virtbackup/common/models.dart' show BackupStorage;
 import 'package:virtbackup/common/settings.dart';
 
 class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
+  static const Duration _writeConcurrencyCooldown = Duration(minutes: 2);
+
   SftpBackupDriver({required AppSettings settings, int? poolSessions})
     : _settings = settings,
       _cacheRoot = _cacheRootForSettings(settings),
@@ -32,6 +34,9 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   final _SftpPool _pool;
   final _SftpPool _blobCachePool = _SftpPool(maxSessions: _blobCacheReservedSessions);
   final _NativeSftpPool _nativePool;
+  late int _effectiveWriteConcurrency = _maxConcurrentWrites;
+  DateTime? _nextWriteConcurrencyIncreaseAt;
+  Timer? _writeConcurrencyRecoveryTimer;
 
   Map<String, dynamic> get _params => _resolveSelectedSftpStorage(_settings).params;
   String get _host => (_params['host'] ?? '').toString().trim();
@@ -337,7 +342,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     }
     final remotePath = _remoteBlobPath(hash);
     final remoteTemp = '$remotePath.inprogress.${DateTime.now().microsecondsSinceEpoch}';
-    final data = Uint8List.fromList(bytes);
+    final data = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
     return _writeBlobWithTiming(hash: hash, remoteTemp: remoteTemp, remotePath: remotePath, data: data);
   }
 
@@ -424,6 +429,9 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Future<void> closeConnections() async {
+    _writeConcurrencyRecoveryTimer?.cancel();
+    _writeConcurrencyRecoveryTimer = null;
+    _nextWriteConcurrencyIncreaseAt = null;
     _pool.closeAll();
     _blobCachePool.closeAll();
     _nativePool.closeAll();
@@ -702,6 +710,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     var delaySeconds = 2;
     var attempt = 0;
     const maxRetries = 5;
+    final enableWriteConcurrencyCooldown = label.startsWith('write blob ');
     while (true) {
       try {
         return await action();
@@ -715,6 +724,9 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         _pool.invalidateIdle();
         _blobCachePool.invalidateIdle();
         _nativePool.invalidateIdle();
+        if (enableWriteConcurrencyCooldown) {
+          _registerWriteRetryFailure();
+        }
         final nextAttempt = attempt + 1;
         LogWriter.logAgentSync(level: 'debug', message: 'driver=sftp retrying label="$label" attempt=${nextAttempt + 1}/${maxRetries + 1} delay=${delaySeconds}s error=$error');
         LogWriter.logAgentSync(level: 'debug', message: stackTrace.toString());
@@ -723,6 +735,61 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         delaySeconds *= 2;
       }
     }
+  }
+
+  void _registerWriteRetryFailure() {
+    final now = DateTime.now();
+    final previous = _effectiveWriteConcurrency;
+    if (_effectiveWriteConcurrency > 1) {
+      _effectiveWriteConcurrency -= 1;
+      _pool.setMaxSessions(_effectiveWriteConcurrency);
+    }
+    _nextWriteConcurrencyIncreaseAt = now.add(_writeConcurrencyCooldown);
+    _scheduleWriteConcurrencyRecovery();
+    if (_effectiveWriteConcurrency != previous) {
+      _logDebug('driver=sftp write concurrency decreased previous=$previous current=$_effectiveWriteConcurrency max=$_maxConcurrentWrites cooldownSec=${_writeConcurrencyCooldown.inSeconds}');
+      return;
+    }
+    _logDebug('driver=sftp write concurrency already at minimum current=$_effectiveWriteConcurrency max=$_maxConcurrentWrites cooldownSec=${_writeConcurrencyCooldown.inSeconds}');
+  }
+
+  void _scheduleWriteConcurrencyRecovery() {
+    _writeConcurrencyRecoveryTimer?.cancel();
+    final nextAt = _nextWriteConcurrencyIncreaseAt;
+    if (nextAt == null) {
+      return;
+    }
+    var delay = nextAt.difference(DateTime.now());
+    if (delay.isNegative) {
+      delay = Duration.zero;
+    }
+    _writeConcurrencyRecoveryTimer = Timer(delay, _onWriteConcurrencyRecoveryTick);
+  }
+
+  void _onWriteConcurrencyRecoveryTick() {
+    final nextAt = _nextWriteConcurrencyIncreaseAt;
+    if (nextAt == null) {
+      return;
+    }
+    final now = DateTime.now();
+    if (now.isBefore(nextAt)) {
+      _scheduleWriteConcurrencyRecovery();
+      return;
+    }
+    if (_effectiveWriteConcurrency < _maxConcurrentWrites) {
+      final previous = _effectiveWriteConcurrency;
+      _effectiveWriteConcurrency += 1;
+      _pool.setMaxSessions(_effectiveWriteConcurrency);
+      _logDebug('driver=sftp write concurrency increased previous=$previous current=$_effectiveWriteConcurrency max=$_maxConcurrentWrites cooldownSec=${_writeConcurrencyCooldown.inSeconds}');
+    }
+    if (_effectiveWriteConcurrency < _maxConcurrentWrites) {
+      _nextWriteConcurrencyIncreaseAt = now.add(_writeConcurrencyCooldown);
+      _scheduleWriteConcurrencyRecovery();
+      return;
+    }
+    _nextWriteConcurrencyIncreaseAt = null;
+    _writeConcurrencyRecoveryTimer?.cancel();
+    _writeConcurrencyRecoveryTimer = null;
   }
 
   String _formatLeaseMetrics(_SftpLeaseMetrics metrics) {
@@ -765,7 +832,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       final tmpRemote = '$remotePath.inprogress.${DateTime.now().microsecondsSinceEpoch}';
       final remoteFile = await _remoteOpen(sftp, tmpRemote, SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate);
       try {
-        await _remoteWriteAll(remoteFile, tmpRemote, Uint8List.fromList(bytes));
+        await _remoteWriteAll(remoteFile, tmpRemote, bytes);
       } finally {
         await _remoteCloseFile(remoteFile, tmpRemote);
       }
@@ -961,16 +1028,25 @@ class _SftpLease {
 }
 
 class _SftpPool {
-  _SftpPool({required this.maxSessions});
-
   static const Duration _maxSessionAge = Duration(minutes: 10);
 
-  final int maxSessions;
+  int _maxSessions;
+  int get maxSessions => _maxSessions;
   final List<_SshSftpSession> _idle = <_SshSftpSession>[];
   final List<_SshSftpSession> _all = <_SshSftpSession>[];
   final List<_SftpLeaseWaiter> _waiters = <_SftpLeaseWaiter>[];
   bool _closed = false;
   var _connecting = 0;
+
+  _SftpPool({required int maxSessions}) : _maxSessions = maxSessions;
+
+  void setMaxSessions(int value) {
+    if (value <= 0) {
+      throw StateError('SFTP pool maxSessions must be greater than zero.');
+    }
+    _maxSessions = value;
+    _tryStartWaiterConnects();
+  }
 
   Future<_SftpLease> lease(Future<_SshSftpSession> Function() connect) async {
     final waitStartedAt = DateTime.now();
@@ -1033,6 +1109,7 @@ class _SftpPool {
     try {
       session.close();
     } catch (_) {}
+    _tryStartWaiterConnects();
   }
 
   void invalidateIdle() {
@@ -1108,6 +1185,15 @@ class _SftpPool {
             _connecting -= 1;
           }),
     );
+  }
+
+  void _tryStartWaiterConnects() {
+    if (_closed) {
+      return;
+    }
+    while (_waiters.isNotEmpty && _all.length + _connecting < _maxSessions) {
+      _fulfillWaiterWithConnect(_waiters.removeAt(0));
+    }
   }
 }
 

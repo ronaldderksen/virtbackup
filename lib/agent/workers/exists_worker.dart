@@ -6,7 +6,6 @@ class _ExistsWorker {
     required this.blobExists,
     required this.enqueueMissingRun,
     required this.handleBytes,
-    required this.registerProgressBlocks,
     required this.ensureNotCanceled,
     required this.onExisting,
     required this.onMissing,
@@ -16,7 +15,6 @@ class _ExistsWorker {
   final Future<bool> Function(String hash) blobExists;
   final void Function(int startIndex, List<String> hashes) enqueueMissingRun;
   final void Function(int bytes) handleBytes;
-  final void Function(int blocks) registerProgressBlocks;
   final void Function() ensureNotCanceled;
   final void Function() onExisting;
   final void Function() onMissing;
@@ -63,12 +61,10 @@ class _ExistsWorker {
           if (exists) {
             onExisting();
             handleBytes(entry.blockLength);
-            registerProgressBlocks(1);
             await _flushPendingMissingIfGap(entry.index);
             continue;
           }
           onMissing();
-          registerProgressBlocks(1);
           if (_pendingMissingStart < 0) {
             _pendingMissingStart = entry.index;
           } else {

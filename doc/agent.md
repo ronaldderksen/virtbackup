@@ -190,8 +190,9 @@ Backpressure is a combination of:
 
 - Hashblocks `LIMIT`: throttles how far the remote hash stream advances.
 - Writer backlog thresholds: throttles SFTP reads when queued/in-flight bytes plus driver-reported buffered bytes exceed limits.
-- LIMIT is based on progress plus a configured buffer (`hashblocksLimitBufferMb`).
-- LIMIT growth is paused only when writer backlog exceeds the configured backlog limit (default 4 GB).
+- LIMIT is based on observed progress with a fixed lead window.
+- When SFTP reaches end-of-data for missing blocks, the agent sends one unlimited `LIMIT` to let hashblocks drain to `EOF`.
+- SFTP reads pause when writer queued bytes exceed the fixed threshold (512 MiB) and resume below it.
 - Writer concurrency: each driver sets its own max concurrent writes, which affects how fast the backlog drains.
 
 ### Progress Tracking

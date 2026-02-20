@@ -36,7 +36,6 @@ class _HashblocksWorker {
   var existingBlocks = 0;
   var missingBlocks = 0;
   var lastHashblocksIndex = -1;
-  bool batchHold = false;
 
   Future<void> handleLine(String line) async {
     ensureNotCanceled();
@@ -66,8 +65,6 @@ class _HashblocksWorker {
     enqueueExists(index, hash, blockLength);
     lastHashblocksIndex = index;
   }
-
-  Future<void> finishBatch() async {}
 
   void logStats({String? prefix}) {
     if (prefix == null || prefix.isEmpty) {

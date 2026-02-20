@@ -10,9 +10,11 @@ class _SftpWorker {
     required this.streamRemoteRange,
     required this.handleBytes,
     required this.markSftpRead,
-    required this.registerProgressBlocks,
     required this.enqueueWriteBlock,
     required this.ensureNotCanceled,
+    required this.shouldPauseRead,
+    required this.waitForReadResume,
+    required this.onDataEnd,
   });
 
   final ServerConfig server;
@@ -23,9 +25,19 @@ class _SftpWorker {
   final RemoteRangeStreamer streamRemoteRange;
   final void Function(int bytes) handleBytes;
   final void Function(int bytes) markSftpRead;
-  final void Function(int blocks) registerProgressBlocks;
   final Future<void> Function(String hash, Uint8List bytes) enqueueWriteBlock;
   final void Function() ensureNotCanceled;
+  final bool Function() shouldPauseRead;
+  final Future<void> Function() waitForReadResume;
+  final void Function() onDataEnd;
+  bool _dataEndSignaled = false;
+
+  Future<void> _waitForReadAllowance() async {
+    while (shouldPauseRead()) {
+      ensureNotCanceled();
+      await waitForReadResume();
+    }
+  }
 
   Future<void> fetchMissingRun(int startIndex, List<String> hashes) async {
     if (hashes.isEmpty) {
@@ -35,6 +47,7 @@ class _SftpWorker {
     final inFlight = <Future<void>>[];
     for (var offset = 0; offset < hashes.length; offset += 1) {
       ensureNotCanceled();
+      await _waitForReadAllowance();
       inFlight.add(fetchMissingRange(startIndex + offset, <String>[hashes[offset]]));
       if (inFlight.length >= window) {
         await inFlight.removeAt(0);
@@ -49,6 +62,7 @@ class _SftpWorker {
     if (hashes.isEmpty) {
       return;
     }
+    await _waitForReadAllowance();
     final expectedHash = hashes.first;
     final rangeStartOffset = startIndex * blockSize;
     if (rangeStartOffset >= fileSize) {
@@ -95,6 +109,9 @@ class _SftpWorker {
     }
     final payload = directPayload ?? (blockOffset == blockLength ? blockBuffer : Uint8List.sublistView(blockBuffer, 0, blockOffset));
     await enqueueWriteBlock(expectedHash, payload);
-    registerProgressBlocks(1);
+    if (!_dataEndSignaled && rangeStartOffset + blockLength >= fileSize) {
+      _dataEndSignaled = true;
+      onDataEnd();
+    }
   }
 }

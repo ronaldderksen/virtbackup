@@ -4,24 +4,20 @@ class _WriterWorker {
   _WriterWorker({
     required this.maxConcurrentWrites,
     required this.logInterval,
-    required this.backlogLimitBytes,
     required this.driverBufferedBytes,
     required this.onMetrics,
     required this.scheduleWrite,
     required this.handlePhysicalBytes,
-    required this.onWriteCompletedBlocks,
     required this.isWriteReady,
     this.waitForWriteReady,
   });
 
   final int maxConcurrentWrites;
   final Duration logInterval;
-  final int backlogLimitBytes;
   final int Function() driverBufferedBytes;
   final void Function(int queuedBytes, int inFlightBytes, int driverBufferedBytes) onMetrics;
   final Future<void> Function(String hash, Uint8List bytes) scheduleWrite;
   final void Function(int bytes) handlePhysicalBytes;
-  final void Function(int blocks) onWriteCompletedBlocks;
   final bool Function() isWriteReady;
   final Future<void> Function()? waitForWriteReady;
 
@@ -96,7 +92,6 @@ class _WriterWorker {
           handlePhysicalBytes(size);
         }
         _writtenBlocks += 1;
-        onWriteCompletedBlocks(1);
         _inFlightBytes -= size;
         _reportMetrics();
         if (_writtenBlocks % 512 == 0) {

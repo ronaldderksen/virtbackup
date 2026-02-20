@@ -219,18 +219,7 @@ class AppSettingsStore {
   }
 
   bool _reorderRootKeys(Map<String, dynamic> data) {
-    const preferredOrder = <String>[
-      'backupPath',
-      'log_level',
-      'backupStorageId',
-      'connectionVerified',
-      'hashblocksLimitBufferMb',
-      'blockSizeMB',
-      'dummyDriverTmpWrites',
-      'ntfymeToken',
-      'servers',
-      'storage',
-    ];
+    const preferredOrder = <String>['backupPath', 'log_level', 'backupStorageId', 'connectionVerified', 'blockSizeMB', 'dummyDriverTmpWrites', 'ntfymeToken', 'servers', 'storage'];
     final originalKeys = data.keys.toList();
     final ordered = <String, dynamic>{};
     for (final key in preferredOrder) {

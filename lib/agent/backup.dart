@@ -60,15 +60,12 @@ class BackupAgent {
     required int blockSizeBytes,
     LogInfo? onInfo,
     LogError? onError,
-    int? writerBacklogBytesLimit,
-    int? hashblocksLimitBufferMb,
     int? writerConcurrencyOverride,
   }) : _dependencies = dependencies,
        _onProgress = onProgress,
        _blockSize = blockSizeBytes,
        _onInfo = onInfo,
        _onError = onError,
-       _writerBacklogBytesLimit = writerBacklogBytesLimit ?? _defaultWriterBacklogBytesLimit,
        _writerConcurrencyOverride = writerConcurrencyOverride;
 
   final BackupAgentDependencies _dependencies;
@@ -96,9 +93,7 @@ class BackupAgent {
   DateTime? _backupStartAt;
   final int _blockSize;
   static const int _sftpPrefetchWindow = 2;
-  static const int _defaultWriterBacklogBytesLimit = 4 * 1024 * 1024 * 1024;
   final Set<Future<void>> _inFlightWrites = {};
-  final int _writerBacklogBytesLimit;
   final int? _writerConcurrencyOverride;
   _BlobDirectoryCache? _blobDirectoryCache;
   _BlobCacheWorker? _blobCacheWorker;
@@ -665,7 +660,6 @@ class BackupAgent {
     var hashblocksBytesSinceTick = 0;
     var hashblocksSmoothedSpeed = 0.0;
     DateTime? hashblocksLastTick;
-    Timer? hashblocksLogTimer;
     var eofSeen = false;
 
     void handleHashblocksBytes(int bytes) {
@@ -689,100 +683,90 @@ class BackupAgent {
     Object? missingError;
     StackTrace? missingStack;
     HashblocksController? controller;
-    const initialLeadMb = 64;
-    const targetQueuedBlocks = 512;
-    const limitStepBlocks = 128;
-    const limitStepWhenQueueEmptyBlocks = 1024;
-    const maxLeadFromExistsCheckBlocks = 1024;
     const limitUpdateInterval = Duration(seconds: 1);
-    const unlimitedLimitIndex = 2147483647;
+    const limitStepBytes = 1024 * 1024 * 1024;
+    final limitStepBlocks = max(1, (limitStepBytes + _blockSize - 1) ~/ _blockSize);
+    const sftpReadLeadBytes = 1024 * 1024 * 1024;
+    final sftpReadLeadBlocks = max(1, (sftpReadLeadBytes + _blockSize - 1) ~/ _blockSize);
     final maxFileLimitIndex = max(0, ((fileSize + _blockSize - 1) ~/ _blockSize) - 1);
-    var lastLimitSent = -1;
     Timer? limitUpdateTimer;
-    var hasSeenExistingOrMissing = false;
-    var unlimitedSent = false;
-    var existsCheckedBlocks = 0;
+    var lastLimitSent = -1;
+    var sftpReadBytes = 0;
+    var resolvedZeroOrExistingBlocks = 0;
+    var sftpReachedDataEnd = false;
+    var unlimitedLimitSent = false;
 
     late final _WriterWorker writerWorker;
     late final _SftpWorker sftpWorker;
     late final _ExistsWorker existsWorker;
     late final _HashblocksWorker hashblocksWorker;
 
-    String formatLimitBlocks(int blocks) {
-      if (blocks <= 0) {
-        return '0 B';
-      }
-      return _formatBytes(blocks * _blockSize);
+    String limitProgressDetail({required bool includeStep}) {
+      final stepPart = includeStep ? 'stepBytes=$limitStepBytes ' : '';
+      return '${stepPart}readBytes=$sftpReadBytes resolvedBlocks=$resolvedZeroOrExistingBlocks readLeadBytes=$sftpReadLeadBytes';
     }
 
     void sendLimitCommand(HashblocksController value, int maxIndex, {required String reason, String? detail}) {
       final suffix = detail == null || detail.isEmpty ? '' : ' $detail';
-      LogWriter.logAgentSync(level: 'debug', message: _formatLogMessage('hashblocks limit command: LIMIT $maxIndex reason=$reason (${formatLimitBlocks(maxIndex)})$suffix') ?? '');
+      LogWriter.logAgentSync(level: 'debug', message: _formatLogMessage('hashblocks limit command: LIMIT $maxIndex reason=$reason (${_formatBytes(max(0, maxIndex + 1) * _blockSize)})$suffix') ?? '');
       value.setLimit(maxIndex);
     }
 
-    bool sendLimit(int maxIndex, {bool force = false, String reason = 'progress', String? detail}) {
-      maxIndex = min(maxIndex, maxFileLimitIndex);
-      maxIndex = max(maxIndex, lastLimitSent);
-      if (maxIndex == lastLimitSent) {
-        return false;
-      }
-      final writerBufferedBytes = _writerQueuedBytes + _writerInFlightBytes + _driverBufferedBytes;
-      if (!force && writerBufferedBytes > _writerBacklogBytesLimit && maxIndex > lastLimitSent) {
-        return false;
-      }
-      lastLimitSent = maxIndex;
-      if (controller == null) {
-        return false;
-      }
-      sendLimitCommand(controller!, maxIndex, reason: reason, detail: detail);
-      return true;
+    void sendUnlimitedLimitCommand(HashblocksController value, {required String reason, String? detail}) {
+      final suffix = detail == null || detail.isEmpty ? '' : ' $detail';
+      LogWriter.logAgentSync(level: 'debug', message: _formatLogMessage('hashblocks limit command: LIMIT ${HashblocksController.unlimitedLimit} reason=$reason (unlimited)$suffix') ?? '');
+      value.setUnlimitedLimit();
     }
 
-    int leadBlocksForMb(int mb) {
-      if (mb <= 0) {
-        return 0;
+    void maybeSendUnlimitedLimit({required String reason}) {
+      if (unlimitedLimitSent) {
+        return;
       }
-      final bytes = mb * 1024 * 1024;
-      final blocks = bytes ~/ _blockSize;
-      return max(1, blocks);
+      sftpReachedDataEnd = true;
+      final currentController = controller;
+      if (currentController == null) {
+        return;
+      }
+      unlimitedLimitSent = true;
+      sendUnlimitedLimitCommand(currentController, reason: reason, detail: limitProgressDetail(includeStep: false));
     }
 
-    void updateLimitFromProgress({bool force = false, String reason = 'progress'}) {
-      if (!unlimitedSent && controller != null && lastLimitSent >= maxFileLimitIndex) {
-        sendLimitCommand(controller!, unlimitedLimitIndex, reason: 'eof-unlimited', detail: 'targetQueue=$targetQueuedBlocks queued=0');
-        lastLimitSent = unlimitedLimitIndex;
-        unlimitedSent = true;
+    void maybeAdvanceLimit({required String reason}) {
+      if (unlimitedLimitSent) {
         return;
       }
-      final queuedBlocksNow = _writerQueuedBytes <= 0 ? 0 : ((_writerQueuedBytes + _blockSize - 1) ~/ _blockSize);
-      if (!hasSeenExistingOrMissing) {
+      final currentController = controller;
+      if (currentController == null) {
         return;
       }
-      if (queuedBlocksNow >= targetQueuedBlocks) {
+      final sftpReadBlocks = sftpReadBytes <= 0 ? 0 : ((sftpReadBytes + _blockSize - 1) ~/ _blockSize);
+      final progressedBlocks = sftpReadBlocks + resolvedZeroOrExistingBlocks;
+      final maxByProgress = max(0, progressedBlocks + sftpReadLeadBlocks - 1);
+      final candidate = min(maxFileLimitIndex, min(lastLimitSent + limitStepBlocks, maxByProgress));
+      if (candidate <= lastLimitSent) {
+        if (lastLimitSent >= maxFileLimitIndex) {
+          maybeSendUnlimitedLimit(reason: '$reason-eof');
+        }
         return;
       }
-      final stepBlocks = queuedBlocksNow == 0 ? limitStepWhenQueueEmptyBlocks : limitStepBlocks;
-      final maxLimitFromExistsCheck = max(0, existsCheckedBlocks + maxLeadFromExistsCheckBlocks - 1);
-      final nextLimit = min(max(0, lastLimitSent + stepBlocks), maxLimitFromExistsCheck);
-      sendLimit(nextLimit, force: force, reason: reason, detail: 'targetQueue=$targetQueuedBlocks queued=$queuedBlocksNow');
+      lastLimitSent = candidate;
+      sendLimitCommand(currentController, candidate, reason: reason, detail: limitProgressDetail(includeStep: true));
+      if (lastLimitSent >= maxFileLimitIndex) {
+        maybeSendUnlimitedLimit(reason: '$reason-eof');
+      }
     }
 
     void registerProgressBlocks(int count) {
       if (count <= 0) {
         return;
       }
-      existsCheckedBlocks += count;
-    }
-
-    void registerWriterCompletedBlocks(int count) {
-      if (count <= 0) {
-        return;
-      }
+      resolvedZeroOrExistingBlocks += count;
     }
 
     final missingQueue = <_MissingRun>[];
     Completer<void>? wakeMissingWorker;
+    Completer<void>? wakeSftpReadResume;
+    const sftpReadPauseThresholdBytes = 512 * 1024 * 1024;
     var missingDone = false;
     Future<void>? writerFutureRef;
     var writerAwaited = false;
@@ -808,12 +792,18 @@ class BackupAgent {
     writerWorker = _WriterWorker(
       maxConcurrentWrites: _writerConcurrencyOverride ?? max(1, driver.capabilities.maxConcurrentWrites),
       logInterval: agentLogInterval,
-      backlogLimitBytes: _writerBacklogBytesLimit,
       driverBufferedBytes: () => driver.bufferedBytes,
-      onMetrics: _handleWriterMetrics,
+      onMetrics: (queuedBytes, inFlightBytes, driverBufferedBytes) {
+        _handleWriterMetrics(queuedBytes, inFlightBytes, driverBufferedBytes);
+        if (queuedBytes <= sftpReadPauseThresholdBytes) {
+          if (wakeSftpReadResume != null && !wakeSftpReadResume!.isCompleted) {
+            wakeSftpReadResume!.complete();
+            wakeSftpReadResume = null;
+          }
+        }
+      },
       scheduleWrite: (hash, bytes) => _scheduleWriteBlob(hash, bytes, driver),
       handlePhysicalBytes: _handlePhysicalBytes,
-      onWriteCompletedBlocks: registerWriterCompletedBlocks,
       isWriteReady: () => cache?.isWriteReady() ?? true,
       waitForWriteReady: cache?.waitForWriteReady,
     );
@@ -828,17 +818,28 @@ class BackupAgent {
       handleBytes: _handleBytes,
       markSftpRead: (bytes) {
         _markSftpRead(bytes);
+        sftpReadBytes += bytes;
         if (!sftpStartLogged) {
           sftpStartLogged = true;
           _logInfo('missing: first sftp bytes received');
         }
       },
-      registerProgressBlocks: registerProgressBlocks,
       enqueueWriteBlock: (hash, bytes) async {
         _blobDirectoryCache?.markHashKnown(hash);
         writerWorker.enqueue(hash, bytes);
       },
       ensureNotCanceled: _ensureNotCanceled,
+      shouldPauseRead: () => _writerQueuedBytes > sftpReadPauseThresholdBytes,
+      waitForReadResume: () async {
+        wakeSftpReadResume ??= Completer<void>();
+        await Future.any<void>(<Future<void>>[wakeSftpReadResume!.future, Future<void>.delayed(const Duration(milliseconds: 100))]);
+        if (wakeSftpReadResume != null && wakeSftpReadResume!.isCompleted) {
+          wakeSftpReadResume = null;
+        }
+      },
+      onDataEnd: () {
+        maybeSendUnlimitedLimit(reason: 'sftp-eof');
+      },
     );
 
     const maxMissingRun = 1;
@@ -848,14 +849,12 @@ class BackupAgent {
       blobExists: _blobExists,
       enqueueMissingRun: enqueueMissingRun,
       handleBytes: _handleBytes,
-      registerProgressBlocks: registerProgressBlocks,
       ensureNotCanceled: _ensureNotCanceled,
       onExisting: () {
-        hasSeenExistingOrMissing = true;
+        resolvedZeroOrExistingBlocks += 1;
         hashblocksWorker.markExisting();
       },
       onMissing: () {
-        hasSeenExistingOrMissing = true;
         hashblocksWorker.markMissing();
       },
     );
@@ -910,12 +909,15 @@ class BackupAgent {
           _activeHashblocksController = value;
           if (_cancelRequested) {
             value.stop();
+            return;
           }
-          final initialLimitIndex = max(0, leadBlocksForMb(initialLeadMb) - 1);
-          sendLimit(initialLimitIndex, force: true, reason: 'initial', detail: 'targetQueue=$targetQueuedBlocks queued=0');
+          maybeAdvanceLimit(reason: 'initial');
+          if (sftpReachedDataEnd) {
+            maybeSendUnlimitedLimit(reason: 'controller-ready-after-sftp-eof');
+          }
           limitUpdateTimer?.cancel();
           limitUpdateTimer = Timer.periodic(limitUpdateInterval, (_) {
-            updateLimitFromProgress(force: true, reason: 'progress');
+            maybeAdvanceLimit(reason: 'progress');
           });
         },
         onLine: (line) async {
@@ -925,8 +927,6 @@ class BackupAgent {
             if (trimmed.isEmpty || trimmed == 'EOF') {
               if (!eofSeen && trimmed == 'EOF') {
                 eofSeen = true;
-                hashblocksLogTimer?.cancel();
-                hashblocksLogTimer = null;
                 hashblocksWorker.logStats(prefix: 'hashblocks stats: EOF');
               }
               return;
@@ -941,7 +941,6 @@ class BackupAgent {
       if (_cancelRequested) {
         throw const _BackupCanceled();
       }
-      await hashblocksWorker.finishBatch();
       existsWorker.signalDone();
       await existsWorkerFuture;
       existsWorker.throwIfError();
@@ -963,8 +962,6 @@ class BackupAgent {
       writerWorker.throwIfError();
 
       _setProgress(_progress.copyWith(statusMessage: 'Backup ${_progress.completedDisks + 1} of ${_progress.totalDisks}: $diskId'));
-      hashblocksLogTimer?.cancel();
-      hashblocksLogTimer = null;
       handleHashblocksBytes(0);
       final doneMbPerSec = hashblocksSmoothedSpeed / (1024 * 1024);
       final doneTotalMb = hashblocksBytes / (1024 * 1024);
@@ -974,7 +971,6 @@ class BackupAgent {
       await sink.flush();
       manifestFlushed = true;
     } finally {
-      hashblocksLogTimer?.cancel();
       if (!eofSeen) {
         try {
           controller?.stop();
@@ -984,6 +980,10 @@ class BackupAgent {
         _activeHashblocksController = null;
       }
       limitUpdateTimer?.cancel();
+      if (wakeSftpReadResume != null && !wakeSftpReadResume!.isCompleted) {
+        wakeSftpReadResume!.complete();
+        wakeSftpReadResume = null;
+      }
       existsWorker.signalDone();
       writerWorker.signalDone();
       if (writerFutureRef != null && !writerAwaited) {
@@ -1074,15 +1074,10 @@ class BackupAgent {
     }
   }
 
-  Future<void> _writeBlob(String hash, List<int> bytes, BackupDriver driver) async {
-    await driver.writeBlob(hash, bytes);
-  }
-
   Future<void> _scheduleWriteBlob(String hash, Uint8List bytes, BackupDriver driver) async {
     _ensureNotCanceled();
     _blobDirectoryCache?.markHashKnown(hash);
-    final payload = Uint8List.fromList(bytes);
-    final future = _writeBlob(hash, payload, driver);
+    final future = driver.writeBlob(hash, bytes);
     final tracking = future.then((_) {});
     _inFlightWrites.add(tracking);
     tracking.whenComplete(() => _inFlightWrites.remove(tracking));

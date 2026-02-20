@@ -874,7 +874,6 @@ class BackupAgentHost {
     final client = SSHClient(socket, username: user, onPasswordRequest: () => password, algorithms: _sshAlgorithms);
     RandomAccessFile? raf;
     Timer? stallTimer;
-    Timer? speedTimer;
     var totalDownloaded = 0;
     SftpClient? sftp;
     SftpFile? remoteFile;
@@ -898,7 +897,6 @@ class BackupAgentHost {
           LogWriter.logAgentSync(level: 'info', message: 'Backup stream stalled: no data for ${secondsWithoutData}s');
         }
       });
-      speedTimer = Timer.periodic(agentLogInterval, (_) {});
       const blockSize = 4 * 1024 * 1024;
       const streamTimeout = Duration(seconds: 8);
       var blockBuffer = Uint8List(blockSize);
@@ -970,7 +968,6 @@ class BackupAgentHost {
       await raf.flush();
       LogWriter.logAgentSync(level: 'info', message: 'SFTP download completed for $remotePath');
     } finally {
-      speedTimer?.cancel();
       stallTimer?.cancel();
       try {
         await remoteFile?.close();
@@ -1033,7 +1030,6 @@ class BackupAgentHost {
     final socket = await SSHSocket.connect(host, port);
     final client = SSHClient(socket, username: user, onPasswordRequest: () => password, algorithms: _sshAlgorithms);
     Timer? stallTimer;
-    Timer? speedTimer;
     var totalDownloaded = 0;
     SftpClient? sftp;
     SftpFile? remoteFile;
@@ -1055,7 +1051,6 @@ class BackupAgentHost {
           LogWriter.logAgentSync(level: 'info', message: 'Backup stream stalled: no data for ${secondsWithoutData}s');
         }
       });
-      speedTimer = Timer.periodic(agentLogInterval, (_) {});
       const streamTimeout = Duration(seconds: 8);
       final remoteStream = remoteFile
           .read(length: remoteSize, offset: 0)
@@ -1101,7 +1096,6 @@ class BackupAgentHost {
       }
       LogWriter.logAgentSync(level: 'info', message: 'SFTP stream completed for $remotePath');
     } finally {
-      speedTimer?.cancel();
       stallTimer?.cancel();
       try {
         await remoteFile?.close();
@@ -1128,12 +1122,10 @@ class BackupAgentHost {
     final client = SSHClient(socket, username: user, onPasswordRequest: () => password, algorithms: _sshAlgorithms);
     SftpClient? sftp;
     SftpFile? remoteFile;
-    Timer? speedTimer;
     var totalUploaded = 0;
     try {
       sftp = await client.sftp();
       remoteFile = await sftp.open(remotePath, mode: SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate);
-      speedTimer = Timer.periodic(agentLogInterval, (_) {});
       final stream = localFile.openRead().map((chunk) {
         _sftpUploadBytesSinceLog += chunk.length;
         totalUploaded += chunk.length;
@@ -1154,7 +1146,6 @@ class BackupAgentHost {
       await remoteFile.close();
       _logSftpUploadWindowIfAny();
     } finally {
-      speedTimer?.cancel();
       try {
         await remoteFile?.close();
       } catch (_) {}

@@ -27,7 +27,6 @@ void main() {
         backupStorageId: 'dest-gdrive',
         servers: <ServerConfig>[],
         connectionVerified: true,
-        hashblocksLimitBufferMb: 1024,
         blockSizeMB: 1,
         dummyDriverTmpWrites: false,
         ntfymeToken: '',

@@ -66,7 +66,6 @@ Response:
   "log_level":"info",
   "backupStorageId":"dest_filesystem_1739440000000000",
   "connectionVerified":false,
-  "hashblocksLimitBufferMb":1024,
   "blockSizeMB":1,
   "dummyDriverTmpWrites":false,
   "ntfymeToken":"",

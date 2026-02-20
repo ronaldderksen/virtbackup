@@ -217,7 +217,9 @@ class HashblocksController {
   HashblocksController(this._send);
 
   final void Function(String command) _send;
+  static const String unlimitedLimit = '2147483647';
 
   void setLimit(int maxBlockIndex) => _send('LIMIT $maxBlockIndex');
+  void setUnlimitedLimit() => _send('LIMIT $unlimitedLimit');
   void stop() => _send('STOP');
 }

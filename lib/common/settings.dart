@@ -11,7 +11,6 @@ class AppSettings {
     required this.backupStorageId,
     required this.servers,
     required this.connectionVerified,
-    required this.hashblocksLimitBufferMb,
     required this.blockSizeMB,
     required this.dummyDriverTmpWrites,
     required this.ntfymeToken,
@@ -23,7 +22,6 @@ class AppSettings {
   final String? backupStorageId;
   final List<ServerConfig> servers;
   final bool connectionVerified;
-  final int hashblocksLimitBufferMb;
   final int blockSizeMB;
   final bool dummyDriverTmpWrites;
   final String ntfymeToken;
@@ -35,7 +33,6 @@ class AppSettings {
     String? backupStorageId,
     List<ServerConfig>? servers,
     bool? connectionVerified,
-    int? hashblocksLimitBufferMb,
     int? blockSizeMB,
     bool? dummyDriverTmpWrites,
     String? ntfymeToken,
@@ -47,7 +44,6 @@ class AppSettings {
       backupStorageId: backupStorageId ?? this.backupStorageId,
       servers: servers ?? this.servers,
       connectionVerified: connectionVerified ?? this.connectionVerified,
-      hashblocksLimitBufferMb: hashblocksLimitBufferMb ?? this.hashblocksLimitBufferMb,
       blockSizeMB: blockSizeMB ?? this.blockSizeMB,
       dummyDriverTmpWrites: dummyDriverTmpWrites ?? this.dummyDriverTmpWrites,
       ntfymeToken: ntfymeToken ?? this.ntfymeToken,
@@ -60,7 +56,6 @@ class AppSettings {
       'log_level': logLevel,
       'backupStorageId': backupStorageId,
       'connectionVerified': connectionVerified,
-      'hashblocksLimitBufferMb': hashblocksLimitBufferMb,
       'blockSizeMB': blockSizeMB,
       'dummyDriverTmpWrites': dummyDriverTmpWrites,
       'ntfymeToken': ntfymeToken,
@@ -91,7 +86,6 @@ class AppSettings {
       storage: storage,
       backupStorageId: backupStorageId == null || backupStorageId.isEmpty ? selectedBackupStorage?.id : backupStorageId,
       connectionVerified: json['connectionVerified'] == true,
-      hashblocksLimitBufferMb: _parseHashblocksLimitBufferMb(json['hashblocksLimitBufferMb']),
       blockSizeMB: _parseBlockSizeMB(json['blockSizeMB']),
       dummyDriverTmpWrites: json['dummyDriverTmpWrites'] == true,
       ntfymeToken: (json['ntfymeToken'] ?? '').toString(),
@@ -106,7 +100,6 @@ class AppSettings {
     backupStorageId: null,
     servers: <ServerConfig>[],
     connectionVerified: false,
-    hashblocksLimitBufferMb: 1024,
     blockSizeMB: 1,
     dummyDriverTmpWrites: false,
     ntfymeToken: '',
@@ -197,14 +190,6 @@ class AppSettings {
       return '';
     }
     return '';
-  }
-
-  static int _parseHashblocksLimitBufferMb(Object? value) {
-    final parsed = value is num ? value.toInt() : int.tryParse(value?.toString() ?? '');
-    if (parsed == null || parsed <= 0) {
-      return 1024;
-    }
-    return parsed;
   }
 
   static int _parseBlockSizeMB(Object? value) {
