@@ -41,6 +41,7 @@ class _WriterWorker {
   DateTime? _nextConcurrencyIncreaseAt;
   DateTime? _lastQueueStatsLogAt;
   DateTime? _lastLoopDebugLogAt;
+  DateTime? _lastEventLoopYieldAt;
 
   Completer<void>? _wakeWriter;
   bool _done = false;
@@ -146,6 +147,7 @@ class _WriterWorker {
       }
 
       while (!_done || _queuedBlocks > 0 || writeFutures.isNotEmpty) {
+        await _maybeYieldEventLoop();
         _maybeRecoverConcurrency();
         if (!isWriteReady()) {
           if (waitForWriteReady != null) {
@@ -167,6 +169,7 @@ class _WriterWorker {
         var scheduled = false;
         final passSize = _shardQueue.length;
         for (var i = 0; i < passSize; i += 1) {
+          await _maybeYieldEventLoop();
           final shardKey = _shardQueue.removeAt(0);
           final bucket = _writeQueues[shardKey];
           if (bucket == null || bucket.isEmpty) {
@@ -334,6 +337,16 @@ class _WriterWorker {
       level: 'debug',
       message: 'worker=writer debug: reason=$reason queuedBlocks=$_queuedBlocks queuedBytes=$_queuedBytes inFlightWrites=$inFlightWrites inFlightBytes=$_inFlightBytes queueDepth=$_queuedBlocks',
     );
+  }
+
+  Future<void> _maybeYieldEventLoop() async {
+    final now = DateTime.now();
+    final last = _lastEventLoopYieldAt;
+    if (last != null && now.difference(last) < const Duration(seconds: 1)) {
+      return;
+    }
+    _lastEventLoopYieldAt = now;
+    await Future<void>.delayed(Duration.zero);
   }
 
   String _shardKeyForHash(String hash) {

@@ -1612,8 +1612,9 @@ class AgentHttpServer {
   }
 
   void _updateJob(String jobId, AgentJobStatus status) {
+    final previous = _jobs[jobId];
     _jobs[jobId] = status;
-    if (status.state == AgentJobState.failure) {
+    if (status.state == AgentJobState.failure && previous?.state != AgentJobState.failure) {
       _publishEvent('agent.job_failure', {'jobId': status.id, 'type': status.type.name, 'message': status.message});
     }
   }
@@ -1740,11 +1741,15 @@ class AgentHttpServer {
         return;
       }
       if (type == 'result') {
+        if (control.resultHandled) {
+          return;
+        }
+        control.resultHandled = true;
         final result = BackupAgentResult.fromMap(Map<String, dynamic>.from(payload['result'] as Map));
         final state = result.canceled ? AgentJobState.canceled : (result.success ? AgentJobState.success : AgentJobState.failure);
         final current = _jobs[jobId];
         final sizeBytes = current != null && current.totalBytes > 0 ? current.totalBytes : null;
-        if (state == AgentJobState.failure) {
+        if (state == AgentJobState.failure && control.canceled != true) {
           try {
             await _refreshServer(server, reason: 'backup-failed');
           } catch (_) {}
@@ -2394,6 +2399,13 @@ class AgentHttpServer {
       return;
     }
     final control = _jobControls[jobId];
+    final dedupeKey = '${type.name}:${state.name}';
+    if (control != null && control.lastNtfyCompletionKey == dedupeKey) {
+      return;
+    }
+    if (control != null) {
+      control.lastNtfyCompletionKey = dedupeKey;
+    }
     final duration = control?.startedAt == null ? null : DateTime.now().difference(control!.startedAt).inSeconds;
     final status = state == AgentJobState.success ? 'success' : 'failed';
     final storageLabel = _resolveStorageLabel(target: control?.target, driverLabel: control?.driverLabel);
@@ -2657,6 +2669,8 @@ class _JobControl {
   String? source;
   String? target;
   String? driverLabel;
+  bool resultHandled = false;
+  String? lastNtfyCompletionKey;
 }
 
 enum _RestoreCheckMode { full, quick }
