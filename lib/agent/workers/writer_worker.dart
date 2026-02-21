@@ -4,20 +4,30 @@ class _WriterWorker {
   _WriterWorker({
     required this.maxConcurrentWrites,
     required this.logInterval,
+    required this.maxRetryAttempts,
+    required this.retryBaseDelay,
+    required this.retryMaxDelay,
+    required this.retryConcurrencyCooldown,
     required this.driverBufferedBytes,
     required this.onMetrics,
     required this.scheduleWrite,
     required this.handlePhysicalBytes,
+    required this.onConcurrencyLimitChanged,
     required this.isWriteReady,
     this.waitForWriteReady,
   });
 
   final int maxConcurrentWrites;
   final Duration logInterval;
+  final int maxRetryAttempts;
+  final Duration retryBaseDelay;
+  final Duration retryMaxDelay;
+  final Duration retryConcurrencyCooldown;
   final int Function() driverBufferedBytes;
   final void Function(int queuedBytes, int inFlightBytes, int driverBufferedBytes) onMetrics;
   final Future<void> Function(String hash, Uint8List bytes) scheduleWrite;
   final void Function(int bytes) handlePhysicalBytes;
+  final void Function(int concurrency) onConcurrencyLimitChanged;
   final bool Function() isWriteReady;
   final Future<void> Function()? waitForWriteReady;
 
@@ -27,6 +37,8 @@ class _WriterWorker {
   var _queuedBytes = 0;
   var _inFlightBytes = 0;
   var _writtenBlocks = 0;
+  late int _targetConcurrentWrites = maxConcurrentWrites;
+  DateTime? _nextConcurrencyIncreaseAt;
   DateTime? _lastQueueStatsLogAt;
   DateTime? _lastLoopDebugLogAt;
 
@@ -70,13 +82,13 @@ class _WriterWorker {
 
   Future<void> run() async {
     try {
-      final writeFutures = <Future<void>>[];
-      final writeSizes = <Future<void>, int>{};
+      _applyConcurrencyLimit(maxConcurrentWrites, reason: 'start');
+      final writeFutures = <_InFlightWrite>[];
 
-      Future<Future<void>> awaitAnyWrite() {
+      Future<_InFlightWrite> awaitAnyWrite() {
         return Future.any(
-          writeFutures.map((future) {
-            return future.then((_) => future);
+          writeFutures.map((entry) {
+            return entry.future.then((_) => entry).catchError((Object _) => entry);
           }),
         );
       }
@@ -85,37 +97,56 @@ class _WriterWorker {
         if (writeFutures.isEmpty) {
           return;
         }
-        final doneFuture = await awaitAnyWrite();
-        writeFutures.remove(doneFuture);
-        final size = writeSizes.remove(doneFuture) ?? 0;
-        if (size > 0) {
-          handlePhysicalBytes(size);
+        final doneWrite = await awaitAnyWrite();
+        writeFutures.remove(doneWrite);
+        final size = doneWrite.block.bytes.length;
+        try {
+          await doneWrite.future;
+          if (size > 0) {
+            handlePhysicalBytes(size);
+          }
+          _writtenBlocks += 1;
+          if (_writtenBlocks % 512 == 0) {
+            final now = DateTime.now();
+            if (_lastQueueStatsLogAt == null || now.difference(_lastQueueStatsLogAt!) >= logInterval) {
+              LogWriter.logAgentSync(level: 'info', message: 'worker=writer queue stats: queued=$_queuedBlocks written=$_writtenBlocks backlogBytes=${backlogBytes()}');
+              _lastQueueStatsLogAt = now;
+            }
+          }
+        } catch (error, stackTrace) {
+          final retryAttempt = doneWrite.block.attempt + 1;
+          if (retryAttempt > maxRetryAttempts) {
+            LogWriter.logAgentSync(level: 'error', message: 'worker=writer write failed after retries hash=${doneWrite.block.hash} attempts=$retryAttempt error=$error');
+            Error.throwWithStackTrace(error, stackTrace);
+          }
+          doneWrite.block.attempt = retryAttempt;
+          doneWrite.block.retryAt = DateTime.now().add(_retryDelayForAttempt(doneWrite.block.attempt));
+          _requeue(doneWrite.block);
+          _registerRetryFailure();
+          LogWriter.logAgentSync(
+            level: 'warn',
+            message:
+                'worker=writer write retry scheduled hash=${doneWrite.block.hash} attempt=${doneWrite.block.attempt}/$maxRetryAttempts retryAt=${doneWrite.block.retryAt.toIso8601String()} error=$error',
+          );
         }
-        _writtenBlocks += 1;
         _inFlightBytes -= size;
         _reportMetrics();
-        if (_writtenBlocks % 512 == 0) {
-          final now = DateTime.now();
-          if (_lastQueueStatsLogAt == null || now.difference(_lastQueueStatsLogAt!) >= logInterval) {
-            LogWriter.logAgentSync(level: 'info', message: 'worker=writer queue stats: queued=$_queuedBlocks written=$_writtenBlocks backlogBytes=${backlogBytes()}');
-            _lastQueueStatsLogAt = now;
-          }
-        }
       }
 
       Future<void> drainCompleted({bool force = false}) async {
         if (writeFutures.isEmpty) {
           return;
         }
-        if (!force && writeFutures.length < maxConcurrentWrites) {
+        if (!force && writeFutures.length < _targetConcurrentWrites) {
           return;
         }
-        while (writeFutures.isNotEmpty && (force || writeFutures.length >= maxConcurrentWrites)) {
+        while (writeFutures.isNotEmpty && (force || writeFutures.length >= _targetConcurrentWrites)) {
           await drainOne();
         }
       }
 
       while (!_done || _queuedBlocks > 0 || writeFutures.isNotEmpty) {
+        _maybeRecoverConcurrency();
         if (!isWriteReady()) {
           if (waitForWriteReady != null) {
             await waitForWriteReady!();
@@ -143,9 +174,14 @@ class _WriterWorker {
             continue;
           }
           await drainCompleted();
-          if (writeFutures.length >= maxConcurrentWrites) {
+          if (writeFutures.length >= _targetConcurrentWrites) {
             _shardQueue.add(shardKey);
             break;
+          }
+          final next = bucket.first;
+          if (next.retryAt.isAfter(DateTime.now())) {
+            _shardQueue.add(shardKey);
+            continue;
           }
           final entry = bucket.removeAt(0);
           _queuedBlocks -= 1;
@@ -153,8 +189,7 @@ class _WriterWorker {
           _inFlightBytes += entry.bytes.length;
           _reportMetrics();
           final future = scheduleWrite(entry.hash, entry.bytes);
-          writeFutures.add(future);
-          writeSizes[future] = entry.bytes.length;
+          writeFutures.add(_InFlightWrite(block: entry, future: future));
           scheduled = true;
           if (bucket.isNotEmpty) {
             _shardQueue.add(shardKey);
@@ -173,7 +208,12 @@ class _WriterWorker {
         }
         if (_queuedBlocks > 0) {
           _maybeLogLoopDebug('wait-shard-ready', writeFutures.length);
-          await Future<void>.delayed(const Duration(milliseconds: 50));
+          final waitDuration = _nextRetryWait();
+          if (waitDuration == null) {
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+          } else {
+            await Future<void>.delayed(waitDuration);
+          }
           continue;
         }
       }
@@ -190,6 +230,98 @@ class _WriterWorker {
 
   void _reportMetrics() {
     onMetrics(_queuedBytes, _inFlightBytes, driverBufferedBytes());
+  }
+
+  void _requeue(_MissingBlock block) {
+    final shardKey = _shardKeyForHash(block.hash);
+    final bucket = _writeQueues.putIfAbsent(shardKey, () {
+      _shardQueue.add(shardKey);
+      return <_MissingBlock>[];
+    });
+    bucket.add(block);
+    _queuedBlocks += 1;
+    _queuedBytes += block.bytes.length;
+    if (_wakeWriter != null && !_wakeWriter!.isCompleted) {
+      _wakeWriter!.complete();
+      _wakeWriter = null;
+    }
+  }
+
+  Duration _retryDelayForAttempt(int attempt) {
+    if (attempt <= 1) {
+      return retryBaseDelay;
+    }
+    var delay = retryBaseDelay;
+    for (var i = 1; i < attempt; i += 1) {
+      final doubledMs = delay.inMilliseconds * 2;
+      if (doubledMs >= retryMaxDelay.inMilliseconds) {
+        return retryMaxDelay;
+      }
+      delay = Duration(milliseconds: doubledMs);
+    }
+    return delay;
+  }
+
+  void _registerRetryFailure() {
+    final reduced = max(1, _targetConcurrentWrites - 1);
+    if (reduced < _targetConcurrentWrites) {
+      _applyConcurrencyLimit(reduced, reason: 'retry-failure');
+    }
+    _nextConcurrencyIncreaseAt = DateTime.now().add(retryConcurrencyCooldown);
+  }
+
+  void _maybeRecoverConcurrency() {
+    final next = _nextConcurrencyIncreaseAt;
+    if (next == null) {
+      return;
+    }
+    final now = DateTime.now();
+    if (now.isBefore(next)) {
+      return;
+    }
+    if (_targetConcurrentWrites < maxConcurrentWrites) {
+      final increased = _targetConcurrentWrites + 1;
+      _applyConcurrencyLimit(increased, reason: 'retry-recovery');
+    }
+    if (_targetConcurrentWrites < maxConcurrentWrites) {
+      _nextConcurrencyIncreaseAt = now.add(retryConcurrencyCooldown);
+      return;
+    }
+    _nextConcurrencyIncreaseAt = null;
+  }
+
+  void _applyConcurrencyLimit(int concurrency, {required String reason}) {
+    final next = max(1, min(maxConcurrentWrites, concurrency));
+    if (_targetConcurrentWrites == next && reason != 'start') {
+      return;
+    }
+    final previous = _targetConcurrentWrites;
+    _targetConcurrentWrites = next;
+    onConcurrencyLimitChanged(_targetConcurrentWrites);
+    LogWriter.logAgentSync(level: 'debug', message: 'worker=writer concurrency changed reason=$reason previous=$previous current=$_targetConcurrentWrites max=$maxConcurrentWrites');
+  }
+
+  Duration? _nextRetryWait() {
+    DateTime? earliest;
+    for (final shardKey in _shardQueue) {
+      final bucket = _writeQueues[shardKey];
+      if (bucket == null || bucket.isEmpty) {
+        continue;
+      }
+      final retryAt = bucket.first.retryAt;
+      if (earliest == null || retryAt.isBefore(earliest)) {
+        earliest = retryAt;
+      }
+    }
+    if (earliest == null) {
+      return null;
+    }
+    final now = DateTime.now();
+    if (!earliest.isAfter(now)) {
+      return Duration.zero;
+    }
+    final wait = earliest.difference(now);
+    return wait > const Duration(milliseconds: 250) ? const Duration(milliseconds: 250) : wait;
   }
 
   void _maybeLogLoopDebug(String reason, int inFlightWrites) {
@@ -210,4 +342,11 @@ class _WriterWorker {
     }
     return hash;
   }
+}
+
+class _InFlightWrite {
+  _InFlightWrite({required this.block, required this.future});
+
+  final _MissingBlock block;
+  final Future<void> future;
 }

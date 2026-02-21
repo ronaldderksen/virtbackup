@@ -66,6 +66,8 @@ abstract class BackupDriver {
   String sanitizeFileName(String name);
   Future<void> cleanupInProgressFiles();
   Future<void> closeConnections();
+
+  void setWriteConcurrencyLimit(int concurrency) {}
 }
 
 abstract class RemoteBlobDriver {

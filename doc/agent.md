@@ -131,7 +131,7 @@ Backup uses a single path:
 
 7. **Driver writes**
    - GDrive: blobs are uploaded as individual files under `blobs/<shard>/`.
-   - SFTP: operations use retry with exponential backoff (2s, 4s, 8s, ...) on transient failures.
+   - SFTP: operations perform a single write attempt per call; retry policy is owned by the writer worker.
    - Filesystem: blobs are written directly.
    - Dummy: blob existence is simulated per driver rules.
    - The agent maintains a per-backup blob cache outside the drivers; write decisions are made by this cache.
@@ -193,7 +193,7 @@ Backpressure is a combination of:
 - LIMIT is based on observed progress with a fixed lead window.
 - When SFTP reaches end-of-data for missing blocks, the agent sends one unlimited `LIMIT` to let hashblocks drain to `EOF`.
 - SFTP reads pause when writer queued bytes exceed the fixed threshold (512 MiB) and resume below it.
-- Writer concurrency: each driver sets its own max concurrent writes, which affects how fast the backlog drains.
+- Writer concurrency: the writer worker owns the active write concurrency and retries; drivers only expose write primitives and optional transport limits.
 
 ### Progress Tracking
 

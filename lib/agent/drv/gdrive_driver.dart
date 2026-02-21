@@ -400,6 +400,11 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     _uploadClientPool.closeAll();
   }
 
+  @override
+  void setWriteConcurrencyLimit(int concurrency) {
+    return;
+  }
+
   Future<void> _ensureBlobsRoot() async {
     if (_blobsRootId != null) {
       return;
@@ -739,51 +744,39 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }) async {
     try {
       Future<http.Response> startSession(String token) {
-        return _withRetry('upload session $name', () async {
-          final headers = _authHeaders(token)
-            ..['Content-Type'] = 'application/json; charset=UTF-8'
-            ..['X-Upload-Content-Type'] = 'application/octet-stream'
-            ..['X-Upload-Content-Length'] = bytes.length.toString();
-          final response = await _requestWithApiLog(
-            action: 'upload',
-            target: name,
-            detail: 'session',
-            method: 'POST',
-            uri: uri,
-            send: () => lease.client.post(
-              uri,
-              headers: headers,
-              body: jsonEncode({
-                'name': name,
-                'parents': [parentId],
-              }),
-            ),
-          );
-          if (response.statusCode >= 300 && response.statusCode != 401) {
-            throw _DriveHttpException('Drive upload session failed', response.statusCode, response.body);
-          }
-          return response;
-        }, onRetry: lease.resetClient);
+        final headers = _authHeaders(token)
+          ..['Content-Type'] = 'application/json; charset=UTF-8'
+          ..['X-Upload-Content-Type'] = 'application/octet-stream'
+          ..['X-Upload-Content-Length'] = bytes.length.toString();
+        return _requestWithApiLog(
+          action: 'upload',
+          target: name,
+          detail: 'session',
+          method: 'POST',
+          uri: uri,
+          send: () => lease.client.post(
+            uri,
+            headers: headers,
+            body: jsonEncode({
+              'name': name,
+              'parents': [parentId],
+            }),
+          ),
+        );
       }
 
       Future<http.Response> uploadData(Uri sessionUri, String token) {
-        return _withRetry('upload data $name', () async {
-          final headers = _authHeaders(token)
-            ..['Content-Type'] = 'application/octet-stream'
-            ..['Content-Length'] = bytes.length.toString();
-          final response = await _requestWithApiLog(
-            action: 'upload',
-            target: name,
-            detail: 'data',
-            method: 'PUT',
-            uri: sessionUri,
-            send: () => lease.client.put(sessionUri, headers: headers, body: bytes),
-          );
-          if (response.statusCode >= 300 && response.statusCode != 401) {
-            throw _DriveHttpException('Drive upload failed', response.statusCode, response.body);
-          }
-          return response;
-        }, onRetry: lease.resetClient);
+        final headers = _authHeaders(token)
+          ..['Content-Type'] = 'application/octet-stream'
+          ..['Content-Length'] = bytes.length.toString();
+        return _requestWithApiLog(
+          action: 'upload',
+          target: name,
+          detail: 'data',
+          method: 'PUT',
+          uri: sessionUri,
+          send: () => lease.client.put(sessionUri, headers: headers, body: bytes),
+        );
       }
 
       var token = await _ensureAccessToken();

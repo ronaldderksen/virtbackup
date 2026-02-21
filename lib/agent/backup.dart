@@ -93,6 +93,10 @@ class BackupAgent {
   DateTime? _backupStartAt;
   final int _blockSize;
   static const int _sftpPrefetchWindow = 2;
+  static const int _writerMaxRetryAttempts = 5;
+  static const Duration _writerRetryBaseDelay = Duration(seconds: 2);
+  static const Duration _writerRetryMaxDelay = Duration(seconds: 30);
+  static const Duration _writerRetryConcurrencyCooldown = Duration(minutes: 2);
   final Set<Future<void>> _inFlightWrites = {};
   final int? _writerConcurrencyOverride;
   _BlobDirectoryCache? _blobDirectoryCache;
@@ -168,8 +172,8 @@ class BackupAgent {
       await driver.ensureReady();
       final BlobDirectoryLister? blobLister = driver is BlobDirectoryLister ? driver as BlobDirectoryLister : null;
       _blobDirectoryCache = blobLister == null ? null : _BlobDirectoryCache(driver: blobLister, createShard: (hash) => driver.ensureBlobDir(hash));
-      _startBlobCacheWorker();
       await driver.prepareBackup(serverFolderName, vmFolderName);
+      _startBlobCacheWorker();
       final manifestsBase = Directory('${driver.storage}${Platform.pathSeparator}manifests${Platform.pathSeparator}$serverFolderName${Platform.pathSeparator}$vmFolderName');
       final timestampSeconds = DateTime.now().toIso8601String().split('.').first;
       final blockSizeMb = _blockSize ~/ (1024 * 1024);
@@ -792,6 +796,10 @@ class BackupAgent {
     writerWorker = _WriterWorker(
       maxConcurrentWrites: _writerConcurrencyOverride ?? max(1, driver.capabilities.maxConcurrentWrites),
       logInterval: agentLogInterval,
+      maxRetryAttempts: _writerMaxRetryAttempts,
+      retryBaseDelay: _writerRetryBaseDelay,
+      retryMaxDelay: _writerRetryMaxDelay,
+      retryConcurrencyCooldown: _writerRetryConcurrencyCooldown,
       driverBufferedBytes: () => driver.bufferedBytes,
       onMetrics: (queuedBytes, inFlightBytes, driverBufferedBytes) {
         _handleWriterMetrics(queuedBytes, inFlightBytes, driverBufferedBytes);
@@ -804,6 +812,7 @@ class BackupAgent {
       },
       scheduleWrite: (hash, bytes) => _scheduleWriteBlob(hash, bytes, driver),
       handlePhysicalBytes: _handlePhysicalBytes,
+      onConcurrencyLimitChanged: driver.setWriteConcurrencyLimit,
       isWriteReady: () => cache?.isWriteReady() ?? true,
       waitForWriteReady: cache?.waitForWriteReady,
     );

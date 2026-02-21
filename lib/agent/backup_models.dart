@@ -16,10 +16,12 @@ class _MissingEntry {
 }
 
 class _MissingBlock {
-  const _MissingBlock(this.hash, this.bytes);
+  _MissingBlock(this.hash, this.bytes) : attempt = 0, retryAt = DateTime.now();
 
   final String hash;
   final Uint8List bytes;
+  int attempt;
+  DateTime retryAt;
 }
 
 class _BackupCanceled implements Exception {

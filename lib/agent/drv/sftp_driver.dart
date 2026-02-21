@@ -13,8 +13,6 @@ import 'package:virtbackup/common/models.dart' show BackupStorage;
 import 'package:virtbackup/common/settings.dart';
 
 class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
-  static const Duration _writeConcurrencyCooldown = Duration(minutes: 2);
-
   SftpBackupDriver({required AppSettings settings, int? poolSessions})
     : _settings = settings,
       _cacheRoot = _cacheRootForSettings(settings),
@@ -34,9 +32,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   final _SftpPool _pool;
   final _SftpPool _blobCachePool = _SftpPool(maxSessions: _blobCacheReservedSessions);
   final _NativeSftpPool _nativePool;
-  late int _effectiveWriteConcurrency = _maxConcurrentWrites;
-  DateTime? _nextWriteConcurrencyIncreaseAt;
-  Timer? _writeConcurrencyRecoveryTimer;
 
   Map<String, dynamic> get _params => _resolveSelectedSftpStorage(_settings).params;
   String get _host => (_params['host'] ?? '').toString().trim();
@@ -429,12 +424,17 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   @override
   Future<void> closeConnections() async {
-    _writeConcurrencyRecoveryTimer?.cancel();
-    _writeConcurrencyRecoveryTimer = null;
-    _nextWriteConcurrencyIncreaseAt = null;
     _pool.closeAll();
     _blobCachePool.closeAll();
     _nativePool.closeAll();
+  }
+
+  @override
+  void setWriteConcurrencyLimit(int concurrency) {
+    if (concurrency <= 0) {
+      throw StateError('SFTP write concurrency must be greater than zero.');
+    }
+    _pool.setMaxSessions(concurrency);
   }
 
   Future<_SshSftpSession> _connect() async {
@@ -604,58 +604,56 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
 
   Future<void> _writeBlobWithTiming({required String hash, required String remoteTemp, required String remotePath, required Uint8List data}) async {
     final label = 'write blob $hash';
-    return _withRetry(label, () async {
-      final pool = _poolForLabel(label);
-      final lease = await pool.lease(_connect);
-      final opStopwatch = Stopwatch()..start();
-      _logDebug('driver=sftp op start label="$label" mode=${_nativeSftp != null ? 'native' : 'dartssh2'} lease={${_formatLeaseMetrics(lease.metrics)}}');
-      var released = false;
-      try {
-        if (_nativeSftp != null) {
-          await _nativeWriteAll(remoteTemp, data, truncate: true);
-        } else {
-          final remoteFile = await _remoteOpen(lease.sftp, remoteTemp, SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate);
-          try {
-            await _remoteWriteAll(remoteFile, remoteTemp, data);
-          } finally {
-            await _remoteCloseFile(remoteFile, remoteTemp);
-          }
-        }
+    final pool = _poolForLabel(label);
+    final lease = await pool.lease(_connect);
+    final opStopwatch = Stopwatch()..start();
+    _logDebug('driver=sftp op start label="$label" mode=${_nativeSftp != null ? 'native' : 'dartssh2'} lease={${_formatLeaseMetrics(lease.metrics)}}');
+    var released = false;
+    try {
+      if (_nativeSftp != null) {
+        await _nativeWriteAll(remoteTemp, data, truncate: true);
+      } else {
+        final remoteFile = await _remoteOpen(lease.sftp, remoteTemp, SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate);
         try {
-          await _remoteRename(lease.sftp, remoteTemp, remotePath);
-        } catch (error) {
-          if (_isSftpFailureCode(error, 4)) {
-            _logDebug('driver=sftp rename code=4 label="$label" remotePath="$remotePath" checking idempotent-success');
-            final recovered = await _isRenameIdempotentSuccess(sftp: lease.sftp, hash: hash, remotePath: remotePath, expectedBytes: data.length);
-            if (recovered) {
-              _logDebug('driver=sftp rename recovered label="$label" remotePath="$remotePath"');
-              lease.release();
-              released = true;
-              opStopwatch.stop();
-              _logDebug('driver=sftp op success label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}}');
-              return;
-            }
-            _logDebug('driver=sftp rename recovery failed label="$label" remotePath="$remotePath"');
-          }
-          await _tryRemoveRemoteFile(lease.sftp, remoteTemp);
-          rethrow;
-        }
-        lease.release();
-        released = true;
-        opStopwatch.stop();
-        _logDebug('driver=sftp op success label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}}');
-      } catch (error) {
-        opStopwatch.stop();
-        _logDebug('driver=sftp op failed label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}} error=$error');
-        lease.invalidate();
-        released = true;
-        rethrow;
-      } finally {
-        if (!released) {
-          lease.release();
+          await _remoteWriteAll(remoteFile, remoteTemp, data);
+        } finally {
+          await _remoteCloseFile(remoteFile, remoteTemp);
         }
       }
-    });
+      try {
+        await _remoteRename(lease.sftp, remoteTemp, remotePath);
+      } catch (error) {
+        if (_isSftpFailureCode(error, 4)) {
+          _logDebug('driver=sftp rename code=4 label="$label" remotePath="$remotePath" checking idempotent-success');
+          final recovered = await _isRenameIdempotentSuccess(sftp: lease.sftp, hash: hash, remotePath: remotePath, expectedBytes: data.length);
+          if (recovered) {
+            _logDebug('driver=sftp rename recovered label="$label" remotePath="$remotePath"');
+            lease.release();
+            released = true;
+            opStopwatch.stop();
+            _logDebug('driver=sftp op success label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}}');
+            return;
+          }
+          _logDebug('driver=sftp rename recovery failed label="$label" remotePath="$remotePath"');
+        }
+        await _tryRemoveRemoteFile(lease.sftp, remoteTemp);
+        rethrow;
+      }
+      lease.release();
+      released = true;
+      opStopwatch.stop();
+      _logDebug('driver=sftp op success label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}}');
+    } catch (error) {
+      opStopwatch.stop();
+      _logDebug('driver=sftp op failed label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}} error=$error');
+      lease.invalidate();
+      released = true;
+      rethrow;
+    } finally {
+      if (!released) {
+        lease.release();
+      }
+    }
   }
 
   bool _isSftpFailureCode(Object error, int code) {
@@ -679,117 +677,29 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   }
 
   Future<T> _withSftp<T>(String label, Future<T> Function(SftpClient sftp) action) async {
-    return _withRetry(label, () async {
-      final pool = _poolForLabel(label);
-      final lease = await pool.lease(_connect);
-      final opStopwatch = Stopwatch()..start();
-      _logDebug('driver=sftp op start label="$label" mode=dartssh2 lease={${_formatLeaseMetrics(lease.metrics)}}');
-      var released = false;
-      try {
-        final result = await action(lease.sftp);
-        opStopwatch.stop();
-        _logDebug('driver=sftp op success label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}}');
+    final pool = _poolForLabel(label);
+    final lease = await pool.lease(_connect);
+    final opStopwatch = Stopwatch()..start();
+    _logDebug('driver=sftp op start label="$label" mode=dartssh2 lease={${_formatLeaseMetrics(lease.metrics)}}');
+    var released = false;
+    try {
+      final result = await action(lease.sftp);
+      opStopwatch.stop();
+      _logDebug('driver=sftp op success label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}}');
+      lease.release();
+      released = true;
+      return result;
+    } catch (error) {
+      opStopwatch.stop();
+      _logDebug('driver=sftp op failed label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}} error=$error');
+      lease.invalidate();
+      released = true;
+      rethrow;
+    } finally {
+      if (!released) {
         lease.release();
-        released = true;
-        return result;
-      } catch (error) {
-        opStopwatch.stop();
-        _logDebug('driver=sftp op failed label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}} error=$error');
-        lease.invalidate();
-        released = true;
-        rethrow;
-      } finally {
-        if (!released) {
-          lease.release();
-        }
-      }
-    });
-  }
-
-  Future<T> _withRetry<T>(String label, Future<T> Function() action) async {
-    var delaySeconds = 2;
-    var attempt = 0;
-    const maxRetries = 5;
-    final enableWriteConcurrencyCooldown = label.startsWith('write blob ');
-    while (true) {
-      try {
-        return await action();
-      } catch (error, stackTrace) {
-        if (attempt >= maxRetries) {
-          LogWriter.logAgentSync(level: 'debug', message: 'driver=sftp retry failed label="$label" attempt=${attempt + 1}/${maxRetries + 1} error=$error');
-          LogWriter.logAgentSync(level: 'debug', message: stackTrace.toString());
-          rethrow;
-        }
-        _logDebug('driver=sftp retry invalidating pools sftp={${_pool.debugState()}} blob={${_blobCachePool.debugState()}} native={${_nativePool.debugState()}}');
-        _pool.invalidateIdle();
-        _blobCachePool.invalidateIdle();
-        _nativePool.invalidateIdle();
-        if (enableWriteConcurrencyCooldown) {
-          _registerWriteRetryFailure();
-        }
-        final nextAttempt = attempt + 1;
-        LogWriter.logAgentSync(level: 'debug', message: 'driver=sftp retrying label="$label" attempt=${nextAttempt + 1}/${maxRetries + 1} delay=${delaySeconds}s error=$error');
-        LogWriter.logAgentSync(level: 'debug', message: stackTrace.toString());
-        attempt += 1;
-        await Future.delayed(Duration(seconds: delaySeconds));
-        delaySeconds *= 2;
       }
     }
-  }
-
-  void _registerWriteRetryFailure() {
-    final now = DateTime.now();
-    final previous = _effectiveWriteConcurrency;
-    if (_effectiveWriteConcurrency > 1) {
-      _effectiveWriteConcurrency -= 1;
-      _pool.setMaxSessions(_effectiveWriteConcurrency);
-    }
-    _nextWriteConcurrencyIncreaseAt = now.add(_writeConcurrencyCooldown);
-    _scheduleWriteConcurrencyRecovery();
-    if (_effectiveWriteConcurrency != previous) {
-      _logDebug('driver=sftp write concurrency decreased previous=$previous current=$_effectiveWriteConcurrency max=$_maxConcurrentWrites cooldownSec=${_writeConcurrencyCooldown.inSeconds}');
-      return;
-    }
-    _logDebug('driver=sftp write concurrency already at minimum current=$_effectiveWriteConcurrency max=$_maxConcurrentWrites cooldownSec=${_writeConcurrencyCooldown.inSeconds}');
-  }
-
-  void _scheduleWriteConcurrencyRecovery() {
-    _writeConcurrencyRecoveryTimer?.cancel();
-    final nextAt = _nextWriteConcurrencyIncreaseAt;
-    if (nextAt == null) {
-      return;
-    }
-    var delay = nextAt.difference(DateTime.now());
-    if (delay.isNegative) {
-      delay = Duration.zero;
-    }
-    _writeConcurrencyRecoveryTimer = Timer(delay, _onWriteConcurrencyRecoveryTick);
-  }
-
-  void _onWriteConcurrencyRecoveryTick() {
-    final nextAt = _nextWriteConcurrencyIncreaseAt;
-    if (nextAt == null) {
-      return;
-    }
-    final now = DateTime.now();
-    if (now.isBefore(nextAt)) {
-      _scheduleWriteConcurrencyRecovery();
-      return;
-    }
-    if (_effectiveWriteConcurrency < _maxConcurrentWrites) {
-      final previous = _effectiveWriteConcurrency;
-      _effectiveWriteConcurrency += 1;
-      _pool.setMaxSessions(_effectiveWriteConcurrency);
-      _logDebug('driver=sftp write concurrency increased previous=$previous current=$_effectiveWriteConcurrency max=$_maxConcurrentWrites cooldownSec=${_writeConcurrencyCooldown.inSeconds}');
-    }
-    if (_effectiveWriteConcurrency < _maxConcurrentWrites) {
-      _nextWriteConcurrencyIncreaseAt = now.add(_writeConcurrencyCooldown);
-      _scheduleWriteConcurrencyRecovery();
-      return;
-    }
-    _nextWriteConcurrencyIncreaseAt = null;
-    _writeConcurrencyRecoveryTimer?.cancel();
-    _writeConcurrencyRecoveryTimer = null;
   }
 
   String _formatLeaseMetrics(_SftpLeaseMetrics metrics) {

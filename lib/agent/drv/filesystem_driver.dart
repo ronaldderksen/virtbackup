@@ -230,6 +230,11 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
     return;
   }
 
+  @override
+  void setWriteConcurrencyLimit(int concurrency) {
+    return;
+  }
+
   Future<void> _deleteDirIfExists(Directory dir) async {
     if (!await dir.exists()) {
       return;

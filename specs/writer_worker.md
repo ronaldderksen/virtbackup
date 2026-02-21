@@ -10,6 +10,8 @@
 - `waitForAnyShardReady()`
 - Write execution callback:
 - `scheduleWrite(hash, bytes)`
+- Concurrency limit callback:
+- `onConcurrencyLimitChanged(concurrency)`
 - Metrics callback:
 - `onMetrics(queuedBytes, inFlightBytes, driverBufferedBytes)`
 - Physical progress callback:
@@ -30,15 +32,17 @@
 - If queue is empty but writes are still in flight: drain completed writes.
 - If queue has data:
 - iterate shard queue
-- skip shards that are not ready
-- schedule writes while `inFlight < maxConcurrentWrites`
+- schedule writes while `inFlight < targetConcurrentWrites`
+- honor per-block `retryAt` delays before rescheduling failed writes
 - If nothing could be scheduled:
 - if in-flight exists: drain one completed write
 - else wait for shard-ready signal (bounded by short timeout polling)
 
-## Shard-ready contract
-- Writer does not write a shard unless `isShardReady(shardKey)` is true.
-- If no shard is ready while queue is non-empty, worker waits using `waitForAnyShardReady()` with fallback timeout polling.
+## Retry and cooldown ownership
+- Writer owns retry policy for `scheduleWrite` failures.
+- Failed writes are re-queued with exponential backoff.
+- After a failure, writer lowers `targetConcurrentWrites` (minimum `1`) and notifies driver via `onConcurrencyLimitChanged`.
+- Writer increases concurrency in cooldown steps until `maxConcurrentWrites` is restored.
 
 ## Backpressure behavior
 - Backlog bytes = `queuedBytes + inFlightBytes + driverBufferedBytes()`.
@@ -47,8 +51,8 @@
 - `waitForBackpressureClear()` blocks upstream readers while backpressure is active.
 
 ## Timeouts and errors
-- Each scheduled write has `blockTimeout`.
-- Timeout or write error sets worker error state.
+- A write failure is retried until `maxRetryAttempts` is reached.
+- When retry budget is exhausted, worker sets error state.
 - On error:
 - writer loop aborts
 - waiters are released
@@ -61,10 +65,9 @@
 - reason (`scheduled`, `drain-inflight`, `wait-shard-ready`)
 - queued blocks/bytes
 - in-flight bytes
-- shard counts and schedulable shard count
-- backpressure state
+- current/maximum concurrency
 
 ## Output guarantees
-- Every enqueued block is attempted exactly once unless the worker errors.
+- Every enqueued block is attempted at least once, and retried until success or retry budget exhaustion.
 - Physical bytes are counted only when a write future completes successfully.
 - Worker does not reorder blocks within the same shard bucket beyond FIFO dequeue behavior.
