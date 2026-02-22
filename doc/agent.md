@@ -48,6 +48,7 @@ Key modules under `lib/agent`:
 3. Restore stream uploads reconstructed data to remote disks via SFTP.
 4. VM XML is uploaded and defined with `virsh define`.
 5. Restore download concurrency is owned by the restore worker; drivers only receive an explicit read-concurrency limit.
+6. Full check now runs through the same restore worker blob pipeline as restore (`_blobStream`) and only forks at the final step: restore uploads the stream, full check hashes each emitted block and validates manifest SHA-256 values.
 
 ### Events
 

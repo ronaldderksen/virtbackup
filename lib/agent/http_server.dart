@@ -1803,11 +1803,103 @@ class AgentHttpServer {
   }
 
   void _startSanityCheckJob(String jobId, String xmlPath, String timestamp, {required _ResolvedStorage storage}) {
-    _startRestoreCheckJob(jobId, xmlPath, timestamp, storage: storage, mode: _RestoreCheckMode.full);
+    final driverInfo = _driverCatalog[storage.driverId] ?? _driverCatalog['filesystem']!;
+    final backupPath = storage.backupPath;
+    if (driverInfo.usesPath && backupPath.isEmpty) {
+      final current = _jobs[jobId];
+      if (current != null) {
+        _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: 'Backup path is empty.'));
+      }
+      return;
+    }
+    _setJobContext(jobId, source: xmlPath, driverLabel: driverInfo.label);
+    final control = _jobControls[jobId];
+    if (control == null) {
+      return;
+    }
+    final workerReceive = ReceivePort();
+    control.workerReceivePort = workerReceive;
+    unawaited(
+      Isolate.spawn(restoreWorkerMain, {'sendPort': workerReceive.sendPort}).then((isolate) {
+        control.workerIsolate = isolate;
+      }),
+    );
+    workerReceive.listen((message) async {
+      final payload = Map<String, dynamic>.from(message as Map);
+      final type = payload['type']?.toString();
+      if (type == 'ready') {
+        control.workerSendPort = payload['sendPort'] as SendPort?;
+        control.workerSendPort?.send({
+          'type': 'start',
+          'jobId': jobId,
+          'driverId': storage.driverId,
+          'backupPath': backupPath,
+          'decision': 'full_check',
+          'xmlPath': xmlPath,
+          'timestamp': timestamp,
+          'settings': storage.settings.toMap(),
+          'storage': storage.storage.toMap(),
+          'server': _missingServer().toMap(),
+        });
+        return;
+      }
+      if (type == 'status') {
+        final status = AgentJobStatus.fromMap(Map<String, dynamic>.from(payload['status'] as Map));
+        _updateJob(jobId, _toSanityJobStatus(status));
+        return;
+      }
+      if (type == 'context') {
+        _setJobContext(jobId, source: payload['source']?.toString(), target: payload['target']?.toString());
+        return;
+      }
+      if (type == 'settings') {
+        final updated = AppSettings.fromMap(Map<String, dynamic>.from(payload['settings'] as Map));
+        unawaited(_applyAgentSettings(updated, reason: 'worker', forceRestartSshListeners: false));
+        return;
+      }
+      if (type == 'result') {
+        final status = AgentJobStatus.fromMap(Map<String, dynamic>.from(payload['status'] as Map));
+        final sanityStatus = _toSanityJobStatus(status);
+        _updateJob(jobId, sanityStatus);
+        _notifyNtfymeJobCompletion(jobId, type: AgentJobType.sanity, state: sanityStatus.state, message: sanityStatus.message);
+        workerReceive.close();
+        control.workerReceivePort = null;
+        control.workerSendPort = null;
+        control.workerIsolate?.kill(priority: Isolate.immediate);
+        control.workerIsolate = null;
+      }
+    });
   }
 
   void _startQuickCheckJob(String jobId, String xmlPath, String timestamp, {required _ResolvedStorage storage}) {
     _startRestoreCheckJob(jobId, xmlPath, timestamp, storage: storage, mode: _RestoreCheckMode.quick);
+  }
+
+  AgentJobStatus _toSanityJobStatus(AgentJobStatus status) {
+    return AgentJobStatus(
+      id: status.id,
+      type: AgentJobType.sanity,
+      state: status.state,
+      message: status.message,
+      totalUnits: status.totalUnits,
+      completedUnits: status.completedUnits,
+      bytesTransferred: status.bytesTransferred,
+      speedBytesPerSec: status.speedBytesPerSec,
+      averageSpeedBytesPerSec: status.averageSpeedBytesPerSec,
+      physicalBytesTransferred: status.physicalBytesTransferred,
+      physicalSpeedBytesPerSec: status.physicalSpeedBytesPerSec,
+      averagePhysicalSpeedBytesPerSec: status.averagePhysicalSpeedBytesPerSec,
+      totalBytes: status.totalBytes,
+      sanityBytesTransferred: status.sanityBytesTransferred,
+      sanitySpeedBytesPerSec: status.sanitySpeedBytesPerSec,
+      etaSeconds: status.etaSeconds,
+      physicalRemainingBytes: status.physicalRemainingBytes,
+      physicalTotalBytes: status.physicalTotalBytes,
+      physicalProgressPercent: status.physicalProgressPercent,
+      writerQueuedBytes: status.writerQueuedBytes,
+      writerInFlightBytes: status.writerInFlightBytes,
+      driverBufferedBytes: status.driverBufferedBytes,
+    );
   }
 
   void _startRestoreCheckJob(String jobId, String xmlPath, String timestamp, {required _ResolvedStorage storage, required _RestoreCheckMode mode}) {

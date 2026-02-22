@@ -97,6 +97,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     final driverId = payload['driverId']?.toString() ?? 'filesystem';
     final backupPath = payload['backupPath']?.toString() ?? '';
     final decision = payload['decision']?.toString() ?? 'overwrite';
+    final fullCheckOnly = decision == 'full_check';
     final xmlPath = payload['xmlPath']?.toString() ?? '';
     final settingsMap = Map<String, dynamic>.from(payload['settings'] as Map? ?? const {});
     final storageMap = Map<String, dynamic>.from(payload['storage'] as Map? ?? const {});
@@ -150,9 +151,13 @@ void restoreWorkerMain(Map<String, dynamic> init) {
       throw 'restore blob cache failed: filesystem storage path is empty';
     }
     final xmlFile = File(xmlPath);
+    var largeTransferSessionStarted = false;
 
     try {
-      await host.beginLargeTransferSession(server);
+      if (!fullCheckOnly) {
+        await host.beginLargeTransferSession(server);
+        largeTransferSessionStarted = true;
+      }
       final vmName = _extractVmNameFromXmlPath(xmlPath);
       if (vmName.isNotEmpty) {
         mainPort.send({'type': _typeContext, 'jobId': jobId, 'source': xmlPath, 'target': '${server.name}:$vmName'});
@@ -219,13 +224,13 @@ void restoreWorkerMain(Map<String, dynamic> init) {
       }
       final chainRebases = _collectChainRebases(allManifestData, remoteDiskTargets.map((item) => item.remotePath).toSet());
 
-      if (decision == 'overwrite') {
+      if (!fullCheckOnly && decision == 'overwrite') {
         ensureNotCanceled();
         await host.runSshCommand(server, 'virsh destroy "$vmName" || true');
         await host.runSshCommand(server, 'virsh undefine "$vmName" --nvram || true');
       }
 
-      if (decision == 'define') {
+      if (!fullCheckOnly && decision == 'define') {
         await defineOnly(jobId, host, server, xmlFile, xmlContent, timestamp, vmName);
         sendResult(
           AgentJobStatus(
@@ -256,13 +261,25 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           totalBytes += target.blocks.length * target.blockSize;
         }
       }
+      var totalCheckBlocks = 0;
+      if (fullCheckOnly) {
+        for (final target in remoteDiskTargets) {
+          for (final block in target.blocks) {
+            final hash = block.hash;
+            if (block.zeroRun || hash == null || hash.isEmpty) {
+              continue;
+            }
+            totalCheckBlocks += 1;
+          }
+        }
+      }
       sendStatus(
         AgentJobStatus(
           id: jobId,
           type: AgentJobType.restore,
           state: AgentJobState.running,
-          message: 'Preparing restore...',
-          totalUnits: totalBytes,
+          message: fullCheckOnly ? 'Sanity check...' : 'Preparing restore...',
+          totalUnits: fullCheckOnly ? totalCheckBlocks : totalBytes,
           completedUnits: 0,
           bytesTransferred: 0,
           speedBytesPerSec: 0,
@@ -276,6 +293,9 @@ void restoreWorkerMain(Map<String, dynamic> init) {
 
       var bytesTransferred = 0;
       final speedTicker = _SpeedTicker();
+      var checkedBlocks = 0;
+      var mismatches = 0;
+      var lastCheckProgressUpdate = DateTime.now();
 
       for (var i = 0; i < remoteDiskTargets.length; i += 1) {
         ensureNotCanceled();
@@ -286,9 +306,9 @@ void restoreWorkerMain(Map<String, dynamic> init) {
             id: jobId,
             type: AgentJobType.restore,
             state: AgentJobState.running,
-            message: 'Uploading disk ${i + 1} of ${remoteDiskTargets.length}...',
-            totalUnits: totalBytes,
-            completedUnits: 0,
+            message: fullCheckOnly ? 'Sanity check: ${target.diskBaseName}' : 'Uploading disk ${i + 1} of ${remoteDiskTargets.length}...',
+            totalUnits: fullCheckOnly ? totalCheckBlocks : totalBytes,
+            completedUnits: fullCheckOnly ? checkedBlocks : 0,
             bytesTransferred: bytesTransferred,
             speedBytesPerSec: 0,
             physicalBytesTransferred: 0,
@@ -298,12 +318,6 @@ void restoreWorkerMain(Map<String, dynamic> init) {
             sanitySpeedBytesPerSec: 0,
           ),
         );
-        final parts = remotePath.split('/');
-        final remoteDir = parts.length > 1 ? parts.sublist(0, parts.length - 1).join('/') : '';
-        if (remoteDir.isNotEmpty) {
-          await host.runSshCommand(server, 'mkdir -p "$remoteDir"');
-        }
-        await host.runSshCommand(server, 'rm -f "$remotePath"');
         final blobStream = _blobStream(
           blobDriversByBlockSizeMB.putIfAbsent(target.blockSizeMB, () {
             final driverSettings = settings.copyWith(blockSizeMB: target.blockSizeMB);
@@ -320,6 +334,74 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           storeDownloadedBlobs: storeDownloadedBlobs,
           maxConcurrentDownloads: downloadConcurrency,
         );
+        if (fullCheckOnly) {
+          final streamIterator = StreamIterator<List<int>>(blobStream);
+          try {
+            var blockIndex = 0;
+            for (final block in target.blocks) {
+              ensureNotCanceled();
+              final expectedLength = target.fileSize == null ? target.blockSize : _blockLengthForIndex(blockIndex, target.fileSize!, target.blockSize);
+              if (expectedLength <= 0) {
+                blockIndex += 1;
+                continue;
+              }
+              if (!await streamIterator.moveNext()) {
+                throw 'Sanity check stream ended early for ${target.diskBaseName} at block index=$blockIndex';
+              }
+              final bytes = streamIterator.current;
+              if (bytes.length != expectedLength) {
+                throw 'Sanity check stream length mismatch for ${target.diskBaseName} at block index=$blockIndex: expected=$expectedLength got=${bytes.length}';
+              }
+              bytesTransferred += bytes.length;
+              final speed = speedTicker.tick(bytes.length);
+              final hash = block.hash;
+              if (!block.zeroRun && hash != null && hash.isNotEmpty) {
+                checkedBlocks += 1;
+                final hashInput = Uint8List.fromList(bytes);
+                final actual = host.sha256Hex(hashInput);
+                if (actual != hash) {
+                  mismatches += 1;
+                  LogWriter.logAgentSync(level: 'info', message: 'Sanity check hash mismatch disk=${target.diskBaseName} index=$blockIndex expected=$hash got=$actual');
+                }
+              }
+              final now = DateTime.now();
+              if (now.difference(lastCheckProgressUpdate).inMilliseconds >= 500) {
+                lastCheckProgressUpdate = now;
+                sendStatus(
+                  AgentJobStatus(
+                    id: jobId,
+                    type: AgentJobType.restore,
+                    state: AgentJobState.running,
+                    message: 'Sanity check: ${target.diskBaseName}',
+                    totalUnits: totalCheckBlocks,
+                    completedUnits: checkedBlocks,
+                    bytesTransferred: bytesTransferred,
+                    speedBytesPerSec: speed,
+                    physicalBytesTransferred: 0,
+                    physicalSpeedBytesPerSec: 0,
+                    totalBytes: totalBytes,
+                    sanityBytesTransferred: 0,
+                    sanitySpeedBytesPerSec: 0,
+                  ),
+                );
+              }
+              blockIndex += 1;
+            }
+            if (await streamIterator.moveNext()) {
+              throw 'Sanity check stream produced extra bytes for ${target.diskBaseName}';
+            }
+          } finally {
+            await streamIterator.cancel();
+          }
+          continue;
+        }
+
+        final parts = remotePath.split('/');
+        final remoteDir = parts.length > 1 ? parts.sublist(0, parts.length - 1).join('/') : '';
+        if (remoteDir.isNotEmpty) {
+          await host.runSshCommand(server, 'mkdir -p "$remoteDir"');
+        }
+        await host.runSshCommand(server, 'rm -f "$remotePath"');
         await host.uploadRemoteStream(
           server,
           remotePath,
@@ -361,6 +443,28 @@ void restoreWorkerMain(Map<String, dynamic> init) {
             throw 'restore size check failed for ${target.diskBaseName}: $error';
           }
         }
+      }
+
+      if (fullCheckOnly) {
+        final resultMessage = mismatches == 0 ? 'Sanity check OK ($checkedBlocks blocks checked)' : 'Sanity check: $mismatches mismatch(es) out of $checkedBlocks blocks';
+        sendResult(
+          AgentJobStatus(
+            id: jobId,
+            type: AgentJobType.restore,
+            state: AgentJobState.success,
+            message: resultMessage,
+            totalUnits: totalCheckBlocks,
+            completedUnits: checkedBlocks,
+            bytesTransferred: bytesTransferred,
+            speedBytesPerSec: 0,
+            physicalBytesTransferred: 0,
+            physicalSpeedBytesPerSec: 0,
+            totalBytes: totalBytes,
+            sanityBytesTransferred: 0,
+            sanitySpeedBytesPerSec: 0,
+          ),
+        );
+        return;
       }
 
       if (chainRebases.isNotEmpty) {
@@ -441,7 +545,9 @@ void restoreWorkerMain(Map<String, dynamic> init) {
       try {
         await metadataDriver.closeConnections();
       } catch (_) {}
-      await host.endLargeTransferSession(server);
+      if (largeTransferSessionStarted) {
+        await host.endLargeTransferSession(server);
+      }
     }
   }
 
