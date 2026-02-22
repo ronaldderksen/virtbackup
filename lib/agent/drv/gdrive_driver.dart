@@ -405,6 +405,11 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return;
   }
 
+  @override
+  void setReadConcurrencyLimit(int concurrency) {
+    return;
+  }
+
   Future<void> _ensureBlobsRoot() async {
     if (_blobsRootId != null) {
       return;

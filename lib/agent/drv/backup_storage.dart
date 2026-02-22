@@ -68,6 +68,8 @@ abstract class BackupDriver {
   Future<void> closeConnections();
 
   void setWriteConcurrencyLimit(int concurrency) {}
+
+  void setReadConcurrencyLimit(int concurrency) {}
 }
 
 abstract class RemoteBlobDriver {

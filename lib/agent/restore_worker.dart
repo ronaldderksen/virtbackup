@@ -136,7 +136,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           logInfo: (message) => LogWriter.logAgentSync(level: 'info', message: message),
         ),
         'filesystem': () => FilesystemBackupDriver(backupPath.trim(), blockSizeMB: driverSettings.blockSizeMB),
-        'sftp': () => SftpBackupDriver(settings: driverSettings, poolSessions: downloadConcurrency),
+        'sftp': () => SftpBackupDriver(settings: driverSettings),
       };
       final factory = factories[driverId] ?? factories['filesystem']!;
       return factory();
@@ -829,6 +829,7 @@ Stream<List<int>> _blobStream(
   if (maxConcurrentDownloads <= 0) {
     throw StateError('restore downloadConcurrency must be greater than 0.');
   }
+  driver.setReadConcurrencyLimit(maxConcurrentDownloads);
   final localBlobCache = _BlobReadCache(maxBytes: 512 * 1024 * 1024);
   final debug = _RestorePipelineDebug(mode: driver is RemoteBlobDriver ? 'remote' : 'local');
   var totalEmitted = 0;

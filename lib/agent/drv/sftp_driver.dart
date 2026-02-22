@@ -437,6 +437,14 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     _pool.setMaxSessions(concurrency);
   }
 
+  @override
+  void setReadConcurrencyLimit(int concurrency) {
+    if (concurrency <= 0) {
+      throw StateError('SFTP read concurrency must be greater than zero.');
+    }
+    _nativePool.setMaxSessions(concurrency);
+  }
+
   Future<_SshSftpSession> _connect() async {
     final opStopwatch = Stopwatch()..start();
     _logDebug('connect start host=$_host port=$_port user=$_username');
@@ -1246,16 +1254,25 @@ class _NativeSftpLease {
 }
 
 class _NativeSftpPool {
-  _NativeSftpPool({required this.maxSessions});
+  _NativeSftpPool({required int maxSessions}) : _maxSessions = maxSessions;
 
   static const Duration _maxSessionAge = Duration(minutes: 10);
 
-  final int maxSessions;
+  int _maxSessions;
+  int get maxSessions => _maxSessions;
   final List<_NativeSftpSession> _idle = <_NativeSftpSession>[];
   final List<_NativeSftpSession> _all = <_NativeSftpSession>[];
   final List<_NativeSftpLeaseWaiter> _waiters = <_NativeSftpLeaseWaiter>[];
   bool _closed = false;
   var _connecting = 0;
+
+  void setMaxSessions(int value) {
+    if (value <= 0) {
+      throw StateError('Native SFTP pool maxSessions must be greater than zero.');
+    }
+    _maxSessions = value;
+    _tryStartWaiterConnects();
+  }
 
   Future<_NativeSftpLease> lease(Future<_NativeSftpSession> Function() connect) async {
     if (_closed) {
@@ -1352,6 +1369,7 @@ class _NativeSftpPool {
     try {
       session.close();
     } catch (_) {}
+    _tryStartWaiterConnects();
   }
 
   void invalidateIdle() {
@@ -1385,6 +1403,15 @@ class _NativeSftpPool {
 
   String debugState() {
     return 'max=$maxSessions all=${_all.length} idle=${_idle.length} waiters=${_waiters.length} connecting=$_connecting closed=$_closed';
+  }
+
+  void _tryStartWaiterConnects() {
+    if (_closed) {
+      return;
+    }
+    while (_waiters.isNotEmpty && _all.length + _connecting < _maxSessions) {
+      _fulfillWaiterWithConnect(_waiters.removeAt(0));
+    }
   }
 }
 

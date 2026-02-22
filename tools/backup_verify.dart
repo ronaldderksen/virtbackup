@@ -18,7 +18,6 @@ class _Args {
     required this.targetHost,
     required this.sshUser,
     required this.pollInterval,
-    required this.timeout,
     required this.sourceHostExplicit,
     required this.targetHostExplicit,
     required this.skipRestore,
@@ -42,7 +41,6 @@ class _Args {
   final String targetHost;
   final String sshUser;
   final Duration pollInterval;
-  final Duration timeout;
   final bool sourceHostExplicit;
   final bool targetHostExplicit;
   final bool skipRestore;
@@ -66,7 +64,6 @@ class _Args {
     String? targetHost,
     String? sshUser,
     Duration? pollInterval,
-    Duration? timeout,
     bool? sourceHostExplicit,
     bool? targetHostExplicit,
     bool? skipRestore,
@@ -90,7 +87,6 @@ class _Args {
       targetHost: targetHost ?? this.targetHost,
       sshUser: sshUser ?? this.sshUser,
       pollInterval: pollInterval ?? this.pollInterval,
-      timeout: timeout ?? this.timeout,
       sourceHostExplicit: sourceHostExplicit ?? this.sourceHostExplicit,
       targetHostExplicit: targetHostExplicit ?? this.targetHostExplicit,
       skipRestore: skipRestore ?? this.skipRestore,
@@ -431,7 +427,6 @@ _Args? _parseArgs(List<String> args) {
   var sshUser = 'root';
   String? sshKeyPath;
   var pollInterval = const Duration(seconds: 5);
-  var timeout = const Duration(hours: 2);
   var sourceHostExplicit = false;
   var targetHostExplicit = false;
   var skipRestore = false;
@@ -476,9 +471,6 @@ _Args? _parseArgs(List<String> args) {
         break;
       case '--poll-interval':
         pollInterval = Duration(seconds: _parsePositiveSeconds(_readValue(args, ++i, arg), arg));
-        break;
-      case '--timeout-minutes':
-        timeout = Duration(minutes: int.parse(_readValue(args, ++i, arg)));
         break;
       case '--no-restore':
         skipRestore = true;
@@ -534,7 +526,6 @@ _Args? _parseArgs(List<String> args) {
     sshUser: sshUser,
     sshKeyPath: sshKeyPath,
     pollInterval: pollInterval,
-    timeout: timeout,
     sourceHostExplicit: sourceHostExplicit,
     targetHostExplicit: targetHostExplicit,
     skipRestore: skipRestore,
@@ -831,13 +822,8 @@ Future<_JobStatus> _fetchJob(http.Client client, _Args args, String jobId) async
 }
 
 Future<bool> _waitForJob(http.Client client, _Args args, String jobId, {bool Function()? isCanceled}) async {
-  final deadline = DateTime.now().add(args.timeout);
   String? lastState;
   while (true) {
-    if (DateTime.now().isAfter(deadline)) {
-      stderr.writeln('Timed out waiting for job $jobId');
-      return false;
-    }
     final status = await _fetchJob(client, args, jobId);
     if (status.state != lastState) {
       stdout.writeln('${DateTime.now().toIso8601String()} job=$jobId state=${status.state}');
@@ -1180,5 +1166,4 @@ void _printUsage() {
   stdout.writeln('  --cancel                  Auto-cancel backup after 60-80s');
   stdout.writeln('  --fresh                   Request agent cleanup before backup (debug builds only)');
   stdout.writeln('  --poll-interval <sec>     Default 5');
-  stdout.writeln('  --timeout-minutes <min>   Default 120');
 }

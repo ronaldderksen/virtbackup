@@ -47,6 +47,7 @@ Key modules under `lib/agent`:
 2. `AgentHttpServer` resolves manifests and disk chains from stored metadata.
 3. Restore stream uploads reconstructed data to remote disks via SFTP.
 4. VM XML is uploaded and defined with `virsh define`.
+5. Restore download concurrency is owned by the restore worker; drivers only receive an explicit read-concurrency limit.
 
 ### Events
 
