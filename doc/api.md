@@ -19,6 +19,81 @@ If the token is missing/invalid the agent responds with:
 {"error":"unauthorized"}
 ```
 
+# Virt Backup Account API (HTTPS)
+
+Base URL: `https://virtbackup.net/`
+
+The desktop app uses this API only for account sign-in status. It does not gate backup, restore, schedule, or storage functionality.
+
+## Browser Account Login
+
+The desktop app signs in through the system browser. The app starts a temporary local HTTP callback server and opens:
+
+- `GET /app-login?redirect_uri=http://127.0.0.1:<port>/auth/callback&state=<random>`
+
+If the browser is not signed in, the website sends the user through the normal website login page. After a successful website login, the backend redirects to the app callback:
+
+- `http://127.0.0.1:<port>/auth/callback?code=<one-time-code>&state=<same-state>`
+
+The app verifies `state` before exchanging the code.
+
+The backend stores each issued web or desktop-app session in `public.account_sessions`. Tokens contain a `sid` and are accepted only while that database session is active and not expired or revoked.
+
+## Account Code Exchange
+
+- `POST /api/auth/exchange`
+
+Request:
+```json
+{"code":"one-time-code"}
+```
+
+Errors are JSON objects with an `error` code, for example:
+```json
+{"error":"invalid_code"}
+```
+
+Response:
+```json
+{"email":"user@example.com","sessionToken":"..."}
+```
+
+Known error codes:
+- `code_required`
+- `invalid_code`
+- `server_error`
+
+## Account Session
+
+- `GET /api/auth/session`
+
+Authentication:
+- `Authorization: Bearer <sessionToken>`
+
+Response:
+```json
+{"email":"user@example.com"}
+```
+
+Invalid or expired tokens return:
+```json
+{"error":"unauthorized"}
+```
+
+## Account Logout
+
+- `POST /api/auth/logout`
+
+Authentication:
+- `Authorization: Bearer <sessionToken>`
+
+Response:
+```json
+{"success":true}
+```
+
+The session identified by the bearer token is marked as revoked in the database.
+
 ## Health
 
 - `GET /health`

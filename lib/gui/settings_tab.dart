@@ -3,6 +3,8 @@ part of 'main_screen.dart';
 extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
   List<Widget> _buildSettingsSection(ColorScheme colorScheme) {
     return [
+      _buildVirtBackupAccountCard(colorScheme),
+      const SizedBox(height: 24),
       Card(
         elevation: 2,
         shadowColor: colorScheme.shadow.withValues(alpha: 0.2),
@@ -309,5 +311,74 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
         const SizedBox(height: 48),
       ],
     ];
+  }
+
+  Widget _buildVirtBackupAccountCard(ColorScheme colorScheme) {
+    final accountEmail = _accountEmail;
+    final isSignedIn = accountEmail != null && accountEmail.trim().isNotEmpty;
+    return Card(
+      elevation: 2,
+      shadowColor: colorScheme.shadow.withValues(alpha: 0.2),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.account_circle_outlined, color: colorScheme.primary),
+                const SizedBox(width: 10),
+                Text('Virt Backup account', style: Theme.of(context).textTheme.titleMedium),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (_isLoadingAccountSession)
+              Row(
+                children: [
+                  SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: colorScheme.primary)),
+                  const SizedBox(width: 12),
+                  Text('Checking account session...', style: Theme.of(context).textTheme.bodyMedium),
+                ],
+              )
+            else if (isSignedIn) ...[
+              ListTile(contentPadding: EdgeInsets.zero, leading: const Icon(Icons.verified_user_outlined), title: Text(accountEmail), subtitle: const Text('Signed in')),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  FilledButton.icon(
+                    onPressed: () => _openVirtBackupAccountPage('/settings.html', fragment: 'account'),
+                    icon: const Icon(Icons.open_in_new),
+                    label: const Text('Manage account'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _isSigningOutAccount ? null : _signOutVirtBackupAccount,
+                    icon: const Icon(Icons.logout),
+                    label: Text(_isSigningOutAccount ? 'Signing out...' : 'Sign out'),
+                  ),
+                ],
+              ),
+            ] else ...[
+              if (_accountStatusMessage.isNotEmpty) ...[Text(_accountStatusMessage, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: colorScheme.error)), const SizedBox(height: 16)],
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  FilledButton.icon(
+                    onPressed: _isSigningInAccount ? null : _signInVirtBackupAccount,
+                    icon: const Icon(Icons.open_in_browser),
+                    label: Text(_isSigningInAccount ? 'Waiting for browser...' : 'Sign in with browser'),
+                  ),
+                  TextButton.icon(onPressed: () => _openVirtBackupAccountPage('/register.html'), icon: const Icon(Icons.person_add_alt_outlined), label: const Text('Create account')),
+                  TextButton.icon(onPressed: () => _openVirtBackupAccountPage('/reset.html'), icon: const Icon(Icons.help_outline), label: const Text('Reset password')),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 }

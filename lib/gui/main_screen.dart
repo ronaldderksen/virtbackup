@@ -16,6 +16,7 @@ import 'package:virtbackup/common/google_oauth_client.dart';
 import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/models.dart';
 import 'package:virtbackup/common/settings.dart';
+import 'package:virtbackup/common/virtbackup_account_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:virtbackup/gui/agent_api_client.dart';
 
@@ -71,10 +72,12 @@ class BackupServerSetupScreen extends StatefulWidget {
 class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   static const String _guiLogLevelPrefKey = 'log_level';
   static const String _guiSelectedStoragePrefPrefix = 'selected_storage_id';
+  static const String _accountSessionTokenPrefKey = 'virtbackup_account_session_token';
   static const EdgeInsets _contentPadding = EdgeInsets.only(left: 24, right: 24, bottom: 32);
   static const double _contentTitleSpacing = 8;
   static const double _contentSectionSpacing = 32;
   static const String _gdriveScopeFile = 'https://www.googleapis.com/auth/drive.file';
+  static final Uri _accountBaseUri = kDebugMode ? Uri.https('sandbox.virtbackup.net') : Uri.https('virtbackup.net');
   final GlobalKey<FormState> _connectionFormKey = GlobalKey<FormState>();
   final GlobalKey<FormState> _localFormKey = GlobalKey<FormState>();
   final TextEditingController _serverNameController = TextEditingController();
@@ -117,6 +120,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   final Map<String, bool> _vmHasOverlayByName = {};
   final Map<String, Map<String, bool>> _overlayByServerId = {};
   final Map<String, DateTime> _lastRefreshByServerId = {};
+  final VirtBackupAccountClient _accountClient = VirtBackupAccountClient(baseUri: _accountBaseUri);
   final List<RestoreEntry> _restoreEntries = [];
   String? _selectedRestoreVmName;
   String? _selectedRestoreTimestamp;
@@ -166,6 +170,12 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _eventConnecting = false;
   Timer? _agentReconnectTimer;
   bool _isLoadingAgentSettings = false;
+  bool _isLoadingAccountSession = false;
+  bool _isSigningInAccount = false;
+  bool _isSigningOutAccount = false;
+  String? _accountEmail;
+  String? _accountSessionToken;
+  String _accountStatusMessage = '';
   Timer? _jobSyncTimer;
   bool _jobSyncInProgress = false;
   bool _guiLogRotated = false;
@@ -174,6 +184,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   void initState() {
     super.initState();
     _attachFieldListeners();
+    unawaited(_loadVirtBackupAccountSession());
     unawaited(_configureGuiLogWriter());
     _loadAgentEndpointsAndSettings();
   }
@@ -203,6 +214,165 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     await _loadAgentEndpoints();
     await _applySelectedAgent();
     await _loadAgentSettings();
+  }
+
+  Future<void> _loadVirtBackupAccountSession() async {
+    if (_isLoadingAccountSession) {
+      return;
+    }
+    _isLoadingAccountSession = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = (prefs.getString(_accountSessionTokenPrefKey) ?? '').trim();
+      if (token.isEmpty) {
+        _accountSessionToken = null;
+        _accountEmail = null;
+        _accountStatusMessage = '';
+        return;
+      }
+      final session = await _accountClient.fetchSession(token);
+      _accountSessionToken = session.sessionToken;
+      _accountEmail = session.email;
+      _accountStatusMessage = '';
+    } catch (error) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_accountSessionTokenPrefKey);
+      _accountSessionToken = null;
+      _accountEmail = null;
+      _accountStatusMessage = error.toString();
+    } finally {
+      _isLoadingAccountSession = false;
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
+  Future<void> _signInVirtBackupAccount() async {
+    if (_isSigningInAccount) {
+      return;
+    }
+    setState(() {
+      _isSigningInAccount = true;
+      _accountStatusMessage = '';
+    });
+    HttpServer? callbackServer;
+    StreamSubscription<HttpRequest>? callbackSubscription;
+    try {
+      callbackServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final state = _generateAccountLoginState();
+      final redirectUri = Uri.parse('http://127.0.0.1:${callbackServer.port}/auth/callback');
+      final callbackCompleter = Completer<Uri>();
+      callbackSubscription = callbackServer.listen((request) {
+        if (request.uri.path != '/auth/callback') {
+          request.response.statusCode = HttpStatus.notFound;
+          unawaited(request.response.close());
+          return;
+        }
+        final error = request.uri.queryParameters['error'] ?? '';
+        request.response.headers.contentType = ContentType.html;
+        request.response.write(
+          error.isEmpty
+              ? '<!doctype html><html><body><h1>Signed in</h1><p>You can return to Virt Backup.</p></body></html>'
+              : '<!doctype html><html><body><h1>Sign in failed</h1><p>You can return to Virt Backup.</p></body></html>',
+        );
+        unawaited(request.response.close());
+        if (!callbackCompleter.isCompleted) {
+          callbackCompleter.complete(request.uri);
+        }
+      });
+
+      final loginUri = _accountClient.browserLoginUri(redirectUri: redirectUri, state: state);
+      if (!await launchUrl(loginUri, mode: LaunchMode.externalApplication)) {
+        throw const VirtBackupAccountClientException('Could not open the browser login page.');
+      }
+      final callbackUri = await callbackCompleter.future.timeout(const Duration(minutes: 2));
+      final returnedState = callbackUri.queryParameters['state'] ?? '';
+      if (returnedState != state) {
+        throw const VirtBackupAccountClientException('The browser login response did not match this app session.');
+      }
+      final error = callbackUri.queryParameters['error'] ?? '';
+      if (error.isNotEmpty) {
+        throw VirtBackupAccountClientException('Browser login failed: $error');
+      }
+      final code = callbackUri.queryParameters['code'] ?? '';
+      if (code.isEmpty) {
+        throw const VirtBackupAccountClientException('The browser login response did not include a code.');
+      }
+      final session = await _accountClient.exchangeAppLoginCode(code);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_accountSessionTokenPrefKey, session.sessionToken);
+      _accountSessionToken = session.sessionToken;
+      _accountEmail = session.email;
+      _accountStatusMessage = '';
+      if (mounted) {
+        _showSnackBarInfo('Signed in to Virt Backup.');
+      }
+    } on TimeoutException {
+      _accountStatusMessage = 'Browser login timed out. Try again.';
+    } on PlatformException catch (error, stackTrace) {
+      _logPlatformExceptionToConsole('Virt Backup account sign in failed', error, stackTrace);
+      _accountSessionToken = null;
+      _accountEmail = null;
+      _accountStatusMessage = error.message ?? error.toString();
+    } catch (error) {
+      _accountSessionToken = null;
+      _accountEmail = null;
+      _accountStatusMessage = error.toString();
+    } finally {
+      await callbackSubscription?.cancel();
+      await callbackServer?.close(force: true);
+      _isSigningInAccount = false;
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
+  void _logPlatformExceptionToConsole(String message, PlatformException error, StackTrace stackTrace) {
+    debugPrint('$message: PlatformException(code: ${error.code}, message: ${error.message}, details: ${error.details})');
+    debugPrint(stackTrace.toString());
+  }
+
+  String _generateAccountLoginState() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(24, (_) => random.nextInt(256));
+    return base64UrlEncode(bytes);
+  }
+
+  Future<void> _signOutVirtBackupAccount() async {
+    if (_isSigningOutAccount) {
+      return;
+    }
+    final token = _accountSessionToken;
+    setState(() {
+      _isSigningOutAccount = true;
+      _accountStatusMessage = '';
+    });
+    try {
+      if (token != null && token.isNotEmpty) {
+        await _accountClient.logout(token);
+      }
+    } catch (error) {
+      _logError('Virt Backup account logout failed.', error, StackTrace.current);
+    } finally {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_accountSessionTokenPrefKey);
+      _accountSessionToken = null;
+      _accountEmail = null;
+      _isSigningOutAccount = false;
+      if (mounted) {
+        setState(() {});
+        _showSnackBarInfo('Signed out of Virt Backup.');
+      }
+    }
+  }
+
+  Future<void> _openVirtBackupAccountPage(String path, {String? fragment}) async {
+    final uri = _accountBaseUri.replace(path: path, fragment: fragment);
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      _showSnackBarError('Could not open $uri');
+    }
   }
 
   Future<GoogleOAuthInstalledClient> _resolveGdriveOAuthClient() async {
