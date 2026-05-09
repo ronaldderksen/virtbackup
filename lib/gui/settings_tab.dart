@@ -348,9 +348,9 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                 runSpacing: 12,
                 children: [
                   FilledButton.icon(
-                    onPressed: () => _openVirtBackupAccountPage('/settings.html', fragment: 'account'),
+                    onPressed: () => _openVirtBackupAccountPage('/settings.html', fragment: 'subscription'),
                     icon: const Icon(Icons.open_in_new),
-                    label: const Text('Manage account'),
+                    label: const Text('Manage Subscription'),
                   ),
                   OutlinedButton.icon(
                     onPressed: _isSigningOutAccount ? null : _signOutVirtBackupAccount,

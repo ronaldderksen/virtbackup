@@ -23,6 +23,8 @@ If the token is missing/invalid the agent responds with:
 
 Base URL: `https://virtbackup.net/`
 
+Local development hostname checks for Ronald's Mac mini and Linux host `nuc04` are kept in the app, but account login uses `https://virtbackup.net/`.
+
 The desktop app uses this API only for account sign-in status. It does not gate backup, restore, schedule, or storage functionality.
 
 ## Browser Account Login
@@ -31,13 +33,18 @@ The desktop app signs in through the system browser. The app starts a temporary 
 
 - `GET /app-login?redirect_uri=http://127.0.0.1:<port>/auth/callback&state=<random>`
 
+After opening a Virt Backup account link, the app always shows a dialog with a copy-link action. The full URL is not shown in the UI; users can copy it to the clipboard and paste it into a browser on any platform.
+
 If the browser is not signed in, the website sends the user through the normal website login page. After a successful website login, the backend redirects to the app callback:
 
 - `http://127.0.0.1:<port>/auth/callback?code=<one-time-code>&state=<same-state>`
 
 The app verifies `state` before exchanging the code.
 
+Browser-login codes are stored in `public.app_login_codes` so `/app-login` and `/api/auth/exchange` can run on different backend pods. Codes expire after 2 minutes and are removed when exchanged.
+
 The backend stores each issued web or desktop-app session in `public.account_sessions`. Tokens contain a `sid` and are accepted only while that database session is active and not expired or revoked.
+Desktop-app sessions are issued as unlimited sessions and are shown as `Unlimited` in the website Sessions view. Website sessions keep the normal expiring cookie lifetime.
 
 ## Account Code Exchange
 

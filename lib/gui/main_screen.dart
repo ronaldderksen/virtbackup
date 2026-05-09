@@ -77,7 +77,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   static const double _contentTitleSpacing = 8;
   static const double _contentSectionSpacing = 32;
   static const String _gdriveScopeFile = 'https://www.googleapis.com/auth/drive.file';
-  static final Uri _accountBaseUri = kDebugMode ? Uri.https('sandbox.virtbackup.net') : Uri.https('virtbackup.net');
+  static final Uri _accountBaseUri = _defaultAccountBaseUri();
   final GlobalKey<FormState> _connectionFormKey = GlobalKey<FormState>();
   final GlobalKey<FormState> _localFormKey = GlobalKey<FormState>();
   final TextEditingController _serverNameController = TextEditingController();
@@ -179,6 +179,13 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   Timer? _jobSyncTimer;
   bool _jobSyncInProgress = false;
   bool _guiLogRotated = false;
+
+  static Uri _defaultAccountBaseUri() {
+    final host = Platform.localHostname.toLowerCase();
+    final isRonaldMac = Platform.isMacOS && (host == 'mac-mini-van-ronald' || host == 'mac-mini-van-ronald.local');
+    final isNuc04Linux = Platform.isLinux && host == 'nuc04';
+    return Uri.https(isRonaldMac || isNuc04Linux ? 'virtbackup.net' : 'virtbackup.net');
+  }
 
   @override
   void initState() {
@@ -282,11 +289,13 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         }
       });
 
+      final callbackFuture = callbackCompleter.future;
       final loginUri = _accountClient.browserLoginUri(redirectUri: redirectUri, state: state);
-      if (!await launchUrl(loginUri, mode: LaunchMode.externalApplication)) {
+      final opened = await _openVirtBackupAccountUri(loginUri, title: 'Browser sign in', closeWhen: callbackFuture.then((_) {}));
+      if (!opened && !mounted) {
         throw const VirtBackupAccountClientException('Could not open the browser login page.');
       }
-      final callbackUri = await callbackCompleter.future.timeout(const Duration(minutes: 2));
+      final callbackUri = await callbackFuture.timeout(const Duration(minutes: 2));
       final returnedState = callbackUri.queryParameters['state'] ?? '';
       if (returnedState != state) {
         throw const VirtBackupAccountClientException('The browser login response did not match this app session.');
@@ -370,9 +379,53 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
 
   Future<void> _openVirtBackupAccountPage(String path, {String? fragment}) async {
     final uri = _accountBaseUri.replace(path: path, fragment: fragment);
-    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-      _showSnackBarError('Could not open $uri');
+    await _openVirtBackupAccountUri(uri, title: 'Virt Backup account page');
+  }
+
+  Future<bool> _openVirtBackupAccountUri(Uri uri, {required String title, Future<void>? closeWhen}) async {
+    final opened = await _launchExternalUri(uri);
+    if (!mounted) {
+      return opened;
     }
+    var closeListenerStarted = false;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        if (closeWhen != null && !closeListenerStarted) {
+          closeListenerStarted = true;
+          unawaited(
+            closeWhen.then((_) {
+              if (dialogContext.mounted) {
+                Navigator.of(dialogContext).pop();
+              }
+            }),
+          );
+        }
+        return AlertDialog(
+          title: Text(title),
+          content: Text(
+            opened
+                ? 'If the browser did not open correctly, copy the link and paste it into your browser.'
+                : 'The browser did not report that it opened correctly. Copy the link and paste it into your browser.',
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Continue')),
+            FilledButton(
+              onPressed: () {
+                unawaited(Clipboard.setData(ClipboardData(text: uri.toString())));
+                Navigator.of(dialogContext).pop();
+              },
+              child: const Text('Copy link'),
+            ),
+          ],
+        );
+      },
+    );
+    return opened;
+  }
+
+  Future<bool> _launchExternalUri(Uri uri) async {
+    return launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   Future<GoogleOAuthInstalledClient> _resolveGdriveOAuthClient() async {
@@ -1992,7 +2045,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   Future<void> _openNtfymeDocs() async {
     final uri = Uri.parse('https://ntfyme.net/');
     try {
-      final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      final launched = await _launchExternalUri(uri);
       if (!launched && mounted) {
         _showSnackBarError('Unable to open Ntfy me docs.');
       }
@@ -2063,7 +2116,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       }
       final authUri = Uri.https('accounts.google.com', '/o/oauth2/v2/auth', query);
       final callback = _waitForOAuthCallback(server);
-      final launched = await launchUrl(authUri, mode: LaunchMode.externalApplication);
+      final launched = await _launchExternalUri(authUri);
       if (!launched) {
         throw 'Unable to open the browser for Google Drive sign-in.';
       }
