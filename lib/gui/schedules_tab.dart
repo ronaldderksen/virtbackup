@@ -2,7 +2,7 @@ part of 'main_screen.dart';
 
 extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
   List<Widget> _buildScheduleSection(ColorScheme colorScheme) {
-    final allSchedules = List<ScheduledJob>.from(_agentSettings.schedules)..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    final allSchedules = List<ScheduledJob>.from(_agentSettings.schedules)..sort(_compareSchedulesForList);
     final filters = _effectiveScheduleQuickFilters(allSchedules);
     final schedules = allSchedules.where((schedule) => _scheduleMatchesQuickFilters(schedule, filters)).toList();
     return [
@@ -93,6 +93,75 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
 
   bool _scheduleIsRunning(ScheduledJob schedule) {
     return _latestAgentJobs.any((job) => job.scheduleId == schedule.id && job.state == AgentJobState.running);
+  }
+
+  int _compareSchedulesForList(ScheduledJob a, ScheduledJob b) {
+    final typeCompare = _scheduleTypeSortRank(a.type).compareTo(_scheduleTypeSortRank(b.type));
+    if (typeCompare != 0) {
+      return typeCompare;
+    }
+    final frequencyCompare = _scheduleFrequencySortRank(a.frequency).compareTo(_scheduleFrequencySortRank(b.frequency));
+    if (frequencyCompare != 0) {
+      return frequencyCompare;
+    }
+    final timeCompare = _scheduleTimeSortValue(a).compareTo(_scheduleTimeSortValue(b));
+    if (timeCompare != 0) {
+      return timeCompare;
+    }
+    final nameCompare = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    if (nameCompare != 0) {
+      return nameCompare;
+    }
+    return a.id.compareTo(b.id);
+  }
+
+  int _scheduleTypeSortRank(ScheduledJobType type) {
+    return type == ScheduledJobType.backup ? 0 : 1;
+  }
+
+  int _scheduleFrequencySortRank(ScheduleFrequency frequency) {
+    return switch (frequency) {
+      ScheduleFrequency.every5Minutes => 0,
+      ScheduleFrequency.hourly => 1,
+      ScheduleFrequency.daily => 2,
+      ScheduleFrequency.weekly => 3,
+    };
+  }
+
+  int _scheduleTimeSortValue(ScheduledJob schedule) {
+    final minute = _scheduleMinuteSortValue(schedule.time);
+    if (schedule.frequency == ScheduleFrequency.every5Minutes || schedule.frequency == ScheduleFrequency.hourly) {
+      return minute;
+    }
+    final minutesOfDay = _scheduleMinutesOfDaySortValue(schedule.time);
+    if (schedule.frequency == ScheduleFrequency.daily) {
+      return minutesOfDay;
+    }
+    final weekday = schedule.weekdays.isEmpty ? 8 : schedule.weekdays.reduce(min);
+    return (weekday * 24 * 60) + minutesOfDay;
+  }
+
+  int _scheduleMinuteSortValue(String time) {
+    if (time == '*/5') {
+      return 0;
+    }
+    final parts = time.split(':');
+    final rawMinute = parts.length == 2 ? parts[1] : time;
+    final minute = int.tryParse(rawMinute.trim());
+    return minute == null ? 60 : minute.clamp(0, 59);
+  }
+
+  int _scheduleMinutesOfDaySortValue(String time) {
+    final parts = time.split(':');
+    if (parts.length != 2) {
+      return 24 * 60;
+    }
+    final hour = int.tryParse(parts[0].trim());
+    final minute = int.tryParse(parts[1].trim());
+    if (hour == null || minute == null) {
+      return 24 * 60;
+    }
+    return (hour.clamp(0, 23) * 60) + minute.clamp(0, 59);
   }
 
   Widget _buildScheduleQuickFilters(List<ScheduledJob> schedules, ({String serverId, String type, String serverVmKey, String storageId}) filters) {
