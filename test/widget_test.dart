@@ -12,6 +12,6 @@ import 'package:virtbackup/gui/app.dart';
 void main() {
   testWidgets('App boots smoke test', (WidgetTester tester) async {
     await tester.pumpWidget(const MyApp());
-    expect(find.text('Virt Backup'), findsWidgets);
+    expect(find.text('Settings'), findsWidgets);
   });
 }

@@ -17,6 +17,8 @@ namespace {
 #endif
 
 constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
+constexpr int kMinWindowWidth = 1200;
+constexpr int kMinWindowHeight = 820;
 
 /// Registry key for app theme preference.
 ///
@@ -204,6 +206,15 @@ Win32Window::MessageHandler(HWND hwnd,
         MoveWindow(child_content_, rect.left, rect.top, rect.right - rect.left,
                    rect.bottom - rect.top, TRUE);
       }
+      return 0;
+    }
+    case WM_GETMINMAXINFO: {
+      auto minmax_info = reinterpret_cast<MINMAXINFO*>(lparam);
+      HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+      UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
+      double scale_factor = dpi / 96.0;
+      minmax_info->ptMinTrackSize.x = Scale(kMinWindowWidth, scale_factor);
+      minmax_info->ptMinTrackSize.y = Scale(kMinWindowHeight, scale_factor);
       return 0;
     }
 

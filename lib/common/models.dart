@@ -325,6 +325,7 @@ class AgentJobStatus {
     this.writerQueuedBytes = 0,
     this.writerInFlightBytes = 0,
     this.driverBufferedBytes = 0,
+    this.scheduleId = '',
   });
 
   final String id;
@@ -349,6 +350,7 @@ class AgentJobStatus {
   final int writerQueuedBytes;
   final int writerInFlightBytes;
   final int driverBufferedBytes;
+  final String scheduleId;
 
   Map<String, dynamic> toMap() {
     return {
@@ -374,6 +376,7 @@ class AgentJobStatus {
       'writerQueuedBytes': writerQueuedBytes,
       'writerInFlightBytes': writerInFlightBytes,
       'driverBufferedBytes': driverBufferedBytes,
+      'scheduleId': scheduleId,
     };
   }
 
@@ -403,6 +406,7 @@ class AgentJobStatus {
       writerQueuedBytes: (json['writerQueuedBytes'] as num?)?.toInt() ?? 0,
       writerInFlightBytes: (json['writerInFlightBytes'] as num?)?.toInt() ?? 0,
       driverBufferedBytes: (json['driverBufferedBytes'] as num?)?.toInt() ?? 0,
+      scheduleId: (json['scheduleId'] ?? '').toString(),
     );
   }
 
@@ -427,6 +431,7 @@ class AgentJobStatus {
     int? writerQueuedBytes,
     int? writerInFlightBytes,
     int? driverBufferedBytes,
+    String? scheduleId,
   }) {
     return AgentJobStatus(
       id: id,
@@ -451,6 +456,7 @@ class AgentJobStatus {
       writerQueuedBytes: writerQueuedBytes ?? this.writerQueuedBytes,
       writerInFlightBytes: writerInFlightBytes ?? this.writerInFlightBytes,
       driverBufferedBytes: driverBufferedBytes ?? this.driverBufferedBytes,
+      scheduleId: scheduleId ?? this.scheduleId,
     );
   }
 }

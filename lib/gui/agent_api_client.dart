@@ -80,6 +80,27 @@ class AgentApiClient {
     }
   }
 
+  Future<AgentJobStart> runSchedule(String scheduleId) async {
+    final response = await _post('/schedules/${Uri.encodeComponent(scheduleId)}/run', {});
+    if (response.statusCode != 200) {
+      throw _agentErrorMessage(response);
+    }
+    return AgentJobStart.fromMap(Map<String, dynamic>.from(jsonDecode(response.body)));
+  }
+
+  String _agentErrorMessage(_AgentResponse response) {
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map) {
+        final error = decoded['error']?.toString().trim();
+        if (error != null && error.isNotEmpty) {
+          return error;
+        }
+      }
+    } catch (_) {}
+    return 'Agent responded ${response.statusCode}';
+  }
+
   Future<void> storeGoogleOAuth({required String accessToken, required String refreshToken, required String scope, required String accountEmail, required DateTime? expiresAt}) async {
     final response = await _post('/oauth/google', {
       'accessToken': accessToken,

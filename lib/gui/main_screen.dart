@@ -23,6 +23,7 @@ part 'settings_tab.dart';
 part 'manage_tab.dart';
 part 'backup_tab.dart';
 part 'restore_tab.dart';
+part 'schedules_tab.dart';
 part 'ssh_service.dart';
 part 'service.dart';
 
@@ -109,6 +110,10 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _isSanityChecking = false;
   bool _isSendingNtfymeTest = false;
   bool _isGdriveConnecting = false;
+  String _scheduleFilterServerId = '';
+  String _scheduleFilterType = '';
+  String _scheduleFilterServerVmKey = '';
+  String _scheduleFilterStorageId = '';
   final Map<String, bool> _vmHasOverlayByName = {};
   final Map<String, Map<String, bool>> _overlayByServerId = {};
   final Map<String, DateTime> _lastRefreshByServerId = {};
@@ -145,6 +150,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   int _backupTotalBytes = 0;
   int _backupSanityCheckBytesTransferred = 0;
   double _backupSanityCheckSpeedBytesPerSec = 0;
+  List<AgentJobStatus> _latestAgentJobs = <AgentJobStatus>[];
   final AgentApiClient _agentApiClient = AgentApiClient();
   AppSettings _agentSettings = AppSettings.empty();
   bool _agentReachable = true;
@@ -939,12 +945,17 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       _logError('Failed to update settings via agent.', error, stackTrace);
       _setAgentReachable(false);
       _notifyAgentErrorOnce('Unable to update agent config: $error');
+      rethrow;
     }
   }
 
   Future<void> _syncRunningJobs() async {
     try {
       final jobs = await _agentApiClient.fetchJobs();
+      _latestAgentJobs = jobs;
+      if (mounted) {
+        _updateUi(() {});
+      }
       if (jobs.isEmpty) {
         return;
       }
@@ -1038,6 +1049,9 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       _autoSelectRestoreServerForDebug();
       await _loadRestoreEntries();
     }
+    if (index == 4 && _selectedBackupStorageId != null) {
+      await _loadRestoreEntries();
+    }
   }
 
   String _menuTitle(int index) {
@@ -1050,6 +1064,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         return 'Backup';
       case 3:
         return 'Restore';
+      case 4:
+        return 'Schedules';
       default:
         return 'Settings';
     }
@@ -1065,6 +1081,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         return 'Prepare and schedule VM backups.';
       case 3:
         return 'Restore a VM from a backup.';
+      case 4:
+        return 'Schedule recurring backup and restore jobs.';
       default:
         return 'Configure servers and storage for backups.';
     }
@@ -1489,7 +1507,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     setState(updates);
   }
 
-  bool _requiresVmInventory(int index) => index == 1 || index == 2;
+  bool _requiresVmInventory(int index) => index == 1 || index == 2 || index == 4;
 
   void _applyServerToForm(ServerConfig server) {
     _serverNameController.text = server.name;
@@ -2059,6 +2077,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       if (mounted && savedSomething) {
         _showSnackBarInfo('Settings saved');
       }
+    } catch (_) {
     } finally {
       if (mounted) {
         setState(() {
@@ -2720,7 +2739,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final railTheme = NavigationRailTheme.of(context);
-    final railWidth = railTheme.minWidth ?? 72;
+    final railWidth = railTheme.minWidth ?? 92;
     final isSaveEnabled = _selectedMenuIndex == 0 && !_isSavingAll && _hasAnyChanges();
     final isSettingsEnabled = true;
     return Scaffold(
@@ -2752,6 +2771,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                       _buildRailItem(index: 2, icon: Icons.backup_outlined, selectedIcon: Icons.backup, label: 'Backup', colorScheme: colorScheme, railTheme: railTheme, enabled: true),
                       const SizedBox(height: 8),
                       _buildRailItem(index: 3, icon: Icons.restore_outlined, selectedIcon: Icons.restore, label: 'Restore', colorScheme: colorScheme, railTheme: railTheme, enabled: true),
+                      const SizedBox(height: 8),
+                      _buildRailItem(index: 4, icon: Icons.event_repeat_outlined, selectedIcon: Icons.event_repeat, label: 'Schedules', colorScheme: colorScheme, railTheme: railTheme, enabled: true),
                       const Spacer(),
                       _buildRailItem(
                         index: 0,
@@ -2828,6 +2849,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                 if (_selectedMenuIndex == 1) ..._buildManageSection(colorScheme),
                                 if (_selectedMenuIndex == 2) ..._buildBackupSection(colorScheme),
                                 if (_selectedMenuIndex == 3) ..._buildRestoreSection(colorScheme),
+                                if (_selectedMenuIndex == 4) ..._buildScheduleSection(colorScheme),
                               ],
                             ),
                           ),

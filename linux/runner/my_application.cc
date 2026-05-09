@@ -52,7 +52,8 @@ static void my_application_activate(GApplication* application) {
     gtk_window_set_title(window, "Virt Backup");
   }
 
-  gtk_window_set_default_size(window, 800, 600);
+  gtk_window_set_default_size(window, 1200, 820);
+  gtk_widget_set_size_request(GTK_WIDGET(window), 1200, 820);
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(

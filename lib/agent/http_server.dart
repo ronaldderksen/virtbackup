@@ -59,8 +59,11 @@ class AgentHttpServer {
   final Map<String, Timer> _eventRestartTimers = {};
   final Map<String, int> _eventRestartAttempts = {};
   final Map<String, Timer> _refreshDebounceTimers = {};
+  final Set<String> _completedScheduleRuns = <String>{};
+  final Map<String, String> _waitingScheduleRuns = <String, String>{};
   late final Map<String, BackupDriverInfo> _driverCatalog = _buildDriverCatalog();
   GdriveBackupDriver? _cachedGdriveDriver;
+  Timer? _scheduleTimer;
   String _agentToken = '';
 
   Future<void> start() async {
@@ -72,6 +75,7 @@ class AgentHttpServer {
     _server = await HttpServer.bindSecure(bindAddress, backupAgentPort, securityContext);
     _hostLog('Agent HTTPS listening on ${bindAddress.address}:$backupAgentPort');
     _server?.listen(_handleRequest);
+    _restartScheduleTimer();
 
     _hostLog('Startup: refreshing ${_agentSettings.servers.length} server(s).');
     await _refreshAllServers();
@@ -84,6 +88,8 @@ class AgentHttpServer {
     for (final timer in _refreshDebounceTimers.values) {
       timer.cancel();
     }
+    _scheduleTimer?.cancel();
+    _scheduleTimer = null;
     for (final state in _eventStreams.values.toList()) {
       try {
         state.closed = true;
@@ -92,6 +98,250 @@ class AgentHttpServer {
     }
     _eventStreams.clear();
     await _server?.close(force: true);
+  }
+
+  void _restartScheduleTimer() {
+    _scheduleTimer?.cancel();
+    _scheduleTimer = null;
+    if (_agentSettings.schedules.where((schedule) => schedule.enabled).isEmpty) {
+      return;
+    }
+    unawaited(_runDueSchedules());
+    _scheduleTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      unawaited(_runDueSchedules());
+    });
+  }
+
+  Future<void> _runDueSchedules() async {
+    final now = DateTime.now();
+    for (final entry in Map<String, String>.from(_waitingScheduleRuns).entries) {
+      final schedule = _scheduleById(entry.key);
+      if (schedule == null || !schedule.enabled || !schedule.waitForRunningJobs || !_scheduleRunKeyIsRecent(entry.value, now)) {
+        _waitingScheduleRuns.remove(entry.key);
+        continue;
+      }
+      await _tryStartScheduledRun(schedule, entry.value, fromWaitingQueue: true);
+    }
+    for (final schedule in _agentSettings.schedules) {
+      if (!schedule.enabled || !_scheduleIsDue(schedule, now)) {
+        continue;
+      }
+      final runKey = _scheduleRunKey(schedule, now);
+      if (_completedScheduleRuns.contains(runKey) || _waitingScheduleRuns[schedule.id] == runKey) {
+        continue;
+      }
+      await _tryStartScheduledRun(schedule, runKey, fromWaitingQueue: false);
+    }
+    _completedScheduleRuns.removeWhere((key) => !_scheduleRunKeyIsRecent(key, now));
+  }
+
+  Future<void> _tryStartScheduledRun(ScheduledJob schedule, String runKey, {required bool fromWaitingQueue}) async {
+    try {
+      await _startScheduledJob(schedule);
+      _completedScheduleRuns.add(runKey);
+      _waitingScheduleRuns.remove(schedule.id);
+    } on _JobGuardRejected catch (error, stackTrace) {
+      if (schedule.waitForRunningJobs) {
+        _waitingScheduleRuns[schedule.id] = runKey;
+        if (!fromWaitingQueue) {
+          _hostLog('Schedule "${schedule.name}" is waiting for running jobs. ${error.message}');
+        }
+        return;
+      }
+      _completedScheduleRuns.add(runKey);
+      _hostLog('Schedule "${schedule.name}" failed to start. ${error.message}');
+      _hostLog(stackTrace.toString());
+      _failScheduledJobStart(schedule, error.message);
+    } catch (error, stackTrace) {
+      _completedScheduleRuns.add(runKey);
+      _waitingScheduleRuns.remove(schedule.id);
+      _hostLog('Schedule "${schedule.name}" failed to start. $error');
+      _hostLog(stackTrace.toString());
+    }
+  }
+
+  bool _scheduleIsDue(ScheduledJob schedule, DateTime now) {
+    final hour = now.hour.toString().padLeft(2, '0');
+    final minute = now.minute.toString().padLeft(2, '0');
+    if (schedule.frequency == ScheduleFrequency.every5Minutes) {
+      final configuredMinute = _scheduleMinute(schedule.time);
+      if (configuredMinute == null) {
+        return false;
+      }
+      return now.minute % 5 == configuredMinute % 5;
+    }
+    if (schedule.frequency == ScheduleFrequency.hourly) {
+      final parts = schedule.time.split(':');
+      return parts.length == 2 && parts[1] == minute;
+    }
+    if (schedule.time != '$hour:$minute') {
+      return false;
+    }
+    if (schedule.frequency == ScheduleFrequency.daily) {
+      return true;
+    }
+    return schedule.weekdays.contains(now.weekday);
+  }
+
+  int? _scheduleMinute(String time) {
+    if (time == '*/5') {
+      return 0;
+    }
+    final parts = time.split(':');
+    if (parts.length != 2) {
+      return null;
+    }
+    return int.tryParse(parts[1]);
+  }
+
+  String _scheduleRunKey(ScheduledJob schedule, DateTime now) {
+    final month = now.month.toString().padLeft(2, '0');
+    final day = now.day.toString().padLeft(2, '0');
+    final hour = now.hour.toString().padLeft(2, '0');
+    final minute = now.minute.toString().padLeft(2, '0');
+    return '${schedule.id}:${now.year}-$month-$day $hour:$minute';
+  }
+
+  bool _scheduleRunKeyIsRecent(String key, DateTime now) {
+    final parts = key.split(':');
+    if (parts.length < 2) {
+      return false;
+    }
+    final parsed = DateTime.tryParse(parts.sublist(1).join(':').replaceFirst(' ', 'T'));
+    if (parsed == null) {
+      return false;
+    }
+    return now.difference(parsed).inDays < 2;
+  }
+
+  Future<String> _startScheduledJob(ScheduledJob schedule) async {
+    final server = _serverById(schedule.serverId);
+    if (server == null) {
+      throw StateError('server not found: ${schedule.serverId}');
+    }
+    final storage = _resolveStorageById(schedule.storageId);
+    if (storage == null) {
+      throw StateError('storage not found or unavailable: ${schedule.storageId}');
+    }
+    switch (schedule.type) {
+      case ScheduledJobType.backup:
+        return _startScheduledBackup(schedule, server, storage);
+      case ScheduledJobType.restore:
+        return _startScheduledRestore(schedule, server, storage);
+    }
+  }
+
+  ServerConfig? _serverById(String serverId) {
+    for (final server in _agentSettings.servers) {
+      if (server.id == serverId) {
+        return server;
+      }
+    }
+    return null;
+  }
+
+  ScheduledJob? _scheduleById(String scheduleId) {
+    for (final schedule in _agentSettings.schedules) {
+      if (schedule.id == scheduleId) {
+        return schedule;
+      }
+    }
+    return null;
+  }
+
+  String _startScheduledBackup(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage) {
+    if (schedule.vmName.trim().isEmpty) {
+      throw StateError('backup schedule requires vmName');
+    }
+    final backupPath = storage.backupPath;
+    final registry = _buildDriverRegistry(backupPath: backupPath, settings: storage.settings);
+    final descriptor = registry[storage.driverId] ?? registry['filesystem']!;
+    if (descriptor.usesPath && backupPath.isEmpty) {
+      throw StateError('backup path is empty');
+    }
+    final validationError = descriptor.validateStart();
+    if (validationError != null && validationError.isNotEmpty) {
+      throw StateError(validationError);
+    }
+    final guardMessage = _jobStartGuardMessage(type: AgentJobType.backup, vmName: schedule.vmName, storageId: storage.storage.id);
+    if (guardMessage != null) {
+      throw _JobGuardRejected(guardMessage);
+    }
+    final jobId = _createJob(AgentJobType.backup, vmName: schedule.vmName, storageId: storage.storage.id, scheduleId: schedule.id);
+    _hostLog('Schedule "${schedule.name}" starting backup job $jobId.');
+    _startBackupJob(
+      jobId,
+      server,
+      VmEntry(id: schedule.vmName, name: schedule.vmName, powerState: VmPowerState.stopped),
+      backupPath,
+      driverIdOverride: storage.driverId,
+      driverParams: storage.driverParams,
+      storage: storage,
+    );
+    return jobId;
+  }
+
+  Future<String> _startScheduledRestore(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage) async {
+    final xmlPath = await _resolveScheduledRestoreXmlPath(schedule, storage);
+    if (xmlPath.trim().isEmpty) {
+      throw StateError('restore schedule requires restoreXmlPath');
+    }
+    if (schedule.restoreDecision.trim().isEmpty) {
+      throw StateError('restore schedule requires restoreDecision');
+    }
+    final vmName = _extractVmNameFromXmlPath(xmlPath);
+    final guardMessage = _jobStartGuardMessage(type: AgentJobType.restore, vmName: vmName, storageId: storage.storage.id);
+    if (guardMessage != null) {
+      throw _JobGuardRejected(guardMessage);
+    }
+    final jobId = _createJob(AgentJobType.restore, vmName: vmName, storageId: storage.storage.id, scheduleId: schedule.id);
+    _hostLog('Schedule "${schedule.name}" starting restore job $jobId.');
+    _startRestoreJob(jobId, server, xmlPath, schedule.restoreDecision, storage: storage, driverIdOverride: storage.driverId);
+    return jobId;
+  }
+
+  Future<String> _resolveScheduledRestoreXmlPath(ScheduledJob schedule, _ResolvedStorage storage) async {
+    final requested = schedule.restoreXmlPath.trim();
+    if (requested != ScheduledJob.latestRestoreXmlPath) {
+      return requested;
+    }
+    final vmName = schedule.vmName.trim();
+    if (vmName.isEmpty) {
+      throw StateError('latest restore schedule requires vmName');
+    }
+    final entries = await _loadRestoreEntries(storageId: storage.storage.id);
+    for (final entry in entries) {
+      if (entry.vmName == vmName && entry.hasAllDisks) {
+        return entry.xmlPath;
+      }
+    }
+    throw StateError('no complete restore XML found for VM "$vmName"');
+  }
+
+  void _failScheduledJobStart(ScheduledJob schedule, String message) {
+    final type = schedule.type == ScheduledJobType.backup ? AgentJobType.backup : AgentJobType.restore;
+    final server = _serverById(schedule.serverId);
+    final storage = _resolveStorageById(schedule.storageId);
+    final vmName = _scheduledJobVmName(schedule);
+    final jobId = _createJob(type, vmName: vmName, storageId: schedule.storageId, scheduleId: schedule.id);
+    _setJobContext(jobId, source: server == null ? schedule.name : _formatJobSource(server, vmName), target: storage?.storage.name, driverLabel: storage?.driverId);
+    final current = _jobs[jobId];
+    if (current == null) {
+      return;
+    }
+    _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: message));
+    _notifyNtfymeJobCompletion(jobId, type: type, state: AgentJobState.failure, message: message);
+  }
+
+  String _scheduledJobVmName(ScheduledJob schedule) {
+    final configuredVm = schedule.vmName.trim();
+    if (configuredVm.isNotEmpty) {
+      return configuredVm;
+    }
+    if (schedule.restoreXmlPath != ScheduledJob.latestRestoreXmlPath) {
+      return _extractVmNameFromXmlPath(schedule.restoreXmlPath);
+    }
+    return '';
   }
 
   Future<void> _loadAgentSettings() async {
@@ -167,6 +417,7 @@ class AgentHttpServer {
     _agentSettings = agentSettings;
     _cachedGdriveDriver = null;
     await _agentSettingsStore.save(agentSettings);
+    _restartScheduleTimer();
 
     Future<void> syncServers() async {
       for (final id in removed) {
@@ -661,7 +912,12 @@ class AgentHttpServer {
           _json(request, 400, {'error': validationError});
           return;
         }
-        final jobId = _createJob(AgentJobType.backup);
+        final guardMessage = _jobStartGuardMessage(type: AgentJobType.backup, vmName: vmName, storageId: resolvedStorage.storage.id);
+        if (guardMessage != null) {
+          _json(request, 409, {'error': guardMessage});
+          return;
+        }
+        final jobId = _createJob(AgentJobType.backup, vmName: vmName, storageId: resolvedStorage.storage.id);
         _json(request, 200, AgentJobStart(jobId: jobId).toMap());
         _startBackupJob(
           jobId,
@@ -674,6 +930,28 @@ class AgentHttpServer {
           storage: resolvedStorage,
           freshRequested: effectiveFreshRequested,
         );
+        return;
+      }
+      if (request.method == 'POST' && path.startsWith('/schedules/') && path.endsWith('/run')) {
+        final parts = path.split('/');
+        if (parts.length < 4) {
+          _json(request, 400, {'error': 'missing schedule id'});
+          return;
+        }
+        final scheduleId = Uri.decodeComponent(parts[2]);
+        final schedule = _scheduleById(scheduleId);
+        if (schedule == null) {
+          _json(request, 404, {'error': 'schedule not found'});
+          return;
+        }
+        try {
+          final jobId = await _startScheduledJob(schedule);
+          _json(request, 200, AgentJobStart(jobId: jobId).toMap());
+        } on _JobGuardRejected catch (error) {
+          _json(request, 409, {'error': error.message});
+        } catch (error) {
+          _json(request, 400, {'error': error.toString()});
+        }
         return;
       }
       if (request.method == 'POST' && path.startsWith('/servers/') && path.endsWith('/restore/precheck')) {
@@ -738,7 +1016,13 @@ class AgentHttpServer {
           return;
         }
         final resolvedDriverId = requestedDriver.isNotEmpty ? requestedDriver : resolvedStorage.driverId;
-        final jobId = _createJob(AgentJobType.restore);
+        final restoreVmName = _extractVmNameFromXmlPath(xmlPath);
+        final guardMessage = _jobStartGuardMessage(type: AgentJobType.restore, vmName: restoreVmName, storageId: resolvedStorage.storage.id);
+        if (guardMessage != null) {
+          _json(request, 409, {'error': guardMessage});
+          return;
+        }
+        final jobId = _createJob(AgentJobType.restore, vmName: restoreVmName, storageId: resolvedStorage.storage.id);
         _json(request, 200, AgentJobStart(jobId: jobId).toMap());
         _startRestoreJob(jobId, server, xmlPath, decision, driverIdOverride: resolvedDriverId, storage: resolvedStorage);
         return;
@@ -1584,7 +1868,7 @@ class AgentHttpServer {
     };
   }
 
-  String _createJob(AgentJobType type) {
+  String _createJob(AgentJobType type, {String? vmName, String? storageId, String? scheduleId}) {
     final jobId = '${DateTime.now().millisecondsSinceEpoch}-${type.name}';
     _jobs[jobId] = AgentJobStatus(
       id: jobId,
@@ -1606,14 +1890,54 @@ class AgentHttpServer {
       physicalRemainingBytes: 0,
       physicalTotalBytes: 0,
       physicalProgressPercent: 0,
+      scheduleId: scheduleId?.trim() ?? '',
     );
-    _jobControls[jobId] = _JobControl(startedAt: DateTime.now());
+    _jobControls[jobId] = _JobControl(startedAt: DateTime.now(), vmName: vmName, storageId: storageId);
     return jobId;
+  }
+
+  String? _jobStartGuardMessage({required AgentJobType type, required String vmName, required String storageId}) {
+    if (!_usesBackupRestoreGuards(type)) {
+      return null;
+    }
+    final running = _runningBackupRestoreJobs().toList();
+    final maxGlobal = _agentSettings.maxConcurrentBackupRestoreJobs;
+    if (running.length >= maxGlobal) {
+      return 'Maximum concurrent backup/restore jobs reached ($maxGlobal).';
+    }
+
+    final normalizedVmName = vmName.trim();
+    if (normalizedVmName.isNotEmpty) {
+      final activeForVm = running.where((entry) => _jobControls[entry.key]?.vmName == normalizedVmName).length;
+      final maxPerVm = _agentSettings.maxConcurrentJobsPerVm;
+      if (activeForVm >= maxPerVm) {
+        return 'Maximum concurrent jobs for VM "$normalizedVmName" reached ($maxPerVm).';
+      }
+    }
+
+    final normalizedStorageId = storageId.trim();
+    if (normalizedStorageId.isNotEmpty) {
+      final activeForStorage = running.where((entry) => _jobControls[entry.key]?.storageId == normalizedStorageId).length;
+      final maxPerStorage = _agentSettings.maxConcurrentJobsPerStorage;
+      if (activeForStorage >= maxPerStorage) {
+        return 'Maximum concurrent jobs for storage "$normalizedStorageId" reached ($maxPerStorage).';
+      }
+    }
+    return null;
+  }
+
+  Iterable<MapEntry<String, AgentJobStatus>> _runningBackupRestoreJobs() {
+    return _jobs.entries.where((entry) => entry.value.state == AgentJobState.running && _usesBackupRestoreGuards(entry.value.type));
+  }
+
+  bool _usesBackupRestoreGuards(AgentJobType type) {
+    return type == AgentJobType.backup || type == AgentJobType.restore;
   }
 
   void _updateJob(String jobId, AgentJobStatus status) {
     final previous = _jobs[jobId];
-    _jobs[jobId] = status;
+    final next = previous != null && status.scheduleId.isEmpty && previous.scheduleId.isNotEmpty ? status.copyWith(scheduleId: previous.scheduleId) : status;
+    _jobs[jobId] = next;
     if (status.state == AgentJobState.failure && previous?.state != AgentJobState.failure) {
       _publishEvent('agent.job_failure', {'jobId': status.id, 'type': status.type.name, 'message': status.message});
     }
@@ -2517,7 +2841,8 @@ class AgentHttpServer {
       payload['size'] = _formatBytes(sizeBytes);
     }
     if (state == AgentJobState.failure) {
-      payload['error'] = messageText;
+      final errorMessage = message.trim();
+      payload['error'] = errorMessage.isEmpty ? messageText : errorMessage;
     }
     _hostLog('Ntfy me notification queued: ${jsonEncode(payload)}');
     unawaited(_postNtfymeNotification(token, payload));
@@ -2750,9 +3075,11 @@ class AgentHttpServer {
 }
 
 class _JobControl {
-  _JobControl({required this.startedAt});
+  _JobControl({required this.startedAt, String? vmName, String? storageId}) : vmName = vmName?.trim(), storageId = storageId?.trim();
 
   final DateTime startedAt;
+  final String? vmName;
+  final String? storageId;
   bool canceled = false;
   BackupAgent? backupAgent;
   Isolate? workerIsolate;
@@ -2763,6 +3090,15 @@ class _JobControl {
   String? driverLabel;
   bool resultHandled = false;
   String? lastNtfyCompletionKey;
+}
+
+class _JobGuardRejected implements Exception {
+  const _JobGuardRejected(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
 }
 
 enum _RestoreCheckMode { full, quick }

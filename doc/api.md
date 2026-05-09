@@ -68,6 +68,9 @@ Response:
   "connectionVerified":false,
   "blockSizeMB":1,
   "dummyDriverTmpWrites":false,
+  "maxConcurrentBackupRestoreJobs":1,
+  "maxConcurrentJobsPerVm":1,
+  "maxConcurrentJobsPerStorage":1,
   "ntfymeToken":"",
   "servers":[],
   "storage":[
@@ -92,9 +95,92 @@ Response:
         "basePath":"/Backup"
       }
     }
+  ],
+  "schedules":[
+    {
+      "id":"schedule_1739440000000002",
+      "name":"Nightly VM backup",
+      "enabled":true,
+      "waitForRunningJobs":true,
+      "type":"backup",
+      "frequency":"every5Minutes",
+      "time":"00:02",
+      "weekdays":[],
+      "serverId":"server_1739440000000003",
+      "storageId":"dest_sftp_1739440000000001",
+      "vmName":"app01",
+      "restoreXmlPath":"",
+      "restoreDecision":""
+    },
+    {
+      "id":"schedule_1739440000000004",
+      "name":"Weekly restore drill",
+      "enabled":false,
+      "waitForRunningJobs":false,
+      "type":"restore",
+      "frequency":"weekly",
+      "time":"09:00",
+      "weekdays":[1],
+      "serverId":"server_1739440000000005",
+      "storageId":"dest_sftp_1739440000000001",
+      "vmName":"app01",
+      "restoreXmlPath":"__latest__",
+      "restoreDecision":"overwrite"
+    }
   ]
 }
 ```
+
+### Schedules
+
+Schedules are stored in `agent.yaml` under `schedules` grouped by the local agent hostname. Only schedules are grouped this way; servers, storage, tokens, and guard settings remain shared root config.
+
+```yaml
+schedules:
+  nuc04:
+    - id: schedule_1739440000000002
+      name: Backup app01 on nuc04 to Remote SFTP
+      enabled: true
+      waitForRunningJobs: true
+      type: backup
+      frequency: every5Minutes
+      time: '00:02'
+      weekdays: []
+      serverId: server_1739440000000003
+      storageId: dest_sftp_1739440000000001
+      vmName: app01
+      restoreXmlPath: ''
+      restoreDecision: ''
+```
+
+`GET /config` and `POST /config` still use the flat schedule list for the current agent.
+The agent checks enabled schedules every 30 seconds and starts matching backup or restore jobs at the configured local agent time.
+Backup and restore starts are guarded by `maxConcurrentBackupRestoreJobs`, `maxConcurrentJobsPerVm`, and `maxConcurrentJobsPerStorage`. All three are stored in `agent.yaml`, default to `1`, and also apply to manual schedule runs. When a due schedule is blocked by a guard, the agent records a failed job and sends the configured ntfyme failure notification.
+
+Fields:
+- `name`: generated from schedule type, server, storage, and VM. Clients should not expose this as an editable field.
+- `waitForRunningJobs`: when `true`, an automatic schedule run that is blocked by a concurrency guard remains pending and starts when the guard allows it. When `false`, the blocked run is recorded as a failed job and sends the configured ntfyme failure notification.
+- `type`: `backup` or `restore`.
+- `frequency`: `every5Minutes`, `hourly`, `daily`, or `weekly`.
+- `time`: local agent time in `HH:mm` format. Hourly schedules use the minute portion and run every hour on that minute. `every5Minutes` schedules also use the minute portion as an offset, for example `00:02` runs at `:02`, `:07`, `:12`, and so on.
+- `weekdays`: ISO weekday numbers (`1` Monday through `7` Sunday), used only for weekly schedules.
+- `serverId` and `storageId`: references to configured server and storage entries.
+- Backup schedules use `vmName`.
+- Restore schedules use `restoreXmlPath` and `restoreDecision`. Set `restoreXmlPath` to `__latest__` and `vmName` to a source VM name to restore the latest complete XML for that VM at runtime.
+
+### Run schedule now
+
+- `POST /schedules/{id}/run`
+
+Starts the schedule immediately, even when `enabled` is `false`.
+
+Response:
+```json
+{"jobId":"1739440000000-backup"}
+```
+
+The GUI schedules list includes quick filters for server, backup/restore type, server-VM combination, and storage. These filters are local UI state and are not stored in `agent.yaml`.
+Rows for schedules with a running job are highlighted in the GUI. The agent includes `scheduleId` in job status responses for jobs started from a schedule.
 
 ### Update full config
 

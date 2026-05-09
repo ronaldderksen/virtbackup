@@ -33,7 +33,7 @@ class AppSettingsStore {
       final token = await loadAgentToken();
       return await _loadFromYamlFile(_file, token: token);
     } catch (error) {
-      if (error is StateError && error.toString().contains('blockSizeMB')) {
+      if (error is StateError && (error.toString().contains('blockSizeMB') || error.toString().contains('maxConcurrent') || error.toString().contains('agent hostname'))) {
         rethrow;
       }
       return AppSettings.empty();
@@ -42,7 +42,11 @@ class AppSettingsStore {
 
   Future<void> save(AppSettings agentSettings) async {
     final token = await _loadOrCreateToken();
+    final agentName = _agentScheduleName();
     final data = agentSettings.toMap();
+    final scheduleGroups = await _readExistingScheduleGroups(agentName);
+    scheduleGroups[agentName] = _scheduleListFromRaw(data['schedules'], agentName);
+    data['schedules'] = scheduleGroups;
     _encryptPasswordsInMap(data, token);
     _encryptGdriveTokensInMap(data, token);
     _encryptSftpPasswordInMap(data, token);
@@ -126,20 +130,104 @@ class AppSettingsStore {
       return AppSettings.empty();
     }
     final normalized = _normalizeYaml(decoded);
+    final agentName = _agentScheduleName();
     final updatedLegacyKeys = _removeLegacyRootKeys(normalized);
-    final updatedRootOrder = _reorderRootKeys(normalized);
     final updatedStorages = _ensureStorageDefaults(normalized);
     final updatedBlockSize = _ensureBlockSizeMb(normalized);
-    final updated = updatedLegacyKeys || updatedRootOrder || updatedStorages || updatedBlockSize;
+    final updatedJobGuards = _ensureJobGuards(normalized);
+    final updatedScheduleGroups = _ensureScheduleGroups(normalized, agentName);
+    final updatedRootOrder = _reorderRootKeys(normalized);
+    final updated = updatedLegacyKeys || updatedRootOrder || updatedStorages || updatedBlockSize || updatedJobGuards || updatedScheduleGroups;
     if (updated) {
       final encoded = _ensureTrailingNewline(_toYaml(normalized));
       await file.writeAsString(encoded);
       await AppSettingsStore.setFilePermissions(file, ownerOnly: true);
     }
-    _decryptPasswordsInMap(normalized, token);
-    _decryptGdriveTokensInMap(normalized, token);
-    _decryptSftpPasswordInMap(normalized, token);
-    return AppSettings.fromMap(normalized);
+    final appSettingsMap = Map<String, dynamic>.from(normalized);
+    appSettingsMap['schedules'] = _scheduleListForAgent(normalized['schedules'], agentName);
+    _decryptPasswordsInMap(appSettingsMap, token);
+    _decryptGdriveTokensInMap(appSettingsMap, token);
+    _decryptSftpPasswordInMap(appSettingsMap, token);
+    return AppSettings.fromMap(appSettingsMap);
+  }
+
+  String _agentScheduleName() {
+    final name = Platform.localHostname.trim();
+    if (name.isEmpty) {
+      throw StateError('Cannot determine agent hostname for schedule storage.');
+    }
+    return name;
+  }
+
+  Future<Map<String, dynamic>> _readExistingScheduleGroups(String agentName) async {
+    if (!await _file.exists()) {
+      return <String, dynamic>{agentName: <dynamic>[]};
+    }
+    final content = await _file.readAsString();
+    if (content.trim().isEmpty) {
+      return <String, dynamic>{agentName: <dynamic>[]};
+    }
+    final decoded = loadYaml(content);
+    if (decoded is! YamlMap) {
+      return <String, dynamic>{agentName: <dynamic>[]};
+    }
+    final normalized = _normalizeYaml(decoded);
+    _ensureScheduleGroups(normalized, agentName);
+    final schedules = normalized['schedules'];
+    if (schedules is Map) {
+      return Map<String, dynamic>.from(schedules);
+    }
+    return <String, dynamic>{agentName: <dynamic>[]};
+  }
+
+  bool _ensureScheduleGroups(Map<String, dynamic> data, String agentName) {
+    final schedules = data['schedules'];
+    if (schedules == null) {
+      data['schedules'] = <String, dynamic>{agentName: <dynamic>[]};
+      return true;
+    }
+    if (schedules is! Map) {
+      throw StateError('Invalid schedules. Expected an agent hostname map.');
+    }
+    var changed = false;
+    final grouped = <String, dynamic>{};
+    for (final entry in schedules.entries) {
+      final key = entry.key.toString().trim();
+      if (key.isEmpty) {
+        throw StateError('Invalid schedules. Agent hostname cannot be empty.');
+      }
+      if (entry.value is! List) {
+        throw StateError('Invalid schedules for agent "$key". Expected a list.');
+      }
+      grouped[key] = entry.value;
+    }
+    if (!grouped.containsKey(agentName)) {
+      grouped[agentName] = <dynamic>[];
+      changed = true;
+    }
+    if (changed || schedules is! Map<String, dynamic>) {
+      data['schedules'] = grouped;
+      return true;
+    }
+    return false;
+  }
+
+  List<dynamic> _scheduleListForAgent(Object? schedules, String agentName) {
+    if (schedules is! Map) {
+      throw StateError('Invalid schedules. Expected an agent hostname map.');
+    }
+    final raw = schedules[agentName];
+    if (raw is! List) {
+      throw StateError('Invalid schedules for agent "$agentName". Expected a list.');
+    }
+    return raw;
+  }
+
+  List<dynamic> _scheduleListFromRaw(Object? schedules, String agentName) {
+    if (schedules is! List) {
+      throw StateError('Invalid schedules for agent "$agentName". Expected a list.');
+    }
+    return schedules;
   }
 
   bool _ensureStorageDefaults(Map<String, dynamic> data) {
@@ -193,6 +281,27 @@ class AppSettingsStore {
     return false;
   }
 
+  bool _ensureJobGuards(Map<String, dynamic> data) {
+    var changed = false;
+    for (final key in const <String>['maxConcurrentBackupRestoreJobs', 'maxConcurrentJobsPerVm', 'maxConcurrentJobsPerStorage']) {
+      final value = data[key];
+      if (value == null) {
+        data[key] = 1;
+        changed = true;
+        continue;
+      }
+      final parsed = value is num ? value.toInt() : int.tryParse(value.toString().trim());
+      if (parsed == null || parsed < 1) {
+        throw StateError('Invalid $key. Value must be 1 or higher.');
+      }
+      if (value is! int) {
+        data[key] = parsed;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   bool _removeLegacyRootKeys(Map<String, dynamic> data) {
     const legacyRootKeys = <String>{
       'restoreStorageId',
@@ -219,7 +328,21 @@ class AppSettingsStore {
   }
 
   bool _reorderRootKeys(Map<String, dynamic> data) {
-    const preferredOrder = <String>['backupPath', 'log_level', 'backupStorageId', 'connectionVerified', 'blockSizeMB', 'dummyDriverTmpWrites', 'ntfymeToken', 'servers', 'storage'];
+    const preferredOrder = <String>[
+      'backupPath',
+      'log_level',
+      'backupStorageId',
+      'connectionVerified',
+      'blockSizeMB',
+      'dummyDriverTmpWrites',
+      'maxConcurrentBackupRestoreJobs',
+      'maxConcurrentJobsPerVm',
+      'maxConcurrentJobsPerStorage',
+      'ntfymeToken',
+      'servers',
+      'storage',
+      'schedules',
+    ];
     final originalKeys = data.keys.toList();
     final ordered = <String, dynamic>{};
     for (final key in preferredOrder) {
