@@ -812,10 +812,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       if (reachable) {
         _agentErrorNotified = false;
         _agentAuthFailed = false;
-      } else if (_selectedMenuIndex == 0) {
-        if (!_agentAuthFailed) {
-          _selectedMenuIndex = 1;
-        }
       }
     });
     if (reachable) {
