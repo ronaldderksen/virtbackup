@@ -4,6 +4,10 @@ Website: [virtbackup.net](https://virtbackup.net/)
 
 Virt Backup is a Flutter app plus a local agent for backing up and restoring libvirt/QEMU virtual machines over SSH/SFTP.
 
+## License
+
+Virt Backup is licensed under the Apache License 2.0. See `LICENSE`.
+
 ## What It Does
 
 - Discovers VM inventory on a remote hypervisor (via `virsh` over SSH).
@@ -42,7 +46,7 @@ This project can delete, overwrite, or corrupt virtual machine disk data if misc
 
 - Always test restores before relying on it.
 - Keep independent backups and verify integrity.
-- The software is provided "AS IS", without warranty of any kind, and the authors/copyright holders are not liable for any claim or damages.
+- The software is provided "AS IS", without warranty of any kind, and the developer is not liable for data loss, service interruption, system damage, loss of profits, or other damages.
 
 ## Attribution
 

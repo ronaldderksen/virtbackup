@@ -1,0 +1,52 @@
+Virt Backup Terms of Service
+
+Effective date
+
+These terms are effective as of February 9, 2026.
+
+Use of the software
+
+You may use the software as intended. You are responsible for proper
+configuration, operation, and the management of your systems and backups.
+
+"As is" basis
+
+The software is provided on an "as is" basis, without warranties of any kind,
+express or implied.
+
+Backups and restores
+
+You are responsible for verifying that backups are completed successfully and
+that restores work for your environment. You should regularly test restores and
+keep independent backup copies where appropriate. I do not guarantee that any
+backup or restore operation will complete successfully or prevent data loss.
+
+Limitation of liability
+
+To the maximum extent permitted by law, I am not liable for any direct,
+indirect, incidental, special, exemplary, or consequential damages, including
+data loss, system damage, lost profits, loss of use, or business interruption
+arising from the use of the software or service.
+
+Subscriptions and support
+
+Subscriptions are for supporting development of the project. A subscription
+does not include a right to support, warranty, indemnity, or any additional
+liability from the developer unless separately agreed in writing.
+
+Billing and cancellation
+
+Paid subscriptions are billed through the payment provider shown during
+checkout. You may cancel through the billing portal. Cancellation stops future
+renewals but does not automatically refund payments already made, unless
+required by law or separately agreed.
+
+Availability
+
+I aim to provide a reliable service, but I do not guarantee uninterrupted
+availability or error-free operation.
+
+Changes
+
+I may update these terms from time to time. The latest version will be
+published on the Virt Backup website.

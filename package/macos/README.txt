@@ -10,6 +10,8 @@ Files
 - rotate_agent_logs.sh              Log rotation helper used by the service
 - log/                              Logs will be written here
 - README.txt                        This file
+- TERMS.txt                         Terms of service and liability information
+- LICENSE                           Apache License 2.0
 
 Install
 -------
@@ -30,6 +32,15 @@ Run
   ./virtbackup-agent
 
 The agent HTTP API listens on port 33551.
+
+Terms and license
+-----------------
+Before using VirtBackup, read TERMS.txt and LICENSE. The software is
+provided as-is and you are responsible for verifying backups and restores in
+your own environment.
+
+Always test restores before relying on backups. Keep independent backup copies
+where appropriate.
 
 Service commands
 ----------------
