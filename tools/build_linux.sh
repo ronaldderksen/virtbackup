@@ -5,6 +5,8 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
 APP_NAME="virtbackup"
+PLATFORM_NAME="linux"
+ARCH_NAME="x64"
 VERSION=$(awk -F ':' '/^version:/ {gsub(/[[:space:]]/, "", $2); split($2, parts, "+"); print parts[1]}' pubspec.yaml)
 
 build_agent() {
@@ -69,7 +71,7 @@ if [ -d "$STAGE_DIR/assets" ]; then
 fi
 
 mkdir -p "$OUT_DIR"
-TAR_PATH="$OUT_DIR/${APP_NAME}-${VERSION}.tgz"
+TAR_PATH="$OUT_DIR/${APP_NAME}-${PLATFORM_NAME}-${ARCH_NAME}-${VERSION}.tgz"
 
 tar -C "$OUT_DIR" -czf "$TAR_PATH" "${APP_NAME}-${VERSION}"
 

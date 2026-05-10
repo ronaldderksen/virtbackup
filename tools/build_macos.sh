@@ -5,7 +5,21 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
 APP_NAME="virtbackup"
+PLATFORM_NAME="macos"
 VERSION=$(awk -F ':' '/^version:/ {gsub(/[[:space:]]/, "", $2); split($2, parts, "+"); print parts[1]}' pubspec.yaml)
+UNAME_M="$(uname -m)"
+case "$UNAME_M" in
+  arm64)
+    ARCH_NAME="arm64"
+    ;;
+  x86_64)
+    ARCH_NAME="x64"
+    ;;
+  *)
+    echo "Unsupported macOS architecture: $UNAME_M" >&2
+    exit 1
+    ;;
+esac
 
 build_agent() {
   local out_path="$1"
@@ -69,7 +83,7 @@ if [ -d "$STAGE_DIR/assets" ]; then
 fi
 
 mkdir -p "$OUT_DIR"
-TAR_PATH="$OUT_DIR/${APP_NAME}-${VERSION}.tgz"
+TAR_PATH="$OUT_DIR/${APP_NAME}-${PLATFORM_NAME}-${ARCH_NAME}-${VERSION}.tgz"
 
 tar -C "$OUT_DIR" -czf "$TAR_PATH" "${APP_NAME}-${VERSION}"
 

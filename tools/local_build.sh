@@ -9,12 +9,28 @@ VERSION=$(awk -F ':' '/^version:/ {gsub(/[[:space:]]/, "", $2); split($2, parts,
 
 UNAME_S="$(uname -s)"
 if [ "$UNAME_S" = "Darwin" ]; then
+  PLATFORM_NAME="macos"
+  UNAME_M="$(uname -m)"
+  case "$UNAME_M" in
+    arm64)
+      ARCH_NAME="arm64"
+      ;;
+    x86_64)
+      ARCH_NAME="x64"
+      ;;
+    *)
+      echo "Unsupported macOS architecture: $UNAME_M" >&2
+      exit 1
+      ;;
+  esac
   "${ROOT_DIR}/tools/build_macos.sh"
 else
+  PLATFORM_NAME="linux"
+  ARCH_NAME="x64"
   "${ROOT_DIR}/tools/build_linux.sh"
 fi
 
-TGZ_PATH="$ROOT_DIR/build/tgz/${APP_NAME}-${VERSION}.tgz"
+TGZ_PATH="$ROOT_DIR/build/tgz/${APP_NAME}-${PLATFORM_NAME}-${ARCH_NAME}-${VERSION}.tgz"
 TARGET_BASE="$HOME/VirtBackup"
 
 tar -C "$TARGET_BASE" -xvf "$TGZ_PATH"

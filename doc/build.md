@@ -2,6 +2,9 @@
 
 This document describes what ends up in the packaged TGZ created by `tools/build_linux.sh` and `tools/build_macos.sh`.
 
+The TGZ filename includes the target platform and architecture before the version: `virtbackup-linux-x64-<version>.tgz`, `virtbackup-macos-arm64-<version>.tgz`, or `virtbackup-macos-x64-<version>.tgz`.
+The top-level directory inside the archive remains `virtbackup-<version>`.
+
 ## Included
 
 - App bundle from the Flutter build output.
