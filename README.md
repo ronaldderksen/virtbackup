@@ -19,8 +19,8 @@ Virt Backup is licensed under the Apache License 2.0. See `LICENSE`.
 ## Storage Backends (Drivers)
 
 - `filesystem`: stores manifests/blobs on a local path you choose.
+- `sftp`: stores manifests/blobs on a remote SFTP server.
 - `gdrive` (preview): stores manifests/blobs in Google Drive (with a local cache).
-- `dummy`: discards writes (useful for testing backpressure/progress behavior).
 
 ## Components
 
