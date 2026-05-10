@@ -42,15 +42,18 @@ class AppSettingsStore {
 
   Future<void> save(AppSettings agentSettings) async {
     final token = await _loadOrCreateToken();
-    final agentName = _agentScheduleName();
+    final agentName = _agentHostname();
     final data = agentSettings.toMap();
+    final virtBackupAccountGroups = await _readExistingVirtBackupAccountGroups(agentName);
+    virtBackupAccountGroups[agentName] = _virtBackupAccountFromRaw(data['virtBackupAccount'], agentName);
+    data['virtBackupAccount'] = virtBackupAccountGroups;
     final scheduleGroups = await _readExistingScheduleGroups(agentName);
     scheduleGroups[agentName] = _scheduleListFromRaw(data['schedules'], agentName);
     data['schedules'] = scheduleGroups;
     _encryptPasswordsInMap(data, token);
     _encryptGdriveTokensInMap(data, token);
     _encryptSftpPasswordInMap(data, token);
-    _encryptVirtBackupAccountTokensInMap(data, token);
+    _encryptVirtBackupAccountTokensInMap(data, token, agentName);
     final encoded = _ensureTrailingNewline(_toYaml(data));
     final tempFile = File('${_file.path}.tmp');
     var replaced = false;
@@ -131,34 +134,57 @@ class AppSettingsStore {
       return AppSettings.empty();
     }
     final normalized = _normalizeYaml(decoded);
-    final agentName = _agentScheduleName();
+    final agentName = _agentHostname();
     final updatedLegacyKeys = _removeLegacyRootKeys(normalized);
     final updatedStorages = _ensureStorageDefaults(normalized);
     final updatedBlockSize = _ensureBlockSizeMb(normalized);
     final updatedJobGuards = _ensureJobGuards(normalized);
+    final updatedVirtBackupAccountGroups = _ensureVirtBackupAccountGroups(normalized, agentName);
     final updatedScheduleGroups = _ensureScheduleGroups(normalized, agentName);
     final updatedRootOrder = _reorderRootKeys(normalized);
-    final updated = updatedLegacyKeys || updatedRootOrder || updatedStorages || updatedBlockSize || updatedJobGuards || updatedScheduleGroups;
+    final updated = updatedLegacyKeys || updatedRootOrder || updatedStorages || updatedBlockSize || updatedJobGuards || updatedVirtBackupAccountGroups || updatedScheduleGroups;
     if (updated) {
       final encoded = _ensureTrailingNewline(_toYaml(normalized));
       await file.writeAsString(encoded);
       await AppSettingsStore.setFilePermissions(file, ownerOnly: true);
     }
     final appSettingsMap = Map<String, dynamic>.from(normalized);
-    appSettingsMap['schedules'] = _scheduleListForAgent(normalized['schedules'], agentName);
     _decryptPasswordsInMap(appSettingsMap, token);
     _decryptGdriveTokensInMap(appSettingsMap, token);
     _decryptSftpPasswordInMap(appSettingsMap, token);
-    _decryptVirtBackupAccountTokensInMap(appSettingsMap, token);
+    _decryptVirtBackupAccountTokensInMap(appSettingsMap, token, agentName);
+    appSettingsMap['virtBackupAccount'] = _virtBackupAccountForAgent(appSettingsMap['virtBackupAccount'], agentName);
+    appSettingsMap['schedules'] = _scheduleListForAgent(normalized['schedules'], agentName);
     return AppSettings.fromMap(appSettingsMap);
   }
 
-  String _agentScheduleName() {
+  String _agentHostname() {
     final name = Platform.localHostname.trim();
     if (name.isEmpty) {
-      throw StateError('Cannot determine agent hostname for schedule storage.');
+      throw StateError('Cannot determine agent hostname for settings storage.');
     }
     return name;
+  }
+
+  Future<Map<String, dynamic>> _readExistingVirtBackupAccountGroups(String agentName) async {
+    if (!await _file.exists()) {
+      return <String, dynamic>{agentName: <String, dynamic>{}};
+    }
+    final content = await _file.readAsString();
+    if (content.trim().isEmpty) {
+      return <String, dynamic>{agentName: <String, dynamic>{}};
+    }
+    final decoded = loadYaml(content);
+    if (decoded is! YamlMap) {
+      return <String, dynamic>{agentName: <String, dynamic>{}};
+    }
+    final normalized = _normalizeYaml(decoded);
+    _ensureVirtBackupAccountGroups(normalized, agentName);
+    final account = normalized['virtBackupAccount'];
+    if (account is Map) {
+      return Map<String, dynamic>.from(account);
+    }
+    return <String, dynamic>{agentName: <String, dynamic>{}};
   }
 
   Future<Map<String, dynamic>> _readExistingScheduleGroups(String agentName) async {
@@ -180,6 +206,38 @@ class AppSettingsStore {
       return Map<String, dynamic>.from(schedules);
     }
     return <String, dynamic>{agentName: <dynamic>[]};
+  }
+
+  bool _ensureVirtBackupAccountGroups(Map<String, dynamic> data, String agentName) {
+    final account = data['virtBackupAccount'];
+    if (account == null) {
+      data['virtBackupAccount'] = <String, dynamic>{agentName: <String, dynamic>{}};
+      return true;
+    }
+    if (account is! Map) {
+      throw StateError('Invalid virtBackupAccount. Expected an agent hostname map.');
+    }
+    var changed = false;
+    final grouped = <String, dynamic>{};
+    for (final entry in account.entries) {
+      final key = entry.key.toString().trim();
+      if (key.isEmpty) {
+        throw StateError('Invalid virtBackupAccount. Agent hostname cannot be empty.');
+      }
+      if (entry.value is! Map) {
+        throw StateError('Invalid virtBackupAccount for agent "$key". Expected a map.');
+      }
+      grouped[key] = entry.value;
+    }
+    if (!grouped.containsKey(agentName)) {
+      grouped[agentName] = <String, dynamic>{};
+      changed = true;
+    }
+    if (changed || account is! Map<String, dynamic>) {
+      data['virtBackupAccount'] = grouped;
+      return true;
+    }
+    return false;
   }
 
   bool _ensureScheduleGroups(Map<String, dynamic> data, String agentName) {
@@ -230,6 +288,24 @@ class AppSettingsStore {
       throw StateError('Invalid schedules for agent "$agentName". Expected a list.');
     }
     return schedules;
+  }
+
+  Map<String, dynamic> _virtBackupAccountForAgent(Object? account, String agentName) {
+    if (account is! Map) {
+      throw StateError('Invalid virtBackupAccount. Expected an agent hostname map.');
+    }
+    final raw = account[agentName];
+    if (raw is! Map) {
+      throw StateError('Invalid virtBackupAccount for agent "$agentName". Expected a map.');
+    }
+    return Map<String, dynamic>.from(raw);
+  }
+
+  Map<String, dynamic> _virtBackupAccountFromRaw(Object? account, String agentName) {
+    if (account is! Map) {
+      throw StateError('Invalid virtBackupAccount for agent "$agentName". Expected a map.');
+    }
+    return Map<String, dynamic>.from(account);
   }
 
   bool _ensureStorageDefaults(Map<String, dynamic> data) {
@@ -568,11 +644,18 @@ class AppSettingsStore {
     _decryptStorageSftpPasswords(data, token);
   }
 
-  void _encryptVirtBackupAccountTokensInMap(Map<String, dynamic> data, String token) {
+  void _encryptVirtBackupAccountTokensInMap(Map<String, dynamic> data, String token, String agentName) {
     final account = data['virtBackupAccount'];
     if (account is! Map) {
       return;
     }
+    final entry = account[agentName];
+    if (entry is Map) {
+      _encryptVirtBackupAccountEntry(entry, token);
+    }
+  }
+
+  void _encryptVirtBackupAccountEntry(Map<dynamic, dynamic> account, String token) {
     final accessToken = account['accessToken']?.toString() ?? '';
     if (accessToken.isNotEmpty) {
       account['accessTokenEnc'] = _encryptPassword(accessToken, token);
@@ -589,11 +672,18 @@ class AppSettingsStore {
     }
   }
 
-  void _decryptVirtBackupAccountTokensInMap(Map<String, dynamic> data, String? token) {
+  void _decryptVirtBackupAccountTokensInMap(Map<String, dynamic> data, String? token, String agentName) {
     final account = data['virtBackupAccount'];
     if (account is! Map) {
       return;
     }
+    final entry = account[agentName];
+    if (entry is Map) {
+      _decryptVirtBackupAccountEntry(entry, token);
+    }
+  }
+
+  void _decryptVirtBackupAccountEntry(Map<dynamic, dynamic> account, String? token) {
     final accessEnc = account['accessTokenEnc']?.toString();
     if (accessEnc != null && accessEnc.isNotEmpty) {
       account['accessToken'] = (token == null || token.isEmpty) ? '' : _decryptPassword(accessEnc, token);

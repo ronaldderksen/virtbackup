@@ -250,9 +250,19 @@ Response:
 
 ### Schedules
 
-Schedules are stored in `agent.yaml` under `schedules` grouped by the local agent hostname. Only schedules are grouped this way; servers, storage, tokens, and guard settings remain shared root config.
+Schedules and Virt Backup account tokens are stored in `agent.yaml` grouped by the local agent hostname. Servers, storage, and guard settings remain shared root config.
 
 ```yaml
+virtBackupAccount:
+  nuc04:
+    email: user@example.com
+    accountBaseUrl: https://virtbackup.net
+    accessToken: ''
+    accessTokenExpiresAt: '2026-05-17T00:00:00.000Z'
+    refreshToken: ''
+    refreshTokenExpiresAt: '2026-06-09T00:00:00.000Z'
+    accessTokenEnc: encrypted-access-token
+    refreshTokenEnc: encrypted-refresh-token
 schedules:
   nuc04:
     - id: schedule_1739440000000002

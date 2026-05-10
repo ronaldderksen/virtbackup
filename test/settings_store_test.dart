@@ -100,6 +100,48 @@ schedules:
     }
   });
 
+  test('save preserves Virt Backup account tokens for other host groups', () async {
+    final tempDir = await Directory.systemTemp.createTemp('virtbackup_settings_store_account_groups_test_');
+    try {
+      final settingsFile = File('${tempDir.path}${Platform.pathSeparator}agent.yaml');
+      await settingsFile.writeAsString('''
+virtBackupAccount:
+  other-host:
+    email: other@example.com
+    accountBaseUrl: https://virtbackup.net
+    accessToken: ''
+    accessTokenExpiresAt: '2026-05-17T00:00:00.000Z'
+    refreshToken: ''
+    refreshTokenExpiresAt: '2026-06-09T00:00:00.000Z'
+    accessTokenEnc: encrypted-access-token
+    refreshTokenEnc: encrypted-refresh-token
+schedules: {}
+''');
+      final store = AppSettingsStore(file: settingsFile);
+      final settings = AppSettings.empty().copyWith(
+        virtBackupAccount: VirtBackupAccountTokens(
+          email: 'user@example.com',
+          accountBaseUrl: 'https://virtbackup.net',
+          accessToken: 'access-token-value',
+          accessTokenExpiresAt: DateTime.utc(2026, 5, 17),
+          refreshToken: 'refresh-token-value',
+          refreshTokenExpiresAt: DateTime.utc(2026, 6, 9),
+        ),
+      );
+
+      await store.save(settings);
+
+      final decoded = loadYaml(await settingsFile.readAsString()) as YamlMap;
+      final account = decoded['virtBackupAccount'] as YamlMap;
+      expect(account['other-host'], isA<YamlMap>());
+      expect((account['other-host'] as YamlMap)['email'], 'other@example.com');
+      expect((account['other-host'] as YamlMap)['accessTokenEnc'], 'encrypted-access-token');
+      expect((account['other-host'] as YamlMap)['refreshTokenEnc'], 'encrypted-refresh-token');
+    } finally {
+      await tempDir.delete(recursive: true);
+    }
+  });
+
   test('save encrypts Virt Backup account tokens', () async {
     final tempDir = await Directory.systemTemp.createTemp('virtbackup_settings_store_account_test_');
     try {
@@ -119,7 +161,8 @@ schedules:
       await store.save(settings);
 
       final decoded = loadYaml(await settingsFile.readAsString()) as YamlMap;
-      final account = decoded['virtBackupAccount'] as YamlMap;
+      final accountGroups = decoded['virtBackupAccount'] as YamlMap;
+      final account = accountGroups[Platform.localHostname] as YamlMap;
       expect(account['accessToken'], '');
       expect(account['refreshToken'], '');
       expect(account['accessTokenEnc'].toString(), isNot(contains('access-token-value')));
