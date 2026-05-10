@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 cd "$ROOT_DIR"
+
+RELEASE=false
+for arg in "$@"; do
+  case "$arg" in
+    --release)
+      RELEASE=true
+      ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      echo "Usage: tools/local_build.sh [--release]" >&2
+      exit 1
+      ;;
+  esac
+done
 
 APP_NAME="virtbackup"
 VERSION=$(awk -F ':' '/^version:/ {gsub(/[[:space:]]/, "", $2); split($2, parts, "+"); print parts[1]}' pubspec.yaml)
@@ -41,4 +56,14 @@ if [ -x "$TARGET_DIR/install_agent_user_service.sh" ]; then
 else
   echo "install_agent_user_service.sh not found in $TARGET_DIR" >&2
   exit 1
+fi
+
+if [ "$RELEASE" = true ]; then
+  RELEASE_DIR="$SCRIPT_DIR/../../virtbackup_backend/public/downloads"
+  if [ ! -d "$RELEASE_DIR" ]; then
+    echo "Release directory not found: $RELEASE_DIR" >&2
+    exit 1
+  fi
+  cp "$TGZ_PATH" "$RELEASE_DIR/"
+  echo "Released TGZ: $RELEASE_DIR/$(basename "$TGZ_PATH")"
 fi
