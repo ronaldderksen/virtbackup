@@ -5,7 +5,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
 APP_NAME="virtbackup"
-VERSION=$(awk -F ':' '/^version:/ {gsub(/[[:space:]]/, "", $2); print $2}' pubspec.yaml)
+VERSION=$(awk -F ':' '/^version:/ {gsub(/[[:space:]]/, "", $2); split($2, parts, "+"); print parts[1]}' pubspec.yaml)
 
 build_agent() {
   local out_path="$1"

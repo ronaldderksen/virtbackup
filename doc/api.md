@@ -52,10 +52,10 @@ Desktop-app sessions use expiring access tokens plus rotating refresh tokens. We
 
 Request:
 ```json
-{"code":"one-time-code","codeVerifier":"pkce-code-verifier","debugAccessToken":false}
+{"code":"one-time-code","codeVerifier":"pkce-code-verifier","agentHostname":"nuc04","debugAccessToken":false}
 ```
 
-`debugAccessToken` is only sent by the Flutter GUI in debug builds. It makes the issued agent access token valid for 15 minutes instead of 7 days, and refreshes for that session keep using the same 15-minute lifetime. The agent does not need to run in debug mode for this.
+`agentHostname` is the hostname reported by the selected backup agent and is shown in the backend Sessions list. `debugAccessToken` is only sent by the Flutter GUI in debug builds. It makes the issued agent access token valid for 15 minutes instead of 7 days, and refreshes for that session keep using the same 15-minute lifetime. The agent does not need to run in debug mode for this.
 
 Errors are JSON objects with an `error` code, for example:
 ```json

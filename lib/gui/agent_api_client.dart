@@ -53,6 +53,21 @@ class AgentApiClient {
     return null;
   }
 
+  Future<String> fetchAgentHostname() async {
+    final response = await _get('/health');
+    if (response.statusCode != 200) {
+      throw 'Agent responded ${response.statusCode}';
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is Map) {
+      final hostname = decoded['hostname']?.toString().trim() ?? '';
+      if (hostname.isNotEmpty) {
+        return hostname;
+      }
+    }
+    throw 'Agent did not return a hostname';
+  }
+
   Future<AppSettings> fetchConfig() async {
     final response = await _get('/config');
     if (response.statusCode != 200) {

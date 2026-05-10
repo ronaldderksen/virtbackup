@@ -31,11 +31,16 @@ class VirtBackupAccountClient {
     return _resolve('/app-login').replace(queryParameters: <String, String>{'redirect_uri': redirectUri.toString(), 'state': state, 'code_challenge': codeChallenge});
   }
 
-  Future<VirtBackupAccountSession> exchangeAppLoginCode({required String code, required String codeVerifier, bool debugAccessToken = false}) async {
+  Future<VirtBackupAccountSession> exchangeAppLoginCode({required String code, required String codeVerifier, String? agentHostname, bool debugAccessToken = false}) async {
     final response = await _httpClient.post(
       _resolve('/api/auth/exchange'),
       headers: const <String, String>{'content-type': 'application/json; charset=utf-8'},
-      body: jsonEncode(<String, Object>{'code': code, 'codeVerifier': codeVerifier, if (debugAccessToken) 'debugAccessToken': true}),
+      body: jsonEncode(<String, Object>{
+        'code': code,
+        'codeVerifier': codeVerifier,
+        if (agentHostname != null && agentHostname.trim().isNotEmpty) 'agentHostname': agentHostname.trim(),
+        if (debugAccessToken) 'debugAccessToken': true,
+      }),
     );
     final Map<String, dynamic> body = _decodeJsonObject(response.body);
     if (response.statusCode != 200) {

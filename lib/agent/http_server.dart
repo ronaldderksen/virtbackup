@@ -764,7 +764,7 @@ class AgentHttpServer {
       }
       final path = request.uri.path;
       if (request.method == 'GET' && path == '/health') {
-        _json(request, 200, {'ok': true, 'nativeSftpAvailable': _host.nativeSftpAvailable});
+        _json(request, 200, {'ok': true, 'hostname': Platform.localHostname, 'nativeSftpAvailable': _host.nativeSftpAvailable});
         return;
       }
       if (request.method == 'GET' && path == '/drivers') {

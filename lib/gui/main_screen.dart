@@ -305,7 +305,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       if (code.isEmpty) {
         throw const VirtBackupAccountClientException('The browser login response did not include a code.');
       }
-      final session = await _accountClient.exchangeAppLoginCode(code: code, codeVerifier: codeVerifier, debugAccessToken: kDebugMode);
+      final agentHostname = await _agentApiClient.fetchAgentHostname();
+      final session = await _accountClient.exchangeAppLoginCode(code: code, codeVerifier: codeVerifier, agentHostname: agentHostname, debugAccessToken: kDebugMode);
       await _agentApiClient.storeVirtBackupAccount(
         email: session.email,
         accountBaseUrl: _accountBaseUri.toString(),
