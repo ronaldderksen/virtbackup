@@ -64,6 +64,7 @@ class AgentHttpServer {
   late final Map<String, BackupDriverInfo> _driverCatalog = _buildDriverCatalog();
   GdriveBackupDriver? _cachedGdriveDriver;
   Timer? _scheduleTimer;
+  Timer? _accountRefreshTimer;
   String _agentToken = '';
 
   Future<void> start() async {
@@ -76,6 +77,7 @@ class AgentHttpServer {
     _hostLog('Agent HTTPS listening on ${bindAddress.address}:$backupAgentPort');
     _server?.listen(_handleRequest);
     _restartScheduleTimer();
+    _restartAccountRefreshTimer();
 
     _hostLog('Startup: refreshing ${_agentSettings.servers.length} server(s).');
     await _refreshAllServers();
@@ -90,6 +92,8 @@ class AgentHttpServer {
     }
     _scheduleTimer?.cancel();
     _scheduleTimer = null;
+    _accountRefreshTimer?.cancel();
+    _accountRefreshTimer = null;
     for (final state in _eventStreams.values.toList()) {
       try {
         state.closed = true;
@@ -109,6 +113,13 @@ class AgentHttpServer {
     unawaited(_runDueSchedules());
     _scheduleTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       unawaited(_runDueSchedules());
+    });
+  }
+
+  void _restartAccountRefreshTimer() {
+    _accountRefreshTimer?.cancel();
+    _accountRefreshTimer = Timer.periodic(const Duration(hours: 1), (_) {
+      unawaited(_maybeRefreshVirtBackupAccount());
     });
   }
 
@@ -346,6 +357,7 @@ class AgentHttpServer {
 
   Future<void> _loadAgentSettings() async {
     _agentSettings = await _agentSettingsStore.load();
+    await _maybeRefreshVirtBackupAccount();
   }
 
   Future<void> _ensureTlsAssets() async {
@@ -493,6 +505,75 @@ class AgentHttpServer {
       await _stopEventListener(serverId);
     } catch (error, stackTrace) {
       _hostLogError('Failed to stop event listener for $serverId.', error, stackTrace);
+    }
+  }
+
+  Future<void> _maybeRefreshVirtBackupAccount() async {
+    final account = _agentSettings.virtBackupAccount;
+    if (!account.isConnected || account.accessTokenExpiresAt == null || account.refreshTokenExpiresAt == null || account.accountBaseUrl.trim().isEmpty) {
+      return;
+    }
+    final now = DateTime.now().toUtc();
+    if (!now.isBefore(account.refreshTokenExpiresAt!.toUtc())) {
+      _hostLog('Virt Backup account refresh token expired for ${account.email}; clearing stored account tokens.');
+      final updated = _agentSettings.copyWith(virtBackupAccount: VirtBackupAccountTokens.empty());
+      await _applyAgentSettings(updated, reason: 'virtbackup-account-expired', forceRestartSshListeners: false);
+      return;
+    }
+    final accessExpiresAt = account.accessTokenExpiresAt!.toUtc();
+    final issuedAt = account.refreshTokenExpiresAt!.toUtc().subtract(const Duration(days: 30));
+    final refreshAt = issuedAt.add(Duration(milliseconds: accessExpiresAt.difference(issuedAt).inMilliseconds * 2 ~/ 3));
+    if (now.isBefore(refreshAt) && now.isBefore(accessExpiresAt)) {
+      return;
+    }
+    try {
+      _hostLog(
+        'Refreshing Virt Backup account token for ${account.email}; access expires at ${_formatLocalLogTime(accessExpiresAt)}, refresh token expires at ${_formatLocalLogTime(account.refreshTokenExpiresAt)}.',
+      );
+      final refreshed = await _refreshVirtBackupAccount(account);
+      final updated = _agentSettings.copyWith(virtBackupAccount: refreshed);
+      await _applyAgentSettings(updated, reason: 'virtbackup-account-refresh', forceRestartSshListeners: false);
+      _hostLog(
+        'Virt Backup account token refreshed for ${refreshed.email}; next access expiry ${_formatLocalLogTime(refreshed.accessTokenExpiresAt)}, refresh expiry ${_formatLocalLogTime(refreshed.refreshTokenExpiresAt)}.',
+      );
+    } catch (error, stackTrace) {
+      _hostLogError('Virt Backup account refresh failed.', error, stackTrace);
+    }
+  }
+
+  Future<VirtBackupAccountTokens> _refreshVirtBackupAccount(VirtBackupAccountTokens account) async {
+    final baseUri = Uri.parse(account.accountBaseUrl);
+    final refreshUri = baseUri.replace(path: '/api/auth/refresh', queryParameters: null, fragment: null);
+    final client = HttpClient();
+    try {
+      final request = await client.postUrl(refreshUri);
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode(<String, String>{'refreshToken': account.refreshToken}));
+      final response = await request.close();
+      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode != 200) {
+        throw StateError('Account refresh returned HTTP ${response.statusCode}: $body');
+      }
+      final decoded = jsonDecode(body);
+      if (decoded is! Map) {
+        throw StateError('Account refresh returned invalid JSON.');
+      }
+      final accessToken = (decoded['accessToken'] ?? decoded['sessionToken'] ?? '').toString();
+      final refreshToken = (decoded['refreshToken'] ?? '').toString();
+      final email = (decoded['email'] ?? account.email).toString();
+      if (email.isEmpty || accessToken.isEmpty || refreshToken.isEmpty) {
+        throw StateError('Account refresh returned incomplete tokens.');
+      }
+      return VirtBackupAccountTokens(
+        email: email,
+        accountBaseUrl: account.accountBaseUrl,
+        accessToken: accessToken,
+        accessTokenExpiresAt: AppSettings.parseDateTimeOrNull(decoded['accessTokenExpiresAt']),
+        refreshToken: refreshToken,
+        refreshTokenExpiresAt: AppSettings.parseDateTimeOrNull(decoded['refreshTokenExpiresAt']),
+      );
+    } finally {
+      client.close();
     }
   }
 
@@ -653,6 +734,7 @@ class AgentHttpServer {
         return;
       }
       if (request.method == 'GET' && path == '/config') {
+        await _maybeRefreshVirtBackupAccount();
         _json(request, 200, _agentSettings.toMap());
         return;
       }
@@ -771,6 +853,41 @@ class AgentHttpServer {
         final updatedStorages = _replaceStorageParams(storageId: storageId, params: params);
         final updated = _agentSettings.copyWith(storage: updatedStorages);
         await _applyAgentSettings(updated, reason: 'oauth', forceRestartSshListeners: false);
+        _json(request, 200, {'success': true});
+        return;
+      }
+      if (request.method == 'POST' && path == '/account/virtbackup') {
+        final body = await _readJson(request);
+        final email = (body['email'] ?? '').toString().trim();
+        final accountBaseUrl = (body['accountBaseUrl'] ?? '').toString().trim();
+        final accessToken = (body['accessToken'] ?? '').toString();
+        final refreshToken = (body['refreshToken'] ?? '').toString();
+        if (email.isEmpty || accountBaseUrl.isEmpty || accessToken.isEmpty || refreshToken.isEmpty) {
+          _json(request, 400, {'success': false, 'error': 'missing account tokens'});
+          return;
+        }
+        final updated = _agentSettings.copyWith(
+          virtBackupAccount: VirtBackupAccountTokens(
+            email: email,
+            accountBaseUrl: accountBaseUrl,
+            accessToken: accessToken,
+            accessTokenExpiresAt: _parseExpiresAt(body['accessTokenExpiresAt']),
+            refreshToken: refreshToken,
+            refreshTokenExpiresAt: _parseExpiresAt(body['refreshTokenExpiresAt']),
+          ),
+        );
+        await _applyAgentSettings(updated, reason: 'virtbackup-account', forceRestartSshListeners: false);
+        _hostLog(
+          'Virt Backup account login stored for $email; access expires at ${_formatLocalLogTime(updated.virtBackupAccount.accessTokenExpiresAt)}, refresh expires at ${_formatLocalLogTime(updated.virtBackupAccount.refreshTokenExpiresAt)}.',
+        );
+        _json(request, 200, {'success': true});
+        return;
+      }
+      if (request.method == 'POST' && path == '/account/virtbackup/clear') {
+        final email = _agentSettings.virtBackupAccount.email.trim();
+        final updated = _agentSettings.copyWith(virtBackupAccount: VirtBackupAccountTokens.empty());
+        await _applyAgentSettings(updated, reason: 'virtbackup-account', forceRestartSshListeners: false);
+        _hostLog(email.isEmpty ? 'Virt Backup account tokens cleared.' : 'Virt Backup account tokens cleared for $email.');
         _json(request, 200, {'success': true});
         return;
       }
@@ -3071,6 +3188,13 @@ class AgentHttpServer {
   void _hostLogError(String message, Object error, StackTrace stackTrace) {
     LogWriter.logAgentSync(level: 'error', message: '$message $error');
     LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
+  }
+
+  String _formatLocalLogTime(DateTime? value) {
+    if (value == null) {
+      return 'unknown';
+    }
+    return value.toLocal().toIso8601String();
   }
 }
 

@@ -282,6 +282,7 @@ The agent supports optional native SFTP via FFI:
 - The token is generated on first run and stored next to `agent.yaml` as `agent.token` with owner-only permissions.
 - The GUI reads the token from disk and attaches it to all agent requests.
 - SSH passwords are encrypted at rest in `agent.yaml` using AES-GCM with a key derived from the token.
+- Virt Backup account access and refresh tokens are stored in `agent.yaml` with the same AES-GCM encryption. Access tokens are valid for 7 days, or 15 minutes when login was started from a debug GUI; refresh tokens are valid for 30 days and rotate when the agent refreshes them.
 - Settings writes are staged to `agent.yaml.tmp`, read back with the normal settings loader, and only then promoted to `agent.yaml`.
 - Encrypted values are stored as `sshPasswordEnc` and decrypted into memory on load.
 - Ntfy me notifications are sent by the agent when backup/restore jobs finish (success or failure).

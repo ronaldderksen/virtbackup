@@ -17,6 +17,7 @@ class AppSettings {
     required this.maxConcurrentJobsPerVm,
     required this.maxConcurrentJobsPerStorage,
     required this.ntfymeToken,
+    required this.virtBackupAccount,
     required this.schedules,
   });
 
@@ -32,6 +33,7 @@ class AppSettings {
   final int maxConcurrentJobsPerVm;
   final int maxConcurrentJobsPerStorage;
   final String ntfymeToken;
+  final VirtBackupAccountTokens virtBackupAccount;
   final List<ScheduledJob> schedules;
 
   AppSettings copyWith({
@@ -47,6 +49,7 @@ class AppSettings {
     int? maxConcurrentJobsPerVm,
     int? maxConcurrentJobsPerStorage,
     String? ntfymeToken,
+    VirtBackupAccountTokens? virtBackupAccount,
     List<ScheduledJob>? schedules,
   }) {
     final resolvedServers = servers ?? this.servers;
@@ -73,6 +76,7 @@ class AppSettings {
       maxConcurrentJobsPerVm: maxConcurrentJobsPerVm ?? this.maxConcurrentJobsPerVm,
       maxConcurrentJobsPerStorage: maxConcurrentJobsPerStorage ?? this.maxConcurrentJobsPerStorage,
       ntfymeToken: ntfymeToken ?? this.ntfymeToken,
+      virtBackupAccount: virtBackupAccount ?? this.virtBackupAccount,
       schedules: normalizedSchedules,
     );
   }
@@ -89,6 +93,7 @@ class AppSettings {
       'maxConcurrentJobsPerVm': maxConcurrentJobsPerVm,
       'maxConcurrentJobsPerStorage': maxConcurrentJobsPerStorage,
       'ntfymeToken': ntfymeToken,
+      'virtBackupAccount': virtBackupAccount.toMap(),
       'servers': servers.map((server) => server.toMap()).toList(),
       'storage': storage.map((storage) => storage.toMap()).toList(),
       'schedules': schedules.map((schedule) => schedule.toMap()).toList(),
@@ -143,6 +148,7 @@ class AppSettings {
       maxConcurrentJobsPerVm: _parsePositiveInt(json['maxConcurrentJobsPerVm'], field: 'maxConcurrentJobsPerVm', defaultValue: 1),
       maxConcurrentJobsPerStorage: _parsePositiveInt(json['maxConcurrentJobsPerStorage'], field: 'maxConcurrentJobsPerStorage', defaultValue: 1),
       ntfymeToken: (json['ntfymeToken'] ?? '').toString(),
+      virtBackupAccount: VirtBackupAccountTokens.fromMap(Map<String, dynamic>.from(json['virtBackupAccount'] is Map ? json['virtBackupAccount'] as Map : const <String, dynamic>{})),
       servers: servers,
       schedules: normalizedSchedules,
     );
@@ -161,6 +167,7 @@ class AppSettings {
     maxConcurrentJobsPerVm: 1,
     maxConcurrentJobsPerStorage: 1,
     ntfymeToken: '',
+    virtBackupAccount: VirtBackupAccountTokens.empty(),
     schedules: <ScheduledJob>[],
   );
 
@@ -318,6 +325,50 @@ class AppSettings {
     }
     return DateTime.tryParse(text);
   }
+}
+
+class VirtBackupAccountTokens {
+  const VirtBackupAccountTokens({
+    required this.email,
+    required this.accountBaseUrl,
+    required this.accessToken,
+    required this.accessTokenExpiresAt,
+    required this.refreshToken,
+    required this.refreshTokenExpiresAt,
+  });
+
+  final String email;
+  final String accountBaseUrl;
+  final String accessToken;
+  final DateTime? accessTokenExpiresAt;
+  final String refreshToken;
+  final DateTime? refreshTokenExpiresAt;
+
+  bool get isConnected => email.trim().isNotEmpty && accessToken.trim().isNotEmpty && refreshToken.trim().isNotEmpty;
+
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'email': email,
+      'accountBaseUrl': accountBaseUrl,
+      'accessToken': accessToken,
+      'accessTokenExpiresAt': accessTokenExpiresAt?.toUtc().toIso8601String(),
+      'refreshToken': refreshToken,
+      'refreshTokenExpiresAt': refreshTokenExpiresAt?.toUtc().toIso8601String(),
+    };
+  }
+
+  factory VirtBackupAccountTokens.fromMap(Map<String, dynamic> json) {
+    return VirtBackupAccountTokens(
+      email: (json['email'] ?? '').toString(),
+      accountBaseUrl: (json['accountBaseUrl'] ?? '').toString(),
+      accessToken: (json['accessToken'] ?? '').toString(),
+      accessTokenExpiresAt: AppSettings.parseDateTimeOrNull(json['accessTokenExpiresAt']),
+      refreshToken: (json['refreshToken'] ?? '').toString(),
+      refreshTokenExpiresAt: AppSettings.parseDateTimeOrNull(json['refreshTokenExpiresAt']),
+    );
+  }
+
+  factory VirtBackupAccountTokens.empty() => const VirtBackupAccountTokens(email: '', accountBaseUrl: '', accessToken: '', accessTokenExpiresAt: null, refreshToken: '', refreshTokenExpiresAt: null);
 }
 
 enum ScheduledJobType { backup, restore }

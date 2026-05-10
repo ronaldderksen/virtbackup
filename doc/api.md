@@ -31,7 +31,7 @@ The desktop app uses this API only for account sign-in status. It does not gate 
 
 The desktop app signs in through the system browser. The app starts a temporary local HTTP callback server and opens:
 
-- `GET /app-login?redirect_uri=http://127.0.0.1:<port>/auth/callback&state=<random>`
+- `GET /app-login?redirect_uri=http://127.0.0.1:<port>/auth/callback&state=<random>&code_challenge=<S256-PKCE-challenge>`
 
 After opening a Virt Backup account link, the app always shows a dialog with a copy-link action. The full URL is not shown in the UI; users can copy it to the clipboard and paste it into a browser on any platform.
 
@@ -39,12 +39,12 @@ If the browser is not signed in, the website sends the user through the normal w
 
 - `http://127.0.0.1:<port>/auth/callback?code=<one-time-code>&state=<same-state>`
 
-The app verifies `state` before exchanging the code.
+The app verifies `state` before exchanging the code. The app also keeps the PKCE `code_verifier` that produced `code_challenge`; the backend requires that verifier during code exchange.
 
-Browser-login codes are stored in `public.app_login_codes` so `/app-login` and `/api/auth/exchange` can run on different backend pods. Codes expire after 2 minutes and are removed when exchanged.
+Browser-login codes and their PKCE challenges are stored in `public.app_login_codes` so `/app-login` and `/api/auth/exchange` can run on different backend pods. Codes expire after 2 minutes and are removed when exchanged.
 
 The backend stores each issued web or desktop-app session in `public.account_sessions`. Tokens contain a `sid` and are accepted only while that database session is active and not expired or revoked.
-Desktop-app sessions are issued as unlimited sessions and are shown as `Unlimited` in the website Sessions view. Website sessions keep the normal expiring cookie lifetime.
+Desktop-app sessions use expiring access tokens plus rotating refresh tokens. Website sessions keep the normal expiring cookie lifetime.
 
 ## Account Code Exchange
 
@@ -52,8 +52,10 @@ Desktop-app sessions are issued as unlimited sessions and are shown as `Unlimite
 
 Request:
 ```json
-{"code":"one-time-code"}
+{"code":"one-time-code","codeVerifier":"pkce-code-verifier","debugAccessToken":false}
 ```
+
+`debugAccessToken` is only sent by the Flutter GUI in debug builds. It makes the issued agent access token valid for 15 minutes instead of 7 days; the agent does not need to run in debug mode for this.
 
 Errors are JSON objects with an `error` code, for example:
 ```json
@@ -62,11 +64,21 @@ Errors are JSON objects with an `error` code, for example:
 
 Response:
 ```json
-{"email":"user@example.com","sessionToken":"..."}
+{
+  "email": "user@example.com",
+  "sessionToken": "...",
+  "accessToken": "...",
+  "accessTokenExpiresAt": "2026-05-17T10:00:00.000Z",
+  "refreshToken": "...",
+  "refreshTokenExpiresAt": "2026-06-09T10:00:00.000Z"
+}
 ```
+
+The desktop agent stores `accessToken` and `refreshToken` in `agent.yaml` using the same AES-GCM encryption used for other credentials. Access tokens are valid for 7 days, or 15 minutes when the GUI performs login from a debug build. Refresh tokens are valid for 30 days and rotate on every refresh.
 
 Known error codes:
 - `code_required`
+- `code_verifier_required`
 - `invalid_code`
 - `server_error`
 
@@ -86,6 +98,29 @@ Invalid or expired tokens return:
 ```json
 {"error":"unauthorized"}
 ```
+
+## Account Refresh
+
+- `POST /api/auth/refresh`
+
+Request:
+```json
+{"refreshToken":"refresh-token"}
+```
+
+Response:
+```json
+{
+  "email": "user@example.com",
+  "sessionToken": "...",
+  "accessToken": "...",
+  "accessTokenExpiresAt": "2026-05-17T10:00:00.000Z",
+  "refreshToken": "...",
+  "refreshTokenExpiresAt": "2026-06-09T10:00:00.000Z"
+}
+```
+
+The agent checks hourly and refreshes at roughly two-thirds of the access-token lifetime. Reusing an already rotated refresh token revokes the session.
 
 ## Account Logout
 

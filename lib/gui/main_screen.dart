@@ -72,7 +72,6 @@ class BackupServerSetupScreen extends StatefulWidget {
 class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   static const String _guiLogLevelPrefKey = 'log_level';
   static const String _guiSelectedStoragePrefPrefix = 'selected_storage_id';
-  static const String _accountSessionTokenPrefKey = 'virtbackup_account_session_token';
   static const EdgeInsets _contentPadding = EdgeInsets.only(left: 24, right: 24, bottom: 32);
   static const double _contentTitleSpacing = 8;
   static const double _contentSectionSpacing = 32;
@@ -191,7 +190,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   void initState() {
     super.initState();
     _attachFieldListeners();
-    unawaited(_loadVirtBackupAccountSession());
     unawaited(_configureGuiLogWriter());
     _loadAgentEndpointsAndSettings();
   }
@@ -229,8 +227,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
     _isLoadingAccountSession = true;
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = (prefs.getString(_accountSessionTokenPrefKey) ?? '').trim();
+      final token = _agentSettings.virtBackupAccount.accessToken.trim();
       if (token.isEmpty) {
         _accountSessionToken = null;
         _accountEmail = null;
@@ -242,8 +239,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       _accountEmail = session.email;
       _accountStatusMessage = '';
     } catch (error) {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.remove(_accountSessionTokenPrefKey);
       _accountSessionToken = null;
       _accountEmail = null;
       _accountStatusMessage = error.toString();
@@ -268,6 +263,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     try {
       callbackServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       final state = _generateAccountLoginState();
+      final codeVerifier = _generateOAuthVerifier();
+      final codeChallenge = _generateOAuthChallenge(codeVerifier);
       final redirectUri = Uri.parse('http://127.0.0.1:${callbackServer.port}/auth/callback');
       final callbackCompleter = Completer<Uri>();
       callbackSubscription = callbackServer.listen((request) {
@@ -290,7 +287,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       });
 
       final callbackFuture = callbackCompleter.future;
-      final loginUri = _accountClient.browserLoginUri(redirectUri: redirectUri, state: state);
+      final loginUri = _accountClient.browserLoginUri(redirectUri: redirectUri, state: state, codeChallenge: codeChallenge);
       final opened = await _openVirtBackupAccountUri(loginUri, title: 'Browser sign in', closeWhen: callbackFuture.then((_) {}));
       if (!opened && !mounted) {
         throw const VirtBackupAccountClientException('Could not open the browser login page.');
@@ -308,9 +305,25 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       if (code.isEmpty) {
         throw const VirtBackupAccountClientException('The browser login response did not include a code.');
       }
-      final session = await _accountClient.exchangeAppLoginCode(code);
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_accountSessionTokenPrefKey, session.sessionToken);
+      final session = await _accountClient.exchangeAppLoginCode(code: code, codeVerifier: codeVerifier, debugAccessToken: kDebugMode);
+      await _agentApiClient.storeVirtBackupAccount(
+        email: session.email,
+        accountBaseUrl: _accountBaseUri.toString(),
+        accessToken: session.sessionToken,
+        accessTokenExpiresAt: session.accessTokenExpiresAt,
+        refreshToken: session.refreshToken,
+        refreshTokenExpiresAt: session.refreshTokenExpiresAt,
+      );
+      _agentSettings = _agentSettings.copyWith(
+        virtBackupAccount: VirtBackupAccountTokens(
+          email: session.email,
+          accountBaseUrl: _accountBaseUri.toString(),
+          accessToken: session.sessionToken,
+          accessTokenExpiresAt: session.accessTokenExpiresAt,
+          refreshToken: session.refreshToken,
+          refreshTokenExpiresAt: session.refreshTokenExpiresAt,
+        ),
+      );
       _accountSessionToken = session.sessionToken;
       _accountEmail = session.email;
       _accountStatusMessage = '';
@@ -346,7 +359,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String _generateAccountLoginState() {
     final random = Random.secure();
     final bytes = List<int>.generate(24, (_) => random.nextInt(256));
-    return base64UrlEncode(bytes);
+    return base64UrlEncode(bytes).replaceAll('=', '');
   }
 
   Future<void> _signOutVirtBackupAccount() async {
@@ -362,11 +375,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       if (token != null && token.isNotEmpty) {
         await _accountClient.logout(token);
       }
+      await _agentApiClient.clearVirtBackupAccount();
     } catch (error) {
       _logError('Virt Backup account logout failed.', error, StackTrace.current);
     } finally {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.remove(_accountSessionTokenPrefKey);
+      _agentSettings = _agentSettings.copyWith(virtBackupAccount: VirtBackupAccountTokens.empty());
       _accountSessionToken = null;
       _accountEmail = null;
       _isSigningOutAccount = false;
@@ -577,6 +590,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         ..clear()
         ..addAll(await _loadBackupDrivers());
       _agentSettings = await _agentApiClient.fetchConfig();
+      await _loadVirtBackupAccountSession();
       _setAgentReachable(true);
       await _loadAgentHealth();
       _agentReconnectTimer?.cancel();

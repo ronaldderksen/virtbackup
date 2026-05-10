@@ -121,6 +121,34 @@ class AgentApiClient {
     }
   }
 
+  Future<void> storeVirtBackupAccount({
+    required String email,
+    required String accountBaseUrl,
+    required String accessToken,
+    required DateTime? accessTokenExpiresAt,
+    required String refreshToken,
+    required DateTime? refreshTokenExpiresAt,
+  }) async {
+    final response = await _post('/account/virtbackup', {
+      'email': email,
+      'accountBaseUrl': accountBaseUrl,
+      'accessToken': accessToken,
+      'accessTokenExpiresAt': accessTokenExpiresAt?.toUtc().toIso8601String(),
+      'refreshToken': refreshToken,
+      'refreshTokenExpiresAt': refreshTokenExpiresAt?.toUtc().toIso8601String(),
+    });
+    if (response.statusCode != 200) {
+      throw 'Agent responded ${response.statusCode}';
+    }
+  }
+
+  Future<void> clearVirtBackupAccount() async {
+    final response = await _post('/account/virtbackup/clear', {});
+    if (response.statusCode != 200) {
+      throw 'Agent responded ${response.statusCode}';
+    }
+  }
+
   Future<NtfymeTestResult> sendNtfymeTest({required String token}) async {
     final response = await _post('/ntfyme/test', {'token': token});
     if (response.statusCode == 200) {

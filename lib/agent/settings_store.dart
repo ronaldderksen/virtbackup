@@ -50,6 +50,7 @@ class AppSettingsStore {
     _encryptPasswordsInMap(data, token);
     _encryptGdriveTokensInMap(data, token);
     _encryptSftpPasswordInMap(data, token);
+    _encryptVirtBackupAccountTokensInMap(data, token);
     final encoded = _ensureTrailingNewline(_toYaml(data));
     final tempFile = File('${_file.path}.tmp');
     var replaced = false;
@@ -148,6 +149,7 @@ class AppSettingsStore {
     _decryptPasswordsInMap(appSettingsMap, token);
     _decryptGdriveTokensInMap(appSettingsMap, token);
     _decryptSftpPasswordInMap(appSettingsMap, token);
+    _decryptVirtBackupAccountTokensInMap(appSettingsMap, token);
     return AppSettings.fromMap(appSettingsMap);
   }
 
@@ -339,6 +341,7 @@ class AppSettingsStore {
       'maxConcurrentJobsPerVm',
       'maxConcurrentJobsPerStorage',
       'ntfymeToken',
+      'virtBackupAccount',
       'servers',
       'storage',
       'schedules',
@@ -563,6 +566,46 @@ class AppSettingsStore {
 
   void _decryptSftpPasswordInMap(Map<String, dynamic> data, String? token) {
     _decryptStorageSftpPasswords(data, token);
+  }
+
+  void _encryptVirtBackupAccountTokensInMap(Map<String, dynamic> data, String token) {
+    final account = data['virtBackupAccount'];
+    if (account is! Map) {
+      return;
+    }
+    final accessToken = account['accessToken']?.toString() ?? '';
+    if (accessToken.isNotEmpty) {
+      account['accessTokenEnc'] = _encryptPassword(accessToken, token);
+      account['accessToken'] = '';
+    } else {
+      account.remove('accessTokenEnc');
+    }
+    final refreshToken = account['refreshToken']?.toString() ?? '';
+    if (refreshToken.isNotEmpty) {
+      account['refreshTokenEnc'] = _encryptPassword(refreshToken, token);
+      account['refreshToken'] = '';
+    } else {
+      account.remove('refreshTokenEnc');
+    }
+  }
+
+  void _decryptVirtBackupAccountTokensInMap(Map<String, dynamic> data, String? token) {
+    final account = data['virtBackupAccount'];
+    if (account is! Map) {
+      return;
+    }
+    final accessEnc = account['accessTokenEnc']?.toString();
+    if (accessEnc != null && accessEnc.isNotEmpty) {
+      account['accessToken'] = (token == null || token.isEmpty) ? '' : _decryptPassword(accessEnc, token);
+    } else if (account['accessToken'] == null) {
+      account['accessToken'] = '';
+    }
+    final refreshEnc = account['refreshTokenEnc']?.toString();
+    if (refreshEnc != null && refreshEnc.isNotEmpty) {
+      account['refreshToken'] = (token == null || token.isEmpty) ? '' : _decryptPassword(refreshEnc, token);
+    } else if (account['refreshToken'] == null) {
+      account['refreshToken'] = '';
+    }
   }
 
   void _encryptStorageGdriveTokens(Map<String, dynamic> data, String token) {

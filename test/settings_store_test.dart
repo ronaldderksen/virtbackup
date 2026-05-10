@@ -34,6 +34,7 @@ void main() {
         maxConcurrentJobsPerVm: 1,
         maxConcurrentJobsPerStorage: 1,
         ntfymeToken: '',
+        virtBackupAccount: VirtBackupAccountTokens.empty(),
         schedules: <ScheduledJob>[],
       );
 
@@ -84,6 +85,7 @@ schedules:
         maxConcurrentJobsPerVm: 1,
         maxConcurrentJobsPerStorage: 1,
         ntfymeToken: '',
+        virtBackupAccount: VirtBackupAccountTokens.empty(),
         schedules: <ScheduledJob>[],
       );
 
@@ -93,6 +95,39 @@ schedules:
       final schedules = decoded['schedules'] as YamlMap;
       expect(schedules['other-host'], isA<YamlList>());
       expect((schedules['other-host'] as YamlList).single['id'], 'schedule-other');
+    } finally {
+      await tempDir.delete(recursive: true);
+    }
+  });
+
+  test('save encrypts Virt Backup account tokens', () async {
+    final tempDir = await Directory.systemTemp.createTemp('virtbackup_settings_store_account_test_');
+    try {
+      final settingsFile = File('${tempDir.path}${Platform.pathSeparator}agent.yaml');
+      final store = AppSettingsStore(file: settingsFile);
+      final settings = AppSettings.empty().copyWith(
+        virtBackupAccount: VirtBackupAccountTokens(
+          email: 'user@example.com',
+          accountBaseUrl: 'https://virtbackup.net',
+          accessToken: 'access-token-value',
+          accessTokenExpiresAt: DateTime.utc(2026, 5, 17),
+          refreshToken: 'refresh-token-value',
+          refreshTokenExpiresAt: DateTime.utc(2026, 6, 9),
+        ),
+      );
+
+      await store.save(settings);
+
+      final decoded = loadYaml(await settingsFile.readAsString()) as YamlMap;
+      final account = decoded['virtBackupAccount'] as YamlMap;
+      expect(account['accessToken'], '');
+      expect(account['refreshToken'], '');
+      expect(account['accessTokenEnc'].toString(), isNot(contains('access-token-value')));
+      expect(account['refreshTokenEnc'].toString(), isNot(contains('refresh-token-value')));
+
+      final loaded = await store.load();
+      expect(loaded.virtBackupAccount.accessToken, 'access-token-value');
+      expect(loaded.virtBackupAccount.refreshToken, 'refresh-token-value');
     } finally {
       await tempDir.delete(recursive: true);
     }
