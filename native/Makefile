@@ -19,6 +19,12 @@ endif
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
+OPENSSL_PREFIX := $(shell brew --prefix openssl@3 2>/dev/null)
+ifeq ($(OPENSSL_PREFIX),)
+$(error OpenSSL dependency not found. Install it with: brew install openssl@3)
+endif
+OPENSSL_CFLAGS := -I$(OPENSSL_PREFIX)/include
+OPENSSL_LDFLAGS := -L$(OPENSSL_PREFIX)/lib
 OUT_DIR := macos
 OUT := $(OUT_DIR)/libvirtbackup_native.dylib
 SHARED_FLAG := -dynamiclib
@@ -38,8 +44,8 @@ all: $(OUT)
 
 $(OUT): $(SRC)
 	mkdir -p $(OUT_DIR)
-	$(CC) $(CFLAGS) $(SSH2_CFLAGS) $(BREW_CFLAGS) $(SHARED_FLAG) -o $@ $^ \
-		$(LDFLAGS) $(BREW_LDFLAGS) $(SSH2_LIBS) $(LIBS)
+	$(CC) $(CFLAGS) $(SSH2_CFLAGS) $(BREW_CFLAGS) $(OPENSSL_CFLAGS) $(SHARED_FLAG) -o $@ $^ \
+		$(LDFLAGS) $(BREW_LDFLAGS) $(OPENSSL_LDFLAGS) $(SSH2_LIBS) $(LIBS)
 
 clean:
 ifeq ($(UNAME_S),Darwin)

@@ -15,6 +15,11 @@ The top-level directory inside the archive remains `virtbackup-<version>`.
 - `hashblocks` binary (when available).
 - Native library output under `native/linux` or `native/macos`.
 
+## macOS requirements
+
+- Homebrew `libssh2`.
+- Homebrew `openssl@3`.
+
 ## Excluded
 
 - Top-level `assets/` in the project root is not included in the distribution.

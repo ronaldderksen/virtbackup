@@ -1,26 +1,59 @@
-VirtBackup
+VirtBackup (Linux)
+==================
 
-Contents
-- virtbackup                      GUI application
-- virtbackup-agent                Background agent
-- README.txt                      This file
-- install_agent_user_service.sh   Installs agent as a user systemd service
-- rotate_agent_logs.sh            Log rotation helper (used by service)
-- log/                            Log directory (created at runtime)
+Files
+-----
+- virtbackup                        GUI application
+- virtbackup-agent                  Background agent
+- install_agent_user_service.sh     Install and start the systemd user service
+- uninstall_agent_user_service.sh   Stop and remove the systemd user service
+- rotate_agent_logs.sh              Log rotation helper used by the service
+- log/                              Logs will be written here
+- README.txt                        This file
+
+Install
+-------
+Run from this directory:
+
+  ./install_agent_user_service.sh
+
+This creates and starts the systemd user service:
+
+  ~/.config/systemd/user/virtbackup-agent.service
 
 Run
-- Start the GUI: ./virtbackup
-- Start agent manually: ./virtbackup-agent
-  (Agent HTTP API listens on port 33551)
+---
+- Start the GUI:
+  ./virtbackup
 
-Install agent as user service
-- ./install_agent_user_service.sh
+- Start the agent manually:
+  ./virtbackup-agent
+
+The agent HTTP API listens on port 33551.
+
+Service commands
+----------------
+- Show status:
+  systemctl --user status virtbackup-agent.service
+
+- Restart:
+  systemctl --user restart virtbackup-agent.service
+
+- Stop:
+  systemctl --user stop virtbackup-agent.service
 
 Logs
-- ./log/virtbackup-agent-<host>.log
+----
+- Current log:
+  log/virtbackup-agent-<host>.log
 
-Uninstall user service (optional)
-- systemctl --user stop virtbackup-agent.service
-- systemctl --user disable virtbackup-agent.service
-- rm ~/.config/systemd/user/virtbackup-agent.service
-- systemctl --user daemon-reload
+- Rotated logs:
+  log/virtbackup-agent-<host>.log.1 through log.4
+
+Log rotation is triggered when the service starts.
+
+Uninstall
+---------
+Run from this directory:
+
+  ./uninstall_agent_user_service.sh
