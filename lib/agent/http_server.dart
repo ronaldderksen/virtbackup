@@ -118,7 +118,16 @@ class AgentHttpServer {
 
   void _restartAccountRefreshTimer() {
     _accountRefreshTimer?.cancel();
-    _accountRefreshTimer = Timer.periodic(const Duration(hours: 1), (_) {
+    _accountRefreshTimer = null;
+    final refreshAt = _virtBackupAccountRefreshAt(_agentSettings.virtBackupAccount);
+    if (refreshAt == null) {
+      return;
+    }
+    final now = DateTime.now().toUtc();
+    final delay = refreshAt.isAfter(now) ? refreshAt.difference(now) : Duration.zero;
+    _hostLog('Virt Backup account refresh scheduled at ${_formatLocalLogTime(refreshAt)}.');
+    _accountRefreshTimer = Timer(delay, () {
+      _accountRefreshTimer = null;
       unawaited(_maybeRefreshVirtBackupAccount());
     });
   }
@@ -430,6 +439,7 @@ class AgentHttpServer {
     _cachedGdriveDriver = null;
     await _agentSettingsStore.save(agentSettings);
     _restartScheduleTimer();
+    _restartAccountRefreshTimer();
 
     Future<void> syncServers() async {
       for (final id in removed) {
@@ -521,9 +531,12 @@ class AgentHttpServer {
       return;
     }
     final accessExpiresAt = account.accessTokenExpiresAt!.toUtc();
-    final issuedAt = account.refreshTokenExpiresAt!.toUtc().subtract(const Duration(days: 30));
-    final refreshAt = issuedAt.add(Duration(milliseconds: accessExpiresAt.difference(issuedAt).inMilliseconds * 2 ~/ 3));
+    final refreshAt = _virtBackupAccountRefreshAt(account);
+    if (refreshAt == null) {
+      return;
+    }
     if (now.isBefore(refreshAt) && now.isBefore(accessExpiresAt)) {
+      _restartAccountRefreshTimer();
       return;
     }
     try {
@@ -536,9 +549,31 @@ class AgentHttpServer {
       _hostLog(
         'Virt Backup account token refreshed for ${refreshed.email}; next access expiry ${_formatLocalLogTime(refreshed.accessTokenExpiresAt)}, refresh expiry ${_formatLocalLogTime(refreshed.refreshTokenExpiresAt)}.',
       );
+    } on _VirtBackupAccountRefreshRejected catch (error) {
+      _hostLog('Virt Backup account refresh rejected: ${error.message}; clearing stored account tokens.');
+      final updated = _agentSettings.copyWith(virtBackupAccount: VirtBackupAccountTokens.empty());
+      await _applyAgentSettings(updated, reason: 'virtbackup-account-rejected', forceRestartSshListeners: false);
     } catch (error, stackTrace) {
       _hostLogError('Virt Backup account refresh failed.', error, stackTrace);
+      _scheduleVirtBackupAccountRefreshRetry();
     }
+  }
+
+  DateTime? _virtBackupAccountRefreshAt(VirtBackupAccountTokens account) {
+    if (!account.isConnected || account.accessTokenExpiresAt == null || account.refreshTokenExpiresAt == null) {
+      return null;
+    }
+    final issuedAt = account.refreshTokenExpiresAt!.toUtc().subtract(const Duration(days: 30));
+    final accessExpiresAt = account.accessTokenExpiresAt!.toUtc();
+    return issuedAt.add(Duration(milliseconds: accessExpiresAt.difference(issuedAt).inMilliseconds * 2 ~/ 3));
+  }
+
+  void _scheduleVirtBackupAccountRefreshRetry() {
+    _accountRefreshTimer?.cancel();
+    _accountRefreshTimer = Timer(const Duration(minutes: 5), () {
+      _accountRefreshTimer = null;
+      unawaited(_maybeRefreshVirtBackupAccount());
+    });
   }
 
   Future<VirtBackupAccountTokens> _refreshVirtBackupAccount(VirtBackupAccountTokens account) async {
@@ -552,6 +587,9 @@ class AgentHttpServer {
       final response = await request.close();
       final body = await response.transform(utf8.decoder).join();
       if (response.statusCode != 200) {
+        if (response.statusCode == 401 && body.contains('invalid_refresh_token')) {
+          throw const _VirtBackupAccountRefreshRejected('invalid refresh token');
+        }
         throw StateError('Account refresh returned HTTP ${response.statusCode}: $body');
       }
       final decoded = jsonDecode(body);
@@ -3223,6 +3261,12 @@ class _JobGuardRejected implements Exception {
 
   @override
   String toString() => message;
+}
+
+class _VirtBackupAccountRefreshRejected implements Exception {
+  const _VirtBackupAccountRefreshRejected(this.message);
+
+  final String message;
 }
 
 enum _RestoreCheckMode { full, quick }

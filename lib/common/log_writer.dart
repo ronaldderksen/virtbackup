@@ -71,9 +71,7 @@ class LogWriter {
       return;
     }
     final timestamp = _formatTimestamp(DateTime.now());
-    if (normalizedLevel == _infoLevel) {
-      stdout.writeln('$timestamp $trimmedMessage');
-    }
+    _writeConsole(timestamp: timestamp, level: normalizedLevel, message: trimmedMessage);
     final line = '$timestamp level=$normalizedLevel message=${_sanitize(trimmedMessage)}';
     final allowParentCreate = _allowParentCreate(source);
     final completer = Completer<void>();
@@ -101,9 +99,7 @@ class LogWriter {
       return;
     }
     final timestamp = _formatTimestamp(DateTime.now());
-    if (normalizedLevel == _infoLevel) {
-      stdout.writeln('$timestamp $trimmedMessage');
-    }
+    _writeConsole(timestamp: timestamp, level: normalizedLevel, message: trimmedMessage);
     final line = '$timestamp level=$normalizedLevel message=${_sanitize(trimmedMessage)}';
     _appendSync(_resolvePath(source), line, allowParentCreate: _allowParentCreate(source));
   }
@@ -151,6 +147,21 @@ class LogWriter {
 
   static bool _allowParentCreate(String source) {
     return _normalizeSource(source) != _guiSource;
+  }
+
+  static void _writeConsole({required String timestamp, required String level, required String message}) {
+    switch (level) {
+      case 'fatal':
+      case 'error':
+      case 'warn':
+        stderr.writeln('$timestamp $message');
+        return;
+      case _infoLevel:
+        stdout.writeln('$timestamp $message');
+        return;
+      default:
+        return;
+    }
   }
 
   static String _normalizeLevel(String level, {String? source}) {

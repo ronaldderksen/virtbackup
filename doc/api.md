@@ -55,7 +55,7 @@ Request:
 {"code":"one-time-code","codeVerifier":"pkce-code-verifier","debugAccessToken":false}
 ```
 
-`debugAccessToken` is only sent by the Flutter GUI in debug builds. It makes the issued agent access token valid for 15 minutes instead of 7 days; the agent does not need to run in debug mode for this.
+`debugAccessToken` is only sent by the Flutter GUI in debug builds. It makes the issued agent access token valid for 15 minutes instead of 7 days, and refreshes for that session keep using the same 15-minute lifetime. The agent does not need to run in debug mode for this.
 
 Errors are JSON objects with an `error` code, for example:
 ```json
@@ -120,7 +120,7 @@ Response:
 }
 ```
 
-The agent checks hourly and refreshes at roughly two-thirds of the access-token lifetime. Reusing an already rotated refresh token revokes the session.
+The agent schedules refresh at roughly two-thirds of the access-token lifetime. Reusing an already rotated refresh token revokes the session.
 
 ## Account Logout
 
