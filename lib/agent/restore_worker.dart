@@ -883,39 +883,35 @@ String _decodeDomainXml(String encoded, String manifestPath) {
 }
 
 List<_ChainRebase> _collectChainRebases(List<_ManifestData> manifestData, Set<String> restoredPaths) {
-  final entriesByOrder = <int, _ChainEntry>{};
-  for (final data in manifestData) {
-    for (final entry in data.chain) {
-      final existing = entriesByOrder[entry.order];
-      if (existing == null) {
-        entriesByOrder[entry.order] = entry;
-        continue;
-      }
-      if (existing.path != entry.path || existing.diskId != entry.diskId) {
-        throw 'Manifest metadata mismatch: chain order conflict at order=${entry.order}';
-      }
-    }
-  }
-  if (entriesByOrder.isEmpty) {
-    return const <_ChainRebase>[];
-  }
-  final orders = entriesByOrder.keys.toList()..sort();
-  if (orders.first != 0) {
-    throw 'Manifest metadata invalid: chain order must start at 0';
-  }
-  for (var i = 1; i < orders.length; i += 1) {
-    if (orders[i] != orders[i - 1] + 1) {
-      throw 'Manifest metadata invalid: chain order must be contiguous';
-    }
-  }
   final rebases = <_ChainRebase>[];
-  for (var i = orders.length - 1; i > 0; i -= 1) {
-    final lower = entriesByOrder[orders[i - 1]]!;
-    final upper = entriesByOrder[orders[i]]!;
-    if (!restoredPaths.contains(lower.path) || !restoredPaths.contains(upper.path)) {
+  for (final data in manifestData) {
+    final entriesByOrder = <int, _ChainEntry>{};
+    for (final entry in data.chain) {
+      if (entriesByOrder.containsKey(entry.order)) {
+        throw 'Manifest metadata mismatch: chain order conflict for disk ${data.diskId} at order=${entry.order}';
+      }
+      entriesByOrder[entry.order] = entry;
+    }
+    if (entriesByOrder.isEmpty) {
       continue;
     }
-    rebases.add(_ChainRebase(overlayPath: lower.path, backingPath: upper.path));
+    final orders = entriesByOrder.keys.toList()..sort();
+    if (orders.first != 0) {
+      throw 'Manifest metadata invalid: chain order must start at 0 for disk ${data.diskId}';
+    }
+    for (var i = 1; i < orders.length; i += 1) {
+      if (orders[i] != orders[i - 1] + 1) {
+        throw 'Manifest metadata invalid: chain order must be contiguous for disk ${data.diskId}';
+      }
+    }
+    for (var i = orders.length - 1; i > 0; i -= 1) {
+      final lower = entriesByOrder[orders[i - 1]]!;
+      final upper = entriesByOrder[orders[i]]!;
+      if (!restoredPaths.contains(lower.path) || !restoredPaths.contains(upper.path)) {
+        continue;
+      }
+      rebases.add(_ChainRebase(overlayPath: lower.path, backingPath: upper.path));
+    }
   }
   return rebases;
 }

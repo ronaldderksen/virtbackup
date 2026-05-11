@@ -2434,12 +2434,27 @@ class AgentHttpServer {
         for (final manifest in manifests) {
           final lines = await _readManifestLines(manifest);
           var blockSize = 1024 * 1024;
-          int? fileSize;
-          var maxIndex = -1;
+          int? currentFileSize;
+          var currentMaxIndex = -1;
           var inBlocks = false;
+          void addCurrentDiskBytes() {
+            if (currentFileSize != null && currentFileSize! > 0) {
+              totalBytes += currentFileSize!;
+            } else if (currentMaxIndex >= 0) {
+              totalBytes += (currentMaxIndex + 1) * blockSize;
+            }
+            currentFileSize = null;
+            currentMaxIndex = -1;
+          }
+
           for (final line in lines) {
             final trimmed = line.trim();
             if (trimmed.isEmpty) {
+              continue;
+            }
+            if (trimmed.startsWith('disk_id:')) {
+              addCurrentDiskBytes();
+              inBlocks = false;
               continue;
             }
             if (!inBlocks) {
@@ -2451,7 +2466,7 @@ class AgentHttpServer {
                 }
               } else if (trimmed.startsWith('file_size:')) {
                 final value = trimmed.substring('file_size:'.length).trim();
-                fileSize = int.tryParse(value);
+                currentFileSize = int.tryParse(value);
               } else if (trimmed == 'blocks:' || trimmed.startsWith('blocks:')) {
                 inBlocks = true;
               }
@@ -2459,8 +2474,8 @@ class AgentHttpServer {
             }
             if (trimmed.endsWith('-> ZERO')) {
               final range = _parseZeroRange(trimmed);
-              if (range != null && range.$2 > maxIndex) {
-                maxIndex = range.$2;
+              if (range != null && range.$2 > currentMaxIndex) {
+                currentMaxIndex = range.$2;
               }
               continue;
             }
@@ -2476,16 +2491,12 @@ class AgentHttpServer {
             if (hash.isNotEmpty && hash != 'ZERO') {
               totalBlocks += 1;
             }
-            if (index > maxIndex) {
-              maxIndex = index;
+            if (index > currentMaxIndex) {
+              currentMaxIndex = index;
             }
           }
           _blockSizeMbFromManifestBytes(blockSize, manifest.path);
-          if (fileSize != null && fileSize > 0) {
-            totalBytes += fileSize;
-          } else if (maxIndex >= 0) {
-            totalBytes += (maxIndex + 1) * blockSize;
-          }
+          addCurrentDiskBytes();
         }
 
         _updateJob(jobId, _jobs[jobId]!.copyWith(totalUnits: totalBlocks, completedUnits: 0, bytesTransferred: 0, speedBytesPerSec: 0, totalBytes: totalBytes, message: '$checkLabel...'));
@@ -2544,6 +2555,12 @@ class AgentHttpServer {
             if (trimmed.isEmpty) {
               continue;
             }
+            if (trimmed.startsWith('disk_id:')) {
+              inBlocks = false;
+              fileSize = null;
+              diskId = trimmed.substring('disk_id:'.length).trim();
+              continue;
+            }
             if (!inBlocks) {
               if (trimmed.startsWith('block_size:')) {
                 final value = trimmed.substring('block_size:'.length).trim();
@@ -2555,8 +2572,6 @@ class AgentHttpServer {
               } else if (trimmed.startsWith('file_size:')) {
                 final value = trimmed.substring('file_size:'.length).trim();
                 fileSize = int.tryParse(value);
-              } else if (trimmed.startsWith('disk_id:')) {
-                diskId = trimmed.substring('disk_id:'.length).trim();
               } else if (trimmed == 'blocks:' || trimmed.startsWith('blocks:')) {
                 inBlocks = true;
               }
