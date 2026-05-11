@@ -5,7 +5,7 @@ This document describes what ends up in the packaged TGZ created by `tools/build
 The TGZ filename includes the target platform and architecture before the version: `virtbackup-linux-x64-<version>.tgz`, `virtbackup-macos-arm64-<version>.tgz`, or `virtbackup-macos-x64-<version>.tgz`.
 The top-level directory inside the archive remains `virtbackup-<version>`.
 
-`tools/local_build.sh --release` builds the local platform archive and copies the TGZ to `tools/../../virtbackup_backend/public/downloads`.
+`tools/local_build.sh --release` builds the local platform archive and copies the TGZ to `tools/../../virtbackup_backend/public/downloads`; the copy fails when the release file already exists.
 
 ## Included
 

@@ -64,6 +64,12 @@ if [ "$RELEASE" = true ]; then
     echo "Release directory not found: $RELEASE_DIR" >&2
     exit 1
   fi
-  cp "$TGZ_PATH" "$RELEASE_DIR/"
-  echo "Released TGZ: $RELEASE_DIR/$(basename "$TGZ_PATH")"
+  RELEASE_PATH="$RELEASE_DIR/$(basename "$TGZ_PATH")"
+  if [ -e "$RELEASE_PATH" ]; then
+    echo "Release already exists: $RELEASE_PATH" >&2
+    echo "Refusing to overwrite existing release." >&2
+    exit 1
+  fi
+  cp "$TGZ_PATH" "$RELEASE_PATH"
+  echo "Released TGZ: $RELEASE_PATH"
 fi
