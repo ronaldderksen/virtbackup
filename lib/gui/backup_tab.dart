@@ -79,6 +79,7 @@ extension _BackupServerSetupBackupSection on _BackupServerSetupScreenState {
                           final vm = vms[index];
                           final isRunning = vm.powerState == VmPowerState.running;
                           final hasOverlay = _vmHasOverlayByName[vm.name] == true;
+                          final blockBackupForOverlay = hasOverlay && _agentSettings.requireSimpleDisksForBackup;
                           return Padding(
                             padding: const EdgeInsets.symmetric(vertical: 8),
                             child: Row(
@@ -103,7 +104,7 @@ extension _BackupServerSetupBackupSection on _BackupServerSetupScreenState {
                                     if (!isRunning) const SizedBox(width: 8),
                                     if (hasOverlay) TextButton(onPressed: _isBackupRunning || server == null ? null : () => _cleanupVmOverlays(server, vm), child: const Text('Cleanup')),
                                     if (hasOverlay) const SizedBox(width: 8),
-                                    TextButton(onPressed: _isBackupRunning || server == null || hasOverlay ? null : () => _runVmBackup(server, vm), child: const Text('Backup')),
+                                    TextButton(onPressed: _isBackupRunning || server == null || blockBackupForOverlay ? null : () => _runVmBackup(server, vm), child: const Text('Backup')),
                                   ],
                                 ),
                               ],

@@ -12,6 +12,7 @@ class AppSettings {
     required this.servers,
     required this.connectionVerified,
     required this.blockSizeMB,
+    required this.requireSimpleDisksForBackup,
     required this.dummyDriverTmpWrites,
     required this.maxConcurrentBackupRestoreJobs,
     required this.maxConcurrentJobsPerVm,
@@ -28,6 +29,7 @@ class AppSettings {
   final List<ServerConfig> servers;
   final bool connectionVerified;
   final int blockSizeMB;
+  final bool requireSimpleDisksForBackup;
   final bool dummyDriverTmpWrites;
   final int maxConcurrentBackupRestoreJobs;
   final int maxConcurrentJobsPerVm;
@@ -44,6 +46,7 @@ class AppSettings {
     List<ServerConfig>? servers,
     bool? connectionVerified,
     int? blockSizeMB,
+    bool? requireSimpleDisksForBackup,
     bool? dummyDriverTmpWrites,
     int? maxConcurrentBackupRestoreJobs,
     int? maxConcurrentJobsPerVm,
@@ -71,6 +74,7 @@ class AppSettings {
       servers: resolvedServers,
       connectionVerified: connectionVerified ?? this.connectionVerified,
       blockSizeMB: blockSizeMB ?? this.blockSizeMB,
+      requireSimpleDisksForBackup: requireSimpleDisksForBackup ?? this.requireSimpleDisksForBackup,
       dummyDriverTmpWrites: dummyDriverTmpWrites ?? this.dummyDriverTmpWrites,
       maxConcurrentBackupRestoreJobs: maxConcurrentBackupRestoreJobs ?? this.maxConcurrentBackupRestoreJobs,
       maxConcurrentJobsPerVm: maxConcurrentJobsPerVm ?? this.maxConcurrentJobsPerVm,
@@ -88,6 +92,7 @@ class AppSettings {
       'backupStorageId': backupStorageId,
       'connectionVerified': connectionVerified,
       'blockSizeMB': blockSizeMB,
+      'requireSimpleDisksForBackup': requireSimpleDisksForBackup,
       'dummyDriverTmpWrites': dummyDriverTmpWrites,
       'maxConcurrentBackupRestoreJobs': maxConcurrentBackupRestoreJobs,
       'maxConcurrentJobsPerVm': maxConcurrentJobsPerVm,
@@ -143,6 +148,7 @@ class AppSettings {
       backupStorageId: backupStorageId == null || backupStorageId.isEmpty ? selectedBackupStorage?.id : backupStorageId,
       connectionVerified: json['connectionVerified'] == true,
       blockSizeMB: _parseBlockSizeMB(json['blockSizeMB']),
+      requireSimpleDisksForBackup: _parseBool(json['requireSimpleDisksForBackup'], field: 'requireSimpleDisksForBackup', defaultValue: true),
       dummyDriverTmpWrites: json['dummyDriverTmpWrites'] == true,
       maxConcurrentBackupRestoreJobs: _parsePositiveInt(json['maxConcurrentBackupRestoreJobs'], field: 'maxConcurrentBackupRestoreJobs', defaultValue: 1),
       maxConcurrentJobsPerVm: _parsePositiveInt(json['maxConcurrentJobsPerVm'], field: 'maxConcurrentJobsPerVm', defaultValue: 1),
@@ -162,6 +168,7 @@ class AppSettings {
     servers: <ServerConfig>[],
     connectionVerified: false,
     blockSizeMB: 1,
+    requireSimpleDisksForBackup: true,
     dummyDriverTmpWrites: false,
     maxConcurrentBackupRestoreJobs: 1,
     maxConcurrentJobsPerVm: 1,
@@ -278,6 +285,16 @@ class AppSettings {
       throw StateError('Invalid $field. Value must be 1 or higher.');
     }
     return parsed;
+  }
+
+  static bool _parseBool(Object? value, {required String field, required bool defaultValue}) {
+    if (value == null) {
+      return defaultValue;
+    }
+    if (value is bool) {
+      return value;
+    }
+    throw StateError('Invalid $field. Value must be true or false.');
   }
 
   static String _generateScheduleName({required ScheduledJob schedule, required List<ServerConfig> servers, required List<BackupStorage> storage}) {

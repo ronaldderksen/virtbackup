@@ -58,12 +58,14 @@ class BackupAgent {
     required BackupAgentDependencies dependencies,
     required BackupProgressListener onProgress,
     required int blockSizeBytes,
+    required bool requireSimpleDisksForBackup,
     LogInfo? onInfo,
     LogError? onError,
     int? writerConcurrencyOverride,
   }) : _dependencies = dependencies,
        _onProgress = onProgress,
        _blockSize = blockSizeBytes,
+       _requireSimpleDisksForBackup = requireSimpleDisksForBackup,
        _onInfo = onInfo,
        _onError = onError,
        _writerConcurrencyOverride = writerConcurrencyOverride;
@@ -92,6 +94,7 @@ class BackupAgent {
   int _driverBufferedBytes = 0;
   DateTime? _backupStartAt;
   final int _blockSize;
+  final bool _requireSimpleDisksForBackup;
   static const int _sftpPrefetchWindow = 2;
   static const int _writerMaxRetryAttempts = 5;
   static const Duration _writerRetryBaseDelay = Duration(seconds: 2);
@@ -195,6 +198,12 @@ class BackupAgent {
       final inactiveDisks = await _dependencies.loadVmDiskPaths(server, vm, inactive: true);
       if (activeDisks.isEmpty || inactiveDisks.isEmpty) {
         throw 'No disk files found for ${vm.name}.';
+      }
+
+      if (_requireSimpleDisksForBackup) {
+        _logInfo('Checking disk chains for ${vm.name}.');
+        _setProgress(_progress.copyWith(statusMessage: 'Checking disk chains...'));
+        await _ensureSimpleDiskChains(server: server, vm: vm, activeDisks: activeDisks, inactiveDisks: inactiveDisks);
       }
 
       final stateResult = await _dependencies.runSshCommand(server, 'virsh domstate "${vm.name}"');
@@ -1189,41 +1198,82 @@ class BackupAgent {
       if ((result.exitCode ?? 0) != 0) {
         return [sourcePath];
       }
-      final paths = <String>[];
-      final backingPaths = <String>[];
-      for (final line in result.stdout.split('\n')) {
-        final trimmed = line.trim();
-        if (!trimmed.startsWith('image:')) {
-          if (trimmed.startsWith('backing file:')) {
-            final value = trimmed.substring('backing file:'.length).trim();
-            if (value.isNotEmpty && value != '(null)') {
-              backingPaths.add(value);
-            }
-          }
-          continue;
-        }
-        final value = trimmed.substring('image:'.length).trim();
-        if (value.isEmpty) {
-          continue;
-        }
-        if (!paths.contains(value)) {
-          paths.add(value);
-        }
-      }
-      for (final backing in backingPaths) {
-        if (!paths.contains(backing)) {
-          paths.add(backing);
-        }
-      }
-      if (paths.isEmpty) {
-        return [sourcePath];
-      }
-      if (!paths.contains(sourcePath)) {
-        paths.insert(0, sourcePath);
-      }
-      return paths;
+      return _parseBackingChainPaths(result.stdout, sourcePath: sourcePath);
     } catch (_) {
       return [sourcePath];
+    }
+  }
+
+  Future<List<String>> _loadBackingChainForSimpleDiskGuard(ServerConfig server, String sourcePath) async {
+    final result = await _dependencies.runSshCommand(server, 'qemu-img info --backing-chain --force-share "$sourcePath"');
+    if ((result.exitCode ?? 0) != 0) {
+      final detail = result.stderr.trim().isEmpty ? 'qemu-img info failed' : result.stderr.trim();
+      throw 'Backup failed: currently only simple disks are supported. Could not inspect disk chain for $sourcePath: $detail';
+    }
+    return _parseBackingChainPaths(result.stdout, sourcePath: sourcePath);
+  }
+
+  List<String> _parseBackingChainPaths(String output, {required String sourcePath}) {
+    final paths = <String>[];
+    final backingPaths = <String>[];
+    for (final line in output.split('\n')) {
+      final trimmed = line.trim();
+      if (!trimmed.startsWith('image:')) {
+        if (trimmed.startsWith('backing file:')) {
+          final value = trimmed.substring('backing file:'.length).trim();
+          if (value.isNotEmpty && value != '(null)') {
+            backingPaths.add(value);
+          }
+        }
+        continue;
+      }
+      final value = trimmed.substring('image:'.length).trim();
+      if (value.isEmpty) {
+        continue;
+      }
+      if (!paths.contains(value)) {
+        paths.add(value);
+      }
+    }
+    for (final backing in backingPaths) {
+      if (!paths.contains(backing)) {
+        paths.add(backing);
+      }
+    }
+    if (paths.isEmpty) {
+      return [sourcePath];
+    }
+    if (!paths.contains(sourcePath)) {
+      paths.insert(0, sourcePath);
+    }
+    return paths;
+  }
+
+  Future<void> _ensureSimpleDiskChains({
+    required ServerConfig server,
+    required VmEntry vm,
+    required List<MapEntry<String, String>> activeDisks,
+    required List<MapEntry<String, String>> inactiveDisks,
+  }) async {
+    final inactiveByTarget = {for (final entry in inactiveDisks) entry.key: entry.value};
+    for (final entry in activeDisks) {
+      final inactiveSource = inactiveByTarget[entry.key];
+      if (inactiveSource != null && inactiveSource != entry.value) {
+        throw 'Backup failed: currently only simple disks are supported. Disk ${entry.key} has an active snapshot or overlay.';
+      }
+      final chainPaths = await _loadBackingChainForSimpleDiskGuard(server, entry.value);
+      final normalizedChain = chainPaths.where((path) => !path.toLowerCase().contains('.virtbackup-')).toList();
+      if (normalizedChain.length > 1) {
+        throw 'Backup failed: currently only simple disks are supported. Disk ${entry.key} has a backing chain.';
+      }
+    }
+
+    for (final entry in inactiveDisks) {
+      final chainPaths = await _loadBackingChainForSimpleDiskGuard(server, entry.value);
+      final normalizedChain = chainPaths.where((path) => !path.toLowerCase().contains('.virtbackup-')).toList();
+      if (normalizedChain.length > 1) {
+        throw 'Backup failed: currently only simple disks are supported. Disk ${entry.key} has a backing chain.';
+      }
     }
   }
 

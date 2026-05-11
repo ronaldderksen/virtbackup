@@ -75,6 +75,7 @@ For each VM disk:
 
 - Disk paths are loaded for both active and inactive states (`virsh domblklist --details`).
 - The backing chain is discovered with `qemu-img info --backing-chain`.
+- By default, backup fails before creating a Virt Backup snapshot if any disk already has an active snapshot, overlay, or backing chain. Multiple simple disks are allowed.
 - The chain is normalized to exclude internal `.virtbackup-` overlays.
 - A backup plan is built as a sequence of chain items.
 
@@ -323,6 +324,7 @@ The agent supports optional native SFTP via FFI:
 - `fresh` cleanup never deletes filesystem storage blobs (`storage[id=filesystem].params.path/VirtBackup/blobs`).
 - Blob storage is block-size scoped: `.../VirtBackup/blobs/<blockSizeMB>/`.
 - On agent startup, missing `blockSizeMB` is auto-added as `1` and written back immediately.
+- The hidden root setting `requireSimpleDisksForBackup` is stored in `agent.yaml`, defaults to `true`, and blocks backups of disks with existing snapshots, overlays, or backing chains. Set it to `false` only to bypass this guard.
 - For non-filesystem storage, `storeBlobs` and `useBlobs` are persisted in `agent.yaml`.
 - On agent startup, missing `storeBlobs`/`useBlobs` keys on non-filesystem storage are auto-added as `false` and written back immediately.
 - For non-filesystem storage, `uploadConcurrency` (backup) and `downloadConcurrency` (restore) are persisted in `agent.yaml`.

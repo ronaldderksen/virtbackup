@@ -184,6 +184,7 @@ Response:
   "backupStorageId":"dest_filesystem_1739440000000000",
   "connectionVerified":false,
   "blockSizeMB":1,
+  "requireSimpleDisksForBackup":true,
   "dummyDriverTmpWrites":false,
   "maxConcurrentBackupRestoreJobs":1,
   "maxConcurrentJobsPerVm":1,
@@ -283,6 +284,7 @@ schedules:
 `GET /config` and `POST /config` still use the flat schedule list for the current agent.
 The agent checks enabled schedules every 30 seconds and starts matching backup or restore jobs at the configured local agent time.
 Backup and restore starts are guarded by `maxConcurrentBackupRestoreJobs`, `maxConcurrentJobsPerVm`, and `maxConcurrentJobsPerStorage`. All three are stored in `agent.yaml`, default to `1`, and also apply to manual schedule runs. When a due schedule is blocked by a guard, the agent records a failed job and sends the configured ntfyme failure notification.
+Backup also checks disk backing chains before creating its own snapshot. With the hidden root setting `requireSimpleDisksForBackup: true`, any existing snapshot, overlay, or backing chain on a disk fails the backup because only simple disks are currently supported. Multiple simple disks are allowed. Set `requireSimpleDisksForBackup: false` in `agent.yaml` to bypass this guard.
 
 Fields:
 - `name`: generated from schedule type, server, storage, and VM. Clients should not expose this as an editable field.

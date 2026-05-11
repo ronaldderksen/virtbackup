@@ -33,7 +33,11 @@ class AppSettingsStore {
       final token = await loadAgentToken();
       return await _loadFromYamlFile(_file, token: token);
     } catch (error) {
-      if (error is StateError && (error.toString().contains('blockSizeMB') || error.toString().contains('maxConcurrent') || error.toString().contains('agent hostname'))) {
+      if (error is StateError &&
+          (error.toString().contains('blockSizeMB') ||
+              error.toString().contains('maxConcurrent') ||
+              error.toString().contains('requireSimpleDisksForBackup') ||
+              error.toString().contains('agent hostname'))) {
         rethrow;
       }
       return AppSettings.empty();
@@ -138,11 +142,13 @@ class AppSettingsStore {
     final updatedLegacyKeys = _removeLegacyRootKeys(normalized);
     final updatedStorages = _ensureStorageDefaults(normalized);
     final updatedBlockSize = _ensureBlockSizeMb(normalized);
+    final updatedSimpleDiskGuard = _ensureRequireSimpleDisksForBackup(normalized);
     final updatedJobGuards = _ensureJobGuards(normalized);
     final updatedVirtBackupAccountGroups = _ensureVirtBackupAccountGroups(normalized, agentName);
     final updatedScheduleGroups = _ensureScheduleGroups(normalized, agentName);
     final updatedRootOrder = _reorderRootKeys(normalized);
-    final updated = updatedLegacyKeys || updatedRootOrder || updatedStorages || updatedBlockSize || updatedJobGuards || updatedVirtBackupAccountGroups || updatedScheduleGroups;
+    final updated =
+        updatedLegacyKeys || updatedRootOrder || updatedStorages || updatedBlockSize || updatedSimpleDiskGuard || updatedJobGuards || updatedVirtBackupAccountGroups || updatedScheduleGroups;
     if (updated) {
       final encoded = _ensureTrailingNewline(_toYaml(normalized));
       await file.writeAsString(encoded);
@@ -380,6 +386,18 @@ class AppSettingsStore {
     return changed;
   }
 
+  bool _ensureRequireSimpleDisksForBackup(Map<String, dynamic> data) {
+    final value = data['requireSimpleDisksForBackup'];
+    if (value == null) {
+      data['requireSimpleDisksForBackup'] = true;
+      return true;
+    }
+    if (value is bool) {
+      return false;
+    }
+    throw StateError('Invalid requireSimpleDisksForBackup. Value must be true or false.');
+  }
+
   bool _removeLegacyRootKeys(Map<String, dynamic> data) {
     const legacyRootKeys = <String>{
       'restoreStorageId',
@@ -412,6 +430,7 @@ class AppSettingsStore {
       'backupStorageId',
       'connectionVerified',
       'blockSizeMB',
+      'requireSimpleDisksForBackup',
       'dummyDriverTmpWrites',
       'maxConcurrentBackupRestoreJobs',
       'maxConcurrentJobsPerVm',

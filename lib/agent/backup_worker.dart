@@ -95,6 +95,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
       dependencies: dependencies,
       onProgress: (progress) => mainPort.send({'type': _typeProgress, 'jobId': jobId, 'progress': progress.toMap()}),
       blockSizeBytes: effectiveSettings.blockSizeMB * 1024 * 1024,
+      requireSimpleDisksForBackup: effectiveSettings.requireSimpleDisksForBackup,
       onInfo: (message) => LogWriter.logAgentSync(level: 'info', message: message),
       onError: (message, error, stackTrace) {
         LogWriter.logAgentSync(level: 'error', message: '$message $error');
