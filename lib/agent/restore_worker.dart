@@ -22,6 +22,10 @@ const String _typeResult = 'result';
 const String _typeSettings = 'settings';
 const String _typeContext = 'context';
 
+bool _isExpectedRestoreFailure(Object error) {
+  return error.toString().startsWith('server is missing required tools:');
+}
+
 void restoreWorkerMain(Map<String, dynamic> init) {
   final mainPort = init['sendPort'] as SendPort;
   final commandPort = ReceivePort();
@@ -127,6 +131,10 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     LogWriter.configureSourceLevel(source: 'agent', level: settings.logLevel);
 
     final host = BackupAgentHost();
+    final missingTools = await host.missingRequiredRemoteTools(server);
+    if (missingTools.isNotEmpty) {
+      throw 'server is missing required tools: ${missingTools.join(', ')}';
+    }
 
     BackupDriver buildDriverForSettings(AppSettings driverSettings) {
       final factories = <String, BackupDriver Function()>{
@@ -512,7 +520,10 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     } catch (error, stackTrace) {
       final isCanceled = error is _Canceled;
       if (!isCanceled) {
-        LogWriter.logAgentSync(level: 'error', message: 'Restore failed: $error\n$stackTrace');
+        LogWriter.logAgentSync(level: 'error', message: 'Restore failed: $error');
+        if (!_isExpectedRestoreFailure(error)) {
+          LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
+        }
       }
       sendResult(
         AgentJobStatus(

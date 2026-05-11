@@ -5,6 +5,13 @@ import 'package:crypto/crypto.dart';
 import 'package:virtbackup/common/models.dart';
 import 'package:virtbackup/common/settings.dart';
 
+class AgentServerInventory {
+  const AgentServerInventory({required this.statuses, required this.missingTools});
+
+  final List<VmStatus> statuses;
+  final List<String> missingTools;
+}
+
 class AgentApiClient {
   AgentApiClient({Uri? baseUri}) : _baseUri = baseUri ?? Uri.parse('https://127.0.0.1:33551');
 
@@ -209,15 +216,27 @@ class AgentApiClient {
   }
 
   Future<List<VmStatus>> fetchVmStatus(String serverId) async {
+    return (await fetchServerInventory(serverId)).statuses;
+  }
+
+  Future<AgentServerInventory> fetchServerInventory(String serverId) async {
     final response = await _get('/servers/$serverId/vms');
     if (response.statusCode != 200) {
       throw 'Agent responded ${response.statusCode}';
     }
     final decoded = jsonDecode(response.body);
-    if (decoded is! List) {
-      return [];
+    if (decoded is List) {
+      return AgentServerInventory(statuses: decoded.whereType<Map>().map((item) => VmStatus.fromMap(Map<String, dynamic>.from(item))).toList(), missingTools: const []);
     }
-    return decoded.whereType<Map>().map((item) => VmStatus.fromMap(Map<String, dynamic>.from(item))).toList();
+    if (decoded is Map) {
+      final map = Map<String, dynamic>.from(decoded);
+      final rawItems = map['items'];
+      final rawMissingTools = map['missingTools'];
+      final statuses = rawItems is List ? rawItems.whereType<Map>().map((item) => VmStatus.fromMap(Map<String, dynamic>.from(item))).toList() : <VmStatus>[];
+      final missingTools = rawMissingTools is List ? rawMissingTools.map((item) => item.toString()).where((item) => item.trim().isNotEmpty).toList() : <String>[];
+      return AgentServerInventory(statuses: statuses, missingTools: missingTools);
+    }
+    return const AgentServerInventory(statuses: [], missingTools: []);
   }
 
   Future<void> refreshServer(String serverId) async {

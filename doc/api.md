@@ -284,7 +284,8 @@ schedules:
 `GET /config` and `POST /config` still use the flat schedule list for the current agent.
 The agent checks enabled schedules every 30 seconds and starts matching backup or restore jobs at the configured local agent time.
 Backup and restore starts are guarded by `maxConcurrentBackupRestoreJobs`, `maxConcurrentJobsPerVm`, and `maxConcurrentJobsPerStorage`. All three are stored in `agent.yaml`, default to `1`, and also apply to manual schedule runs. When a due schedule is blocked by a guard, the agent records a failed job and sends the configured ntfyme failure notification.
-Backup also checks disk backing chains before creating its own snapshot. With the hidden root setting `requireSimpleDisksForBackup: true`, any existing snapshot, overlay, or backing chain on a disk fails the backup because only simple disks are currently supported. Multiple simple disks are allowed. Set `requireSimpleDisksForBackup: false` in `agent.yaml` to bypass this guard.
+Backup fails before creating its own snapshot when an existing snapshot or overlay indicates cleanup is required, regardless of whether the job was started manually, via API, or by a schedule. Backup also checks disk backing chains before creating its own snapshot. With the hidden root setting `requireSimpleDisksForBackup: true`, backing chains fail the backup because only simple disks are currently supported. Multiple simple disks are allowed. Set `requireSimpleDisksForBackup: false` in `agent.yaml` only to bypass the backing-chain guard; it does not allow backups while cleanup is required.
+After a successful snapshot commit, the agent scans VM disk directories for `.virtbackup-` overlay files and removes only files that are no longer referenced by the VM and have no open users according to `lsof`.
 
 Fields:
 - `name`: generated from schedule type, server, storage, and VM. Clients should not expose this as an editable field.
@@ -423,15 +424,22 @@ Response:
 
 - `GET /servers/{serverId}/vms`
 
-Response (array):
+Response:
 ```json
-[
-  {
-    "vm":{"id":"vm1","name":"vm1","powerState":"running"},
-    "hasOverlay":false
-  }
-]
+{
+  "items": [
+    {
+      "vm":{"id":"vm1","name":"vm1","powerState":"running"},
+      "hasOverlay":false,
+      "missingTools":[]
+    }
+  ],
+  "missingTools":[]
+}
 ```
+
+During server inventory the agent checks for required remote tools: `chmod`, `echo`, `find`, `lsof`, `mkdir`, `qemu-img`, `rm`, `stat`, `test`, `tr`, and `virsh`. `hashblocks` is uploaded by the agent and is not part of this check. Backups and restores fail before starting when any required remote tool is missing.
+Keep this list current whenever future SSH commands introduce additional remote executables.
 
 ### Refresh server inventory (manual)
 

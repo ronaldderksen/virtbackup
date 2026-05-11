@@ -235,9 +235,17 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
   List<Widget> _buildRestoreSection(ColorScheme colorScheme) {
     final selectedEntry = _selectedRestoreEntry();
     final restoreServer = _getRestoreServer();
+    final missingTools = restoreServer == null ? const <String>[] : _missingToolsByServerId[restoreServer.id] ?? const <String>[];
     final restoreStorages = _enabledStorages().where((storage) => storage.driverId != 'dummy').toList();
     final selectedRestoreStorageId = restoreStorages.any((storage) => storage.id == _selectedBackupStorageId) ? _selectedBackupStorageId : null;
-    final canRestore = !_isRestoring && !_isDeletingRestoreEntry && restoreServer != null && restoreServer.connectionType == ConnectionType.ssh && selectedEntry != null && selectedEntry.hasAllDisks;
+    final canRestore =
+        !_isRestoring &&
+        !_isDeletingRestoreEntry &&
+        restoreServer != null &&
+        restoreServer.connectionType == ConnectionType.ssh &&
+        missingTools.isEmpty &&
+        selectedEntry != null &&
+        selectedEntry.hasAllDisks;
     final canCheck = !_isSanityChecking && !_isRestoring && !_isDeletingRestoreEntry && selectedEntry != null;
     final canDeleteEntry = !_isDeletingRestoreEntry && !_isLoadingRestoreEntries && !_isRestoring && selectedEntry != null;
     final vmOptions = _restoreEntries.map((entry) => entry.vmName).toSet().toList()..sort();
@@ -264,6 +272,13 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
                 items: _servers.map((server) => DropdownMenuItem(value: server.id, child: Text(server.name))).toList(),
                 onChanged: _servers.isEmpty ? null : _selectRestoreServerId,
               ),
+              if (missingTools.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Missing required remote tools: ${missingTools.join(', ')}. Restores are disabled until the server has these tools.',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: colorScheme.error),
+                ),
+              ],
               const SizedBox(height: 12),
               Row(
                 children: [

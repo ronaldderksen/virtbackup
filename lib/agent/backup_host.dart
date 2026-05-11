@@ -14,6 +14,8 @@ import 'package:virtbackup/common/models.dart';
 
 class BackupAgentHost {
   BackupAgentHost();
+  // Keep this list in sync with every remote executable used through SSH commands. hashblocks is uploaded by the agent and is intentionally excluded.
+  static const List<String> requiredRemoteTools = ['chmod', 'echo', 'find', 'lsof', 'mkdir', 'qemu-img', 'rm', 'stat', 'test', 'tr', 'virsh'];
   int _sftpRangeBytesSinceLog = 0;
   DateTime _sftpRangeLastLog = DateTime.now();
   int _sftpDownloadBytesSinceLog = 0;
@@ -228,6 +230,23 @@ class BackupAgentHost {
       statusByName[vm.name] = await _hasActiveOverlay(server, vm);
     }
     return statusByName;
+  }
+
+  Future<List<String>> missingRequiredRemoteTools(ServerConfig server) async {
+    final toolList = requiredRemoteTools.map(_shellQuote).join(' ');
+    final result = await _runSshCommandForServer(server, 'for tool in $toolList; do command -v "\$tool" >/dev/null 2>&1 || echo "\$tool"; done');
+    if ((result.exitCode ?? 0) != 0) {
+      final detail = result.stderr.trim().isEmpty ? 'tool inventory failed' : result.stderr.trim();
+      throw 'Remote tool check failed: $detail';
+    }
+    final missing = <String>{};
+    for (final line in result.stdout.split('\n')) {
+      final tool = line.trim();
+      if (tool.isNotEmpty) {
+        missing.add(tool);
+      }
+    }
+    return missing.toList()..sort();
   }
 
   Future<void> cleanupVmOverlays(ServerConfig server, VmEntry vm) async {
@@ -676,11 +695,18 @@ class BackupAgentHost {
   }
 
   Future<void> _pivotAllDisks(ServerConfig server, VmEntry vm, List<MapEntry<String, String>> disks) async {
+    final overlaysToDelete = disks.where((entry) => _sourcePathLooksLikeOverlay(entry.value)).map((entry) => entry.value).toList();
     for (final entry in disks) {
       final target = entry.key;
       final command = await _blockCommitCommand(server, vm, target, verbose: true);
-      await _runSshCommandForServer(server, command);
+      await _runCheckedSshCommand(server, command, 'Blockcommit failed for ${vm.name} target $target.');
     }
+    final activeDisks = await _loadVmDiskPaths(server, vm);
+    final inactiveDisks = await _loadVmDiskPaths(server, vm, inactive: true);
+    await _deleteUnusedVirtBackupOverlays(server, vm, [
+      ...overlaysToDelete,
+      ...await _findOldVirtBackupOverlayFiles(server, [...activeDisks, ...inactiveDisks, ...disks, ...overlaysToDelete.map((path) => MapEntry('', path))]),
+    ]);
   }
 
   Future<bool> _hasActiveOverlay(ServerConfig server, VmEntry vm) async {
@@ -729,6 +755,7 @@ class BackupAgentHost {
     final activeDisks = await _loadVmDiskPaths(server, vm);
     final inactiveDisks = await _loadVmDiskPaths(server, vm, inactive: true);
     final inactiveByTarget = {for (final entry in inactiveDisks) entry.key: entry.value};
+    final overlaysToDelete = <String>[];
     for (final entry in disks) {
       final target = entry.key;
       final activeSource = activeDisks.firstWhere((disk) => disk.key == target, orElse: () => const MapEntry('', '')).value;
@@ -741,7 +768,8 @@ class BackupAgentHost {
           throw 'Refusing to blockcommit: base equals top for ${vm.name} target $target ($baseSource).';
         }
         final command = await _blockCommitCommand(server, vm, target, verbose: false, top: activeSource, base: baseSource);
-        await _runSshCommandForServer(server, command);
+        await _runCheckedSshCommand(server, command, 'Blockcommit failed for ${vm.name} target $target.');
+        overlaysToDelete.add(activeSource);
         continue;
       }
       if (activeSource.isNotEmpty && !activeIsVirtbackup) {
@@ -749,8 +777,12 @@ class BackupAgentHost {
         continue;
       }
       final command = await _blockCommitCommand(server, vm, target, verbose: false);
-      await _runSshCommandForServer(server, command);
+      await _runCheckedSshCommand(server, command, 'Blockcommit failed for ${vm.name} target $target.');
     }
+    await _deleteUnusedVirtBackupOverlays(server, vm, [
+      ...overlaysToDelete,
+      ...await _findOldVirtBackupOverlayFiles(server, [...activeDisks, ...inactiveDisks, ...disks, ...overlaysToDelete.map((path) => MapEntry('', path))]),
+    ]);
   }
 
   Future<void> _cleanupStoppedVmOverlays(ServerConfig server, VmEntry vm, List<MapEntry<String, String>> disks) async {
@@ -768,7 +800,7 @@ class BackupAgentHost {
         continue;
       }
       LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: commit $overlayPath -> $backingPath');
-      await _runSshCommandForServer(server, 'qemu-img commit "$overlayPath"');
+      await _runCheckedSshCommand(server, 'qemu-img commit ${_shellQuote(overlayPath)}', 'Cleanup ${vm.name}: qemu-img commit failed for $overlayPath.');
       updatedXml = updatedXml.replaceAll(overlayPath, backingPath);
       overlaysToDelete.add(overlayPath);
     }
@@ -780,7 +812,7 @@ class BackupAgentHost {
       await _runSshCommandForServer(server, 'mkdir -p "/var/tmp/virtbackup"');
       await _uploadLocalFileViaSftp(server, localXml.path, remoteXml);
       LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: redefining domain using $remoteXml');
-      await _runSshCommandForServer(server, 'virsh define "$remoteXml"');
+      await _runCheckedSshCommand(server, 'virsh define ${_shellQuote(remoteXml)}', 'Cleanup ${vm.name}: virsh define failed for $remoteXml.');
       try {
         await localXml.delete();
       } catch (_) {}
@@ -789,9 +821,9 @@ class BackupAgentHost {
       } catch (_) {}
     }
     for (final overlayPath in overlaysToDelete) {
-      LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: removing overlay $overlayPath');
-      await _runSshCommandForServer(server, 'rm -f "$overlayPath"');
+      await _deleteUnusedVirtBackupOverlay(server, vm, overlayPath);
     }
+    await _deleteUnusedVirtBackupOverlays(server, vm, await _findOldVirtBackupOverlayFiles(server, [...disks, ...overlaysToDelete.map((path) => MapEntry('', path))]));
   }
 
   Future<String?> _findBackingFile(ServerConfig server, String overlayPath) async {
@@ -862,6 +894,102 @@ class BackupAgentHost {
     final baseInfo = base == null || base.isEmpty ? '' : ' base=$base';
     LogWriter.logAgentSync(level: 'info', message: 'Blockcommit domstate=${state.isEmpty ? 'unknown' : state} target=$target flags=${args.join(' ')}$topInfo$baseInfo');
     return 'virsh blockcommit "${vm.name}" "$target"$flags';
+  }
+
+  Future<void> _runCheckedSshCommand(ServerConfig server, String command, String failureMessage) async {
+    final result = await _runSshCommandForServer(server, command);
+    if ((result.exitCode ?? 0) != 0) {
+      throw result.stderr.trim().isEmpty ? failureMessage : result.stderr.trim();
+    }
+  }
+
+  Future<List<String>> _findOldVirtBackupOverlayFiles(ServerConfig server, List<MapEntry<String, String>> disks) async {
+    final directories = <String>{};
+    for (final entry in disks) {
+      final directory = _parentDirectory(entry.value.trim());
+      if (directory != null) {
+        directories.add(directory);
+      }
+    }
+    final overlays = <String>{};
+    for (final directory in directories) {
+      final result = await _runSshCommandForServer(server, "find ${_shellQuote(directory)} -maxdepth 1 -type f -name '*.virtbackup-*' -print");
+      if ((result.exitCode ?? 0) != 0) {
+        throw result.stderr.trim().isEmpty ? 'Failed to find old Virt Backup overlays in $directory.' : result.stderr.trim();
+      }
+      for (final line in result.stdout.split('\n')) {
+        final path = line.trim();
+        if (path.isNotEmpty && _sourcePathLooksLikeOverlay(path)) {
+          overlays.add(path);
+        }
+      }
+    }
+    return overlays.toList()..sort();
+  }
+
+  Future<void> _deleteUnusedVirtBackupOverlays(ServerConfig server, VmEntry vm, List<String> candidatePaths) async {
+    final candidates = <String>{};
+    for (final path in candidatePaths) {
+      final trimmed = path.trim();
+      if (trimmed.isNotEmpty && _sourcePathLooksLikeOverlay(trimmed)) {
+        candidates.add(trimmed);
+      }
+    }
+    for (final path in candidates.toList()..sort()) {
+      await _deleteUnusedVirtBackupOverlay(server, vm, path);
+    }
+  }
+
+  Future<void> _deleteUnusedVirtBackupOverlay(ServerConfig server, VmEntry vm, String overlayPath) async {
+    final path = overlayPath.trim();
+    if (path.isEmpty || !_sourcePathLooksLikeOverlay(path)) {
+      return;
+    }
+    if (await _vmReferencesDiskPath(server, vm, path)) {
+      LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: keeping overlay still referenced by VM: $path');
+      return;
+    }
+    final lsofResult = await _runSshCommandForServer(server, 'lsof -t -- ${_shellQuote(path)}');
+    final lsofExitCode = lsofResult.exitCode ?? 0;
+    if (lsofExitCode == 0) {
+      LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: keeping overlay still in use: $path');
+      return;
+    }
+    if (lsofExitCode != 1) {
+      final detail = lsofResult.stderr.trim().isEmpty ? 'exit code $lsofExitCode' : lsofResult.stderr.trim();
+      throw 'Cleanup ${vm.name}: could not verify overlay is unused with lsof for $path: $detail';
+    }
+    LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: removing unused overlay $path');
+    final rmResult = await _runSshCommandForServer(server, 'rm -f -- ${_shellQuote(path)}');
+    if ((rmResult.exitCode ?? 0) != 0) {
+      throw rmResult.stderr.trim().isEmpty ? 'Cleanup ${vm.name}: failed to remove overlay $path.' : rmResult.stderr.trim();
+    }
+  }
+
+  Future<bool> _vmReferencesDiskPath(ServerConfig server, VmEntry vm, String path) async {
+    final activeDisks = await _loadVmDiskPaths(server, vm);
+    final inactiveDisks = await _loadVmDiskPaths(server, vm, inactive: true);
+    for (final entry in [...activeDisks, ...inactiveDisks]) {
+      if (entry.value.trim() == path) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  String? _parentDirectory(String path) {
+    if (path.isEmpty) {
+      return null;
+    }
+    final slashIndex = path.lastIndexOf('/');
+    if (slashIndex <= 0) {
+      return null;
+    }
+    return path.substring(0, slashIndex);
+  }
+
+  String _shellQuote(String value) {
+    return "'${value.replaceAll("'", "'\"'\"'")}'";
   }
 
   Future<void> _downloadRemoteFileViaSftp(ServerConfig server, String remotePath, File file, {void Function(int bytes)? onBytes}) async {

@@ -35,6 +35,10 @@ int? _parseBlockSizeMBOverride(Object? value) {
   return parsed;
 }
 
+bool _isExpectedBackupFailure(Object error) {
+  return error.toString().startsWith('Backup failed: ');
+}
+
 void backupWorkerMain(Map<String, dynamic> init) {
   final mainPort = init['sendPort'] as SendPort;
   final commandPort = ReceivePort();
@@ -73,6 +77,13 @@ void backupWorkerMain(Map<String, dynamic> init) {
     LogWriter.configureSourceLevel(source: 'agent', level: effectiveSettings.logLevel);
 
     final host = BackupAgentHost();
+    final missingTools = await host.missingRequiredRemoteTools(server);
+    if (missingTools.isNotEmpty) {
+      final message = 'Backup failed: server is missing required tools: ${missingTools.join(', ')}';
+      LogWriter.logAgentSync(level: 'error', message: message);
+      mainPort.send({'type': _typeResult, 'jobId': jobId, 'result': BackupAgentResult(success: false, message: message).toMap()});
+      return;
+    }
 
     BackupDriver buildDriver() {
       final factories = <String, BackupDriver Function(Map<String, dynamic>)>{
@@ -99,7 +110,9 @@ void backupWorkerMain(Map<String, dynamic> init) {
       onInfo: (message) => LogWriter.logAgentSync(level: 'info', message: message),
       onError: (message, error, stackTrace) {
         LogWriter.logAgentSync(level: 'error', message: '$message $error');
-        LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
+        if (!_isExpectedBackupFailure(error)) {
+          LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
+        }
       },
       writerConcurrencyOverride: uploadConcurrency,
     );

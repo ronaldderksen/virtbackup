@@ -42,11 +42,17 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
                   Builder(
                     builder: (context) {
                       final server = _getSelectedServer();
+                      final missingTools = server == null ? const <String>[] : _missingToolsByServerId[server.id] ?? const <String>[];
                       return Row(
                         children: [
                           Text('Virtual machines', style: Theme.of(context).textTheme.titleMedium),
                           const SizedBox(width: 12),
-                          Expanded(child: Text(_formatLastRefresh(server), style: Theme.of(context).textTheme.bodySmall)),
+                          Expanded(
+                            child: Text(
+                              missingTools.isEmpty ? _formatLastRefresh(server) : '${_formatLastRefresh(server)} • Missing tools: ${missingTools.join(', ')}',
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: missingTools.isEmpty ? null : colorScheme.error),
+                            ),
+                          ),
                         ],
                       );
                     },
@@ -56,6 +62,10 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
                     builder: (context) {
                       final server = _getSelectedServer();
                       final vms = server == null ? null : _vmCacheByServerId[server.id];
+                      final missingTools = server == null ? const <String>[] : _missingToolsByServerId[server.id] ?? const <String>[];
+                      if (missingTools.isNotEmpty) {
+                        return Text('Missing required remote tools: ${missingTools.join(', ')}.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: colorScheme.error));
+                      }
                       if (vms == null || vms.isEmpty) {
                         return Text('No VM data loaded yet.', style: Theme.of(context).textTheme.bodyMedium);
                       }

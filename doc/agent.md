@@ -39,6 +39,7 @@ Key modules under `lib/agent`:
    - If VM is running, create a snapshot and operate on overlays.
    - Stream disk data with deduplication.
    - Commit snapshot if applicable.
+   - Remove unused `.virtbackup-` overlay files after commit only after verifying the VM no longer references them and `lsof` reports no open users.
 4. Progress is reported to job status, and summarized on completion.
 
 ### Restore
@@ -75,7 +76,8 @@ For each VM disk:
 
 - Disk paths are loaded for both active and inactive states (`virsh domblklist --details`).
 - The backing chain is discovered with `qemu-img info --backing-chain`.
-- By default, backup fails before creating a Virt Backup snapshot if any disk already has an active snapshot, overlay, or backing chain. Multiple simple disks are allowed.
+- Backup always fails before creating a Virt Backup snapshot if any disk already has an active snapshot or overlay that requires cleanup. This applies to manual, API, and scheduled starts.
+- By default, backup also fails before creating a Virt Backup snapshot if any disk has a backing chain. Multiple simple disks are allowed.
 - The chain is normalized to exclude internal `.virtbackup-` overlays.
 - A backup plan is built as a sequence of chain items.
 
@@ -147,6 +149,7 @@ Backup uses a single path:
 
 8. **Finalize**
    - Manifests are committed and the job completes.
+   - Older `.virtbackup-` overlay files found next to VM disks are checked and removed when they are no longer referenced or open.
 
 ### Workers (Hashblocks Path)
 
@@ -223,7 +226,8 @@ Endpoints include:
 - `GET /config`, `POST /config`: settings.
 - `POST /config` persists settings immediately and performs server refresh/listener restart in the background.
 - `POST /ntfyme/test`: send a test Ntfy me notification using the configured token.
-- `GET /servers/{id}/vms`: VM inventory.
+- `GET /servers/{id}/vms`: VM inventory and missing required remote tools.
+- Keep the required remote tools list in sync when future SSH commands add new executables. `hashblocks` is uploaded by the agent and is intentionally excluded.
 - `POST /servers/{id}/backup`: start backup job (supports `storageId`; legacy `driverId` is still accepted).
 - `POST /servers/{id}/restore/start`: start restore job (supports `storageId`; legacy `driverId` is still accepted).
 - `POST /restore/sanity`: validate manifests/blobs (`storageId` required).
@@ -258,6 +262,7 @@ The agent supports optional native SFTP via FFI:
 - Jobs can be canceled via API; cancellation propagates to backup logic.
 - Most operations are wrapped with try/catch; failures update job status.
 - Snapshot cleanup is attempted on failure to avoid dangling overlays.
+- Overlay file deletion is guarded by VM disk reference checks and `lsof`; if usage cannot be verified, cleanup fails visibly instead of deleting blindly.
 
 ## File Layout (Agent)
 
@@ -326,7 +331,7 @@ The agent supports optional native SFTP via FFI:
 - `fresh` cleanup never deletes filesystem storage blobs (`storage[id=filesystem].params.path/VirtBackup/blobs`).
 - Blob storage is block-size scoped: `.../VirtBackup/blobs/<blockSizeMB>/`.
 - On agent startup, missing `blockSizeMB` is auto-added as `1` and written back immediately.
-- The hidden root setting `requireSimpleDisksForBackup` is stored in `agent.yaml`, defaults to `true`, and blocks backups of disks with existing snapshots, overlays, or backing chains. Set it to `false` only to bypass this guard.
+- The hidden root setting `requireSimpleDisksForBackup` is stored in `agent.yaml`, defaults to `true`, and blocks backups of disks with backing chains. Set it to `false` only to bypass the backing-chain guard; backups with snapshots or overlays that require cleanup still fail.
 - For non-filesystem storage, `storeBlobs` and `useBlobs` are persisted in `agent.yaml`.
 - On agent startup, missing `storeBlobs`/`useBlobs` keys on non-filesystem storage are auto-added as `false` and written back immediately.
 - For non-filesystem storage, `uploadConcurrency` (backup) and `downloadConcurrency` (restore) are persisted in `agent.yaml`.

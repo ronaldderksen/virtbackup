@@ -118,6 +118,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String _scheduleFilterStorageId = '';
   final Map<String, bool> _vmHasOverlayByName = {};
   final Map<String, Map<String, bool>> _overlayByServerId = {};
+  final Map<String, List<String>> _missingToolsByServerId = {};
   final Map<String, DateTime> _lastRefreshByServerId = {};
   final VirtBackupAccountClient _accountClient = VirtBackupAccountClient(baseUri: _accountBaseUri);
   final List<RestoreEntry> _restoreEntries = [];
@@ -1800,6 +1801,18 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _updateUi(() {
       _restoreServerId = serverId;
     });
+    if (serverId != null) {
+      ServerConfig? server;
+      for (final item in _servers) {
+        if (item.id == serverId) {
+          server = item;
+          break;
+        }
+      }
+      if (server != null && server.connectionType == ConnectionType.ssh) {
+        await _loadVmInventory(server);
+      }
+    }
     if (_selectedMenuIndex == 3) {
       await _loadRestoreEntries();
     }
@@ -2753,11 +2766,14 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _updateUi(() {});
     try {
       if (server.connectionType == ConnectionType.ssh) {
-        final statuses = await _agentApiClient.fetchVmStatus(server.id);
+        final inventory = await _agentApiClient.fetchServerInventory(server.id);
+        final statuses = inventory.statuses;
         final vms = statuses.map((entry) => entry.vm).toList();
         final overlayStatusByName = <String, bool>{for (final entry in statuses) entry.vm.name: entry.hasOverlay};
+        final missingTools = inventory.missingTools.isNotEmpty ? inventory.missingTools : (statuses.isEmpty ? const <String>[] : statuses.first.missingTools);
         _vmCacheByServerId[server.id] = List<VmEntry>.from(vms);
         _overlayByServerId[server.id] = overlayStatusByName;
+        _missingToolsByServerId[server.id] = List<String>.from(missingTools);
         _lastRefreshByServerId[server.id] ??= DateTime.now();
         if (server.id == _editingServerId) {
           _vmHasOverlayByName
@@ -2768,6 +2784,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         final vms = await _loadVmInventoryViaApi(server);
         _vmCacheByServerId[server.id] = List<VmEntry>.from(vms);
         _overlayByServerId[server.id] = {};
+        _missingToolsByServerId[server.id] = [];
       }
       if (server.id == _editingServerId) {
         if (server.connectionType != ConnectionType.ssh) {

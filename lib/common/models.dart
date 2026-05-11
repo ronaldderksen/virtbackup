@@ -261,20 +261,23 @@ class VmEntry {
 }
 
 class VmStatus {
-  VmStatus({required this.vm, required this.hasOverlay});
+  VmStatus({required this.vm, required this.hasOverlay, this.missingTools = const []});
 
   final VmEntry vm;
   final bool hasOverlay;
+  final List<String> missingTools;
 
   Map<String, dynamic> toMap() {
-    return {'vm': vm.toMap(), 'hasOverlay': hasOverlay};
+    return {'vm': vm.toMap(), 'hasOverlay': hasOverlay, 'missingTools': missingTools};
   }
 
   factory VmStatus.fromMap(Map<String, dynamic> json) {
     final vmJson = json['vm'];
+    final rawMissingTools = json['missingTools'];
     return VmStatus(
       vm: vmJson is Map ? VmEntry.fromMap(Map<String, dynamic>.from(vmJson)) : VmEntry(id: 'unknown', name: 'unknown', powerState: VmPowerState.stopped),
       hasOverlay: json['hasOverlay'] == true,
+      missingTools: rawMissingTools is List ? rawMissingTools.map((item) => item.toString()).where((item) => item.trim().isNotEmpty).toList() : const [],
     );
   }
 }

@@ -199,6 +199,7 @@ class BackupAgent {
       if (activeDisks.isEmpty || inactiveDisks.isEmpty) {
         throw 'No disk files found for ${vm.name}.';
       }
+      _ensureNoPendingCleanup(activeDisks: activeDisks, inactiveDisks: inactiveDisks);
 
       if (_requireSimpleDisksForBackup) {
         _logInfo('Checking disk chains for ${vm.name}.');
@@ -210,10 +211,6 @@ class BackupAgent {
       final state = stateResult.stdout.trim().toLowerCase();
 
       if (state == 'running') {
-        _logInfo('Checking overlays for ${vm.name}.');
-        _setProgress(_progress.copyWith(statusMessage: 'Checking existing overlays...'));
-        await _dependencies.cleanupActiveOverlays(server, vm, activeDisks, inactiveDisks);
-
         _logInfo('Creating snapshot for ${vm.name}.');
         _setProgress(_progress.copyWith(statusMessage: 'Creating snapshot...'));
         final snapshotName = _dependencies.sanitizeFileName('virtbackup-$backupTimestamp');
@@ -1293,6 +1290,28 @@ class BackupAgent {
         throw 'Backup failed: currently only simple disks are supported. Disk ${entry.key} has a backing chain.';
       }
     }
+  }
+
+  void _ensureNoPendingCleanup({required List<MapEntry<String, String>> activeDisks, required List<MapEntry<String, String>> inactiveDisks}) {
+    final inactiveByTarget = {for (final entry in inactiveDisks) entry.key: entry.value};
+    for (final entry in activeDisks) {
+      final inactiveSource = inactiveByTarget[entry.key];
+      if (inactiveSource != null && inactiveSource != entry.value) {
+        throw 'Backup failed: cleanup is required before backup. Disk ${entry.key} has an active snapshot or overlay.';
+      }
+      if (_sourcePathLooksLikeVirtBackupOverlay(entry.value) || (inactiveSource != null && _sourcePathLooksLikeVirtBackupOverlay(inactiveSource))) {
+        throw 'Backup failed: cleanup is required before backup. Disk ${entry.key} has a Virt Backup overlay.';
+      }
+    }
+    for (final entry in inactiveDisks) {
+      if (_sourcePathLooksLikeVirtBackupOverlay(entry.value)) {
+        throw 'Backup failed: cleanup is required before backup. Disk ${entry.key} has a Virt Backup overlay.';
+      }
+    }
+  }
+
+  bool _sourcePathLooksLikeVirtBackupOverlay(String sourcePath) {
+    return sourcePath.toLowerCase().contains('.virtbackup-');
   }
 
   void _writeManifestHeader(IOSink sink, {required String serverId, required String vmName, required String backupTimestamp, required String domainXml}) {

@@ -53,6 +53,7 @@ class AgentHttpServer {
   HttpServer? _server;
   AppSettings _agentSettings = AppSettings.empty();
   final Map<String, List<VmStatus>> _vmStatusByServerId = {};
+  final Map<String, List<String>> _missingToolsByServerId = {};
   final Map<String, AgentJobStatus> _jobs = {};
   final Map<String, _JobControl> _jobControls = {};
   final Map<HttpResponse, _EventStreamState> _eventStreams = {};
@@ -302,6 +303,10 @@ class AgentHttpServer {
   }
 
   Future<String> _startScheduledRestore(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage) async {
+    final missingTools = await _host.missingRequiredRemoteTools(server);
+    if (missingTools.isNotEmpty) {
+      throw StateError('restore failed: server is missing required tools: ${missingTools.join(', ')}');
+    }
     final xmlPath = await _resolveScheduledRestoreXmlPath(schedule, storage);
     if (xmlPath.trim().isEmpty) {
       throw StateError('restore schedule requires restoreXmlPath');
@@ -445,6 +450,7 @@ class AgentHttpServer {
       for (final id in removed) {
         await _safeStopEventListener(id);
         _vmStatusByServerId.remove(id);
+        _missingToolsByServerId.remove(id);
       }
 
       if (forceRestartSshListeners) {
@@ -455,6 +461,7 @@ class AgentHttpServer {
             await _safeStartEventListener(server);
           } else {
             _vmStatusByServerId.remove(server.id);
+            _missingToolsByServerId.remove(server.id);
           }
         }
         return;
@@ -470,6 +477,7 @@ class AgentHttpServer {
           await _safeStartEventListener(server);
         } else {
           _vmStatusByServerId.remove(id);
+          _missingToolsByServerId.remove(id);
         }
       }
 
@@ -484,6 +492,7 @@ class AgentHttpServer {
           await _safeStartEventListener(server);
         } else {
           _vmStatusByServerId.remove(id);
+          _missingToolsByServerId.remove(id);
         }
       }
     }
@@ -503,6 +512,10 @@ class AgentHttpServer {
   }
 
   Future<void> _safeStartEventListener(ServerConfig server) async {
+    if ((_missingToolsByServerId[server.id] ?? const <String>[]).contains('virsh')) {
+      _hostLog('Skipping VM event listener for ${server.name}: missing required tool virsh.');
+      return;
+    }
     try {
       await _startEventListener(server);
     } catch (error, stackTrace) {
@@ -619,16 +632,25 @@ class AgentHttpServer {
     final servers = _agentSettings.servers.where((server) => server.connectionType == ConnectionType.ssh).toList();
     for (final server in servers) {
       await _refreshServer(server, reason: 'startup/settings');
-      await _startEventListener(server);
+      await _safeStartEventListener(server);
     }
   }
 
   Future<void> _refreshServer(ServerConfig server, {required String reason}) async {
     try {
       _hostLog('Refreshing server ${server.name} (reason: $reason).');
+      final missingTools = await _host.missingRequiredRemoteTools(server);
+      _missingToolsByServerId[server.id] = missingTools;
+      if (missingTools.isNotEmpty) {
+        _hostLog('Server ${server.name} missing required tools: ${missingTools.join(', ')}');
+      }
+      if (missingTools.contains('tr') || missingTools.contains('virsh')) {
+        _vmStatusByServerId[server.id] = [];
+        return;
+      }
       final vms = await _host.loadVmInventory(server);
       final overlay = await _host.loadOverlayStatusForVms(server, vms);
-      final status = vms.map((vm) => VmStatus(vm: vm, hasOverlay: overlay[vm.name] == true)).toList();
+      final status = vms.map((vm) => VmStatus(vm: vm, hasOverlay: overlay[vm.name] == true, missingTools: missingTools)).toList();
       _vmStatusByServerId[server.id] = status;
     } catch (error, stackTrace) {
       _hostLogError('Failed to refresh ${server.name}.', error, stackTrace);
@@ -678,7 +700,7 @@ class AgentHttpServer {
       if (!_agentSettings.servers.any((item) => item.id == server.id)) {
         return;
       }
-      await _startEventListener(server);
+      await _safeStartEventListener(server);
     });
   }
 
@@ -726,6 +748,7 @@ class AgentHttpServer {
     current[index] = VmStatus(
       vm: VmEntry(id: existing.vm.id, name: existing.vm.name, powerState: nextState),
       hasOverlay: existing.hasOverlay,
+      missingTools: existing.missingTools,
     );
   }
 
@@ -932,7 +955,7 @@ class AgentHttpServer {
       if (request.method == 'GET' && path.startsWith('/servers/') && path.endsWith('/vms')) {
         final serverId = path.split('/')[2];
         final data = _vmStatusByServerId[serverId] ?? [];
-        _json(request, 200, data.map((entry) => entry.toMap()).toList());
+        _json(request, 200, {'items': data.map((entry) => entry.toMap()).toList(), 'missingTools': _missingToolsByServerId[serverId] ?? const <String>[]});
         return;
       }
       if (request.method == 'POST' && path.startsWith('/servers/') && path.endsWith('/refresh')) {
@@ -1171,6 +1194,11 @@ class AgentHttpServer {
           return;
         }
         final resolvedDriverId = requestedDriver.isNotEmpty ? requestedDriver : resolvedStorage.driverId;
+        final missingTools = await _host.missingRequiredRemoteTools(server);
+        if (missingTools.isNotEmpty) {
+          _json(request, 409, {'error': 'server is missing required tools: ${missingTools.join(', ')}'});
+          return;
+        }
         final restoreVmName = _extractVmNameFromXmlPath(xmlPath);
         final guardMessage = _jobStartGuardMessage(type: AgentJobType.restore, vmName: restoreVmName, storageId: resolvedStorage.storage.id);
         if (guardMessage != null) {
