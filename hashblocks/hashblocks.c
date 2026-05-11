@@ -58,6 +58,15 @@ static void sha256_hex(const uint8_t *buf, size_t len, char out[65]) {
   out[digest_len * 2] = '\0';
 }
 
+static void digest_to_hex(const unsigned char *digest, unsigned int digest_len, char out[65]) {
+  static const char hex[] = "0123456789abcdef";
+  for (unsigned int i = 0; i < digest_len; i++) {
+    out[i * 2] = hex[(digest[i] >> 4) & 0xF];
+    out[i * 2 + 1] = hex[digest[i] & 0xF];
+  }
+  out[digest_len * 2] = '\0';
+}
+
 static void handle_control(uint64_t *limit_index, int *stop_requested) {
   static char line_buf[256];
   static size_t line_len = 0;
@@ -158,6 +167,21 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  EVP_MD_CTX *total_ctx = EVP_MD_CTX_new();
+  if (!total_ctx) {
+    fprintf(stderr, "Failed to allocate EVP_MD_CTX.\n");
+    free(buf);
+    close(fd);
+    return 1;
+  }
+  if (EVP_DigestInit_ex(total_ctx, EVP_sha256(), NULL) != 1) {
+    fprintf(stderr, "SHA256 failed.\n");
+    EVP_MD_CTX_free(total_ctx);
+    free(buf);
+    close(fd);
+    return 1;
+  }
+
   uint64_t index = 0;
   int in_zero_run = 0;
   uint64_t zero_start = 0;
@@ -166,6 +190,7 @@ int main(int argc, char **argv) {
   while (1) {
     handle_control(&limit_index, &stop_requested);
     if (stop_requested) {
+      EVP_MD_CTX_free(total_ctx);
       free(buf);
       close(fd);
       return 2;
@@ -180,6 +205,7 @@ int main(int argc, char **argv) {
     ssize_t n = read(fd, buf, block_size);
     if (n < 0) {
       fprintf(stderr, "Read error: %s\n", strerror(errno));
+      EVP_MD_CTX_free(total_ctx);
       free(buf);
       close(fd);
       return 1;
@@ -210,6 +236,7 @@ int main(int argc, char **argv) {
         zero_len = 0;
         if (lseek(fd, -(off_t)n, SEEK_CUR) == (off_t)-1) {
           fprintf(stderr, "Seek error after ZERO run: %s\n", strerror(errno));
+          EVP_MD_CTX_free(total_ctx);
           free(buf);
           close(fd);
           return 1;
@@ -220,6 +247,13 @@ int main(int argc, char **argv) {
         nanosleep(&ts, NULL);
         continue;
       }
+      if (EVP_DigestUpdate(total_ctx, buf, (size_t)n) != 1) {
+        fprintf(stderr, "SHA256 failed.\n");
+        EVP_MD_CTX_free(total_ctx);
+        free(buf);
+        close(fd);
+        return 1;
+      }
       if (in_zero_run) {
         print_zero_run(zero_start, index - 1);
         in_zero_run = 0;
@@ -229,6 +263,15 @@ int main(int argc, char **argv) {
       sha256_hex(buf, (size_t)n, hex);
       printf("%llu -> %s\n", (unsigned long long)index, hex);
     }
+    if (in_zero_run) {
+      if (EVP_DigestUpdate(total_ctx, buf, (size_t)n) != 1) {
+        fprintf(stderr, "SHA256 failed.\n");
+        EVP_MD_CTX_free(total_ctx);
+        free(buf);
+        close(fd);
+        return 1;
+      }
+    }
 
     index++;
   }
@@ -236,8 +279,21 @@ int main(int argc, char **argv) {
   if (in_zero_run) {
     print_zero_run(zero_start, index - 1);
   }
+  unsigned char total_digest[EVP_MAX_MD_SIZE];
+  unsigned int total_digest_len = 0;
+  char total_hex[65];
+  if (EVP_DigestFinal_ex(total_ctx, total_digest, &total_digest_len) != 1) {
+    fprintf(stderr, "SHA256 failed.\n");
+    EVP_MD_CTX_free(total_ctx);
+    free(buf);
+    close(fd);
+    return 1;
+  }
+  digest_to_hex(total_digest, total_digest_len, total_hex);
   printf("EOF\n");
+  printf("SHA245 %s\n", total_hex);
 
+  EVP_MD_CTX_free(total_ctx);
   free(buf);
   close(fd);
   return 0;

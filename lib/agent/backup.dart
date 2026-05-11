@@ -673,6 +673,7 @@ class BackupAgent {
     var hashblocksBytesSinceTick = 0;
     var hashblocksSmoothedSpeed = 0.0;
     DateTime? hashblocksLastTick;
+    String? hashblocksTotalSha256;
     var eofSeen = false;
 
     void handleHashblocksBytes(int bytes) {
@@ -949,6 +950,18 @@ class BackupAgent {
               }
               return;
             }
+            if (trimmed.startsWith('SHA245 ')) {
+              if (!eofSeen) {
+                throw StateError('Hashblocks SHA245 line arrived before EOF.');
+              }
+              final digest = trimmed.substring('SHA245 '.length).trim();
+              if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(digest)) {
+                throw StateError('Invalid hashblocks SHA245 line: $trimmed');
+              }
+              hashblocksTotalSha256 = digest;
+              LogWriter.logAgentSync(level: 'info', message: 'worker=hashblocks total_sha256=$digest');
+              return;
+            }
             await hashblocksWorker.handleLine(trimmed);
           } on _BackupCanceled {
             return;
@@ -959,6 +972,10 @@ class BackupAgent {
       if (_cancelRequested) {
         throw const _BackupCanceled();
       }
+      if (eofSeen && hashblocksTotalSha256 == null) {
+        throw StateError('Hashblocks SHA245 line missing after EOF.');
+      }
+      sink.writeln('disk_sha256: $hashblocksTotalSha256');
       existsWorker.signalDone();
       await existsWorkerFuture;
       existsWorker.throwIfError();
@@ -983,8 +1000,9 @@ class BackupAgent {
       handleHashblocksBytes(0);
       final doneMbPerSec = hashblocksSmoothedSpeed / (1024 * 1024);
       final doneTotalMb = hashblocksBytes / (1024 * 1024);
+      final totalSha256LogPart = hashblocksTotalSha256 == null ? '' : ' sha256=$hashblocksTotalSha256';
       _logInfo(
-        'hashblocks done: lines=${hashblocksWorker.totalLines} existing=${hashblocksWorker.existingBlocks} missing=${hashblocksWorker.missingBlocks} zero=${hashblocksWorker.zeroBlocks} speed=${doneMbPerSec.toStringAsFixed(1)}MB/s total=${doneTotalMb.toStringAsFixed(1)}MB',
+        'hashblocks done: lines=${hashblocksWorker.totalLines} existing=${hashblocksWorker.existingBlocks} missing=${hashblocksWorker.missingBlocks} zero=${hashblocksWorker.zeroBlocks} speed=${doneMbPerSec.toStringAsFixed(1)}MB/s total=${doneTotalMb.toStringAsFixed(1)}MB$totalSha256LogPart',
       );
       await sink.flush();
       manifestFlushed = true;

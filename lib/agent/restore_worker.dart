@@ -658,6 +658,7 @@ Future<List<_ManifestData>> _readManifestDataList(File manifest) async {
   int? fileSize;
   String? sourcePath;
   String? diskId;
+  String? diskSha256;
   var sawChain = false;
   var sawDomainXml = false;
   final domainXmlBuffer = StringBuffer();
@@ -687,10 +688,15 @@ Future<List<_ManifestData>> _readManifestDataList(File manifest) async {
     }
     final domainXml = _decodeDomainXml(encodedXml, manifest.path);
     final blockSizeMB = _blockSizeMbFromManifestBytes(blockSize, manifest.path);
+    final diskSha256Value = diskSha256?.trim() ?? '';
+    if (diskSha256Value.isNotEmpty && !RegExp(r'^[0-9a-f]{64}$').hasMatch(diskSha256Value)) {
+      throw 'Manifest metadata invalid: disk_sha256 invalid in ${manifest.path}';
+    }
     results.add(
       _ManifestData(
         sourcePath: sourcePath?.trim() ?? '',
         diskId: diskId?.trim() ?? '',
+        diskSha256: diskSha256Value,
         blockSize: blockSize,
         blockSizeMB: blockSizeMB,
         blocks: List<_BlockRef>.from(blocks),
@@ -702,6 +708,7 @@ Future<List<_ManifestData>> _readManifestDataList(File manifest) async {
     fileSize = null;
     sourcePath = null;
     diskId = null;
+    diskSha256 = null;
     inChain = false;
     inBlocks = false;
     blocks.clear();
@@ -805,6 +812,10 @@ Future<List<_ManifestData>> _readManifestDataList(File manifest) async {
       for (var i = start; i <= end; i += 1) {
         blocks.add(_BlockRef.zero());
       }
+      continue;
+    }
+    if (line.startsWith('disk_sha256:')) {
+      diskSha256 = line.substring('disk_sha256:'.length).trim();
       continue;
     }
     final parts = line.split('->');
@@ -1234,6 +1245,7 @@ class _ManifestData {
   const _ManifestData({
     required this.sourcePath,
     required this.diskId,
+    required this.diskSha256,
     required this.blockSize,
     required this.blockSizeMB,
     required this.blocks,
@@ -1244,6 +1256,7 @@ class _ManifestData {
 
   final String sourcePath;
   final String diskId;
+  final String diskSha256;
   final int blockSize;
   final int blockSizeMB;
   final List<_BlockRef> blocks;

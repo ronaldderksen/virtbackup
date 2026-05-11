@@ -68,6 +68,7 @@ blocks:
   0 -> <sha256>
   1 -> <sha256>
   2-10 -> ZERO
+disk_sha256: <sha256>
 ```
 
 Rules:
@@ -75,10 +76,11 @@ Rules:
 - Hash entries map block index to blob hash.
 - `ZERO` run entries represent zero-filled ranges.
 - `block_size` is stored in bytes.
+- `disk_sha256` contains the SHA-256 digest of the complete disk data and is written after the disk block mappings.
 
 ## Mandatory File Completion Marker
 
-After the final block entry:
+After the final disk section:
 
 1. A literal `EOF` line is required.
 2. A trailing empty line is optional and intended for readability.
@@ -87,6 +89,7 @@ Example ending:
 
 ```text
 120-140 -> ZERO
+disk_sha256: <sha256>
 EOF
 
 ```

@@ -23,6 +23,7 @@ Fast block-hash tool used by the VirtBackup agent.
 - End of file:
   ```
   EOF
+  SHA245 <sha256>
   ```
 
 Long ZERO runs may be emitted in chunks (e.g. `0-4095 -> ZERO`, `4096-8191 -> ZERO`) to keep progress visible.
@@ -33,6 +34,7 @@ Long ZERO runs may be emitted in chunks (e.g. `0-4095 -> ZERO`, `4096-8191 -> ZE
 - Block index is **0-based**.
 - Default block size is **8192** bytes (the VirtBackup agent passes its own block size).
 - Hash algorithm: **SHA-256** (OpenSSL EVP).
+- The final `SHA245` line contains the SHA-256 digest of all file data processed by `hashblocks`.
 
 ## Control (stdin)
 

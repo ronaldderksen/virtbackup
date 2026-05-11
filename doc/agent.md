@@ -109,10 +109,12 @@ Backup uses a single path:
      - `index -> <sha256>`
      - `start-end -> ZERO`
      - `EOF`
+     - `SHA245 <sha256>`
 
 3. **Hashblocks processing**
    - Each line advances hashblocks progress (including ZERO/existing).
    - ZERO runs are written to the manifest (no SFTP).
+   - The total disk SHA-256 reported by `hashblocks` is written to the disk section as `disk_sha256`.
    - ZERO runs also advance LIMIT progress-window tracking.
    - For hashes, entries are pushed to:
      - blob-cache queue (directory hydration/ready)
