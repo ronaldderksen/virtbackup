@@ -98,9 +98,15 @@ void restoreWorkerMain(Map<String, dynamic> init) {
 
   Future<void> runRestore(Map<String, dynamic> payload) async {
     final jobId = payload['jobId']?.toString() ?? '';
-    final driverId = payload['driverId']?.toString() ?? 'filesystem';
+    final driverId = payload['driverId']?.toString().trim() ?? '';
     final backupPath = payload['backupPath']?.toString() ?? '';
-    final decision = payload['decision']?.toString() ?? 'overwrite';
+    final decision = payload['decision']?.toString().trim() ?? '';
+    if (driverId.isEmpty) {
+      throw 'restore requires driverId';
+    }
+    if (decision.isEmpty) {
+      throw 'restore requires decision';
+    }
     final fullCheckOnly = decision == 'full_check';
     final xmlPath = payload['xmlPath']?.toString() ?? '';
     final settingsMap = Map<String, dynamic>.from(payload['settings'] as Map? ?? const {});
@@ -119,10 +125,13 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         }
       }
     }
-    final isFilesystemStorage = selectedStorage?.id == AppSettings.filesystemStorageId;
+    final isFilesystemStorage = driverId == 'filesystem';
     final useStoredBlobs = !isFilesystemStorage && selectedStorage?.useBlobs == true;
     final storeDownloadedBlobs = !isFilesystemStorage && selectedStorage?.storeBlobs == true;
-    final downloadConcurrency = settingsStorage?.downloadConcurrency ?? selectedStorage?.downloadConcurrency ?? 8;
+    final downloadConcurrency = isFilesystemStorage ? 1 : settingsStorage?.downloadConcurrency ?? selectedStorage?.downloadConcurrency;
+    if (downloadConcurrency == null) {
+      throw 'restore requires downloadConcurrency for storage ${selectedStorage?.id ?? ''}';
+    }
     final server = ServerConfig.fromMap(serverMap);
     await LogWriter.configureSourcePath(
       source: 'agent',
@@ -147,7 +156,10 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         'filesystem': () => FilesystemBackupDriver(backupPath.trim(), blockSizeMB: driverSettings.blockSizeMB),
         'sftp': () => SftpBackupDriver(settings: driverSettings),
       };
-      final factory = factories[driverId] ?? factories['filesystem']!;
+      final factory = factories[driverId];
+      if (factory == null) {
+        throw 'unknown restore driverId: $driverId';
+      }
       return factory();
     }
 
@@ -219,6 +231,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
               diskBaseName: diskBaseName,
               remotePath: sourcePath,
               blocks: manifestData.blocks,
+              diskSha256: manifestData.diskSha256,
               blockSize: manifestData.blockSize,
               blockSizeMB: manifestData.blockSizeMB,
               fileSize: manifestData.fileSize,
@@ -303,6 +316,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
       final speedTicker = _SpeedTicker();
       var checkedBlocks = 0;
       var mismatches = 0;
+      var restoreWarnings = 0;
       var lastCheckProgressUpdate = DateTime.now();
 
       for (var i = 0; i < remoteDiskTargets.length; i += 1) {
@@ -350,8 +364,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
               ensureNotCanceled();
               final expectedLength = target.fileSize == null ? target.blockSize : _blockLengthForIndex(blockIndex, target.fileSize!, target.blockSize);
               if (expectedLength <= 0) {
-                blockIndex += 1;
-                continue;
+                throw 'Sanity check manifest block beyond file_size for ${target.diskBaseName} at block index=$blockIndex';
               }
               if (!await streamIterator.moveNext()) {
                 throw 'Sanity check stream ended early for ${target.diskBaseName} at block index=$blockIndex';
@@ -410,7 +423,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           await host.runSshCommand(server, 'mkdir -p "$remoteDir"');
         }
         await host.runSshCommand(server, 'rm -f "$remotePath"');
-        await host.uploadRemoteStream(
+        final uploadedSha256 = await host.uploadRemoteStream(
           server,
           remotePath,
           blobStream,
@@ -436,6 +449,10 @@ void restoreWorkerMain(Map<String, dynamic> init) {
             );
           },
         );
+        if (uploadedSha256 != target.diskSha256) {
+          restoreWarnings += 1;
+          LogWriter.logAgentSync(level: 'warn', message: 'restore: SHA256 mismatch for ${target.diskBaseName}: expected=${target.diskSha256} uploaded=$uploadedSha256');
+        }
         if (target.fileSize != null && target.fileSize! > 0) {
           try {
             final remoteSize = await host.runSshCommand(server, 'stat -c %s "$remotePath"');
@@ -505,7 +522,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           id: jobId,
           type: AgentJobType.restore,
           state: AgentJobState.success,
-          message: 'Restore completed',
+          message: restoreWarnings == 0 ? 'Restore completed' : 'Restore completed with $restoreWarnings warning${restoreWarnings == 1 ? '' : 's'}',
           totalUnits: totalBytes,
           completedUnits: 0,
           bytesTransferred: bytesTransferred,
@@ -660,9 +677,6 @@ Future<String> _readManifestContent(File manifest) async {
 
 Future<List<_ManifestData>> _readManifestDataList(File manifest) async {
   final content = await _readManifestContent(manifest);
-  if (!_hasValidManifestEof(content)) {
-    throw 'manifest incomplete';
-  }
   final lines = const LineSplitter().convert(content);
   var blockSize = 0;
   int? manifestVersion;
@@ -700,7 +714,10 @@ Future<List<_ManifestData>> _readManifestDataList(File manifest) async {
     final domainXml = _decodeDomainXml(encodedXml, manifest.path);
     final blockSizeMB = _blockSizeMbFromManifestBytes(blockSize, manifest.path);
     final diskSha256Value = diskSha256?.trim() ?? '';
-    if (diskSha256Value.isNotEmpty && !RegExp(r'^[0-9a-f]{64}$').hasMatch(diskSha256Value)) {
+    if (diskSha256Value.isEmpty) {
+      throw 'manifest incomplete';
+    }
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(diskSha256Value)) {
       throw 'Manifest metadata invalid: disk_sha256 invalid in ${manifest.path}';
     }
     results.add(
@@ -735,7 +752,7 @@ Future<List<_ManifestData>> _readManifestDataList(File manifest) async {
       continue;
     }
     final line = rawLine.trim();
-    if (line.isEmpty || line == 'EOF') {
+    if (line.isEmpty) {
       continue;
     }
     final isTopLevel = !rawLine.startsWith(' ');
@@ -861,13 +878,6 @@ Future<List<_ManifestData>> _readManifestDataList(File manifest) async {
   return results;
 }
 
-bool _hasValidManifestEof(String content) {
-  if (content == 'EOF\n' || content == 'EOF\n\n') {
-    return true;
-  }
-  return content.endsWith('\nEOF\n') || content.endsWith('\nEOF\n\n');
-}
-
 String _decodeDomainXml(String encoded, String manifestPath) {
   try {
     final compressed = base64.decode(encoded);
@@ -971,6 +981,9 @@ Stream<List<int>> _blobStream(
       }
       final block = blocks[index];
       final expectedLength = totalSize == null ? blockSize : _blockLengthForIndex(index, totalSize, blockSize);
+      if (expectedLength <= 0) {
+        throw 'restore manifest block beyond file_size at index=$index';
+      }
       if (block.zeroRun) {
         debug.markFetchDone(index: index, source: 'zero', expectedLength: expectedLength, fetchStartedAt: fetchStartedAt);
         return _BlockData(index, expectedLength > 0 ? Uint8List(expectedLength) : const <int>[]);
@@ -1054,6 +1067,9 @@ Stream<List<int>> _blobStream(
       }
       final block = blocks[index];
       final expectedLength = totalSize == null ? blockSize : _blockLengthForIndex(index, totalSize, blockSize);
+      if (expectedLength <= 0) {
+        throw 'restore manifest block beyond file_size at index=$index';
+      }
       if (block.zeroRun) {
         debug.markFetchDone(index: index, source: 'zero', expectedLength: expectedLength, fetchStartedAt: fetchStartedAt);
         if (expectedLength > 0) {
@@ -1109,7 +1125,7 @@ Stream<List<int>> _blobStream(
     debug.maybeLog(nextIndex: nextIndex, nextEmit: nextEmit, inFlight: inFlight.length, force: true);
   }
   if (totalSize != null && totalEmitted < totalSize) {
-    yield Uint8List(totalSize - totalEmitted);
+    throw 'restore manifest incomplete: emitted $totalEmitted bytes, expected $totalSize';
   }
 }
 
@@ -1219,6 +1235,7 @@ class _RestoreDiskTarget {
     required this.diskBaseName,
     required this.remotePath,
     required this.blocks,
+    required this.diskSha256,
     required this.blockSize,
     required this.blockSizeMB,
     required this.fileSize,
@@ -1228,6 +1245,7 @@ class _RestoreDiskTarget {
   final String diskBaseName;
   final String remotePath;
   final List<_BlockRef> blocks;
+  final String diskSha256;
   final int blockSize;
   final int blockSizeMB;
   final int? fileSize;

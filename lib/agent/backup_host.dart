@@ -269,8 +269,8 @@ class BackupAgentHost {
     await _uploadLocalFileViaSftp(server, localPath, remotePath, onBytes: onBytes);
   }
 
-  Future<void> uploadRemoteStream(ServerConfig server, String remotePath, Stream<List<int>> stream, {void Function(int bytes)? onBytes}) async {
-    await _uploadRemoteStreamViaSftp(server, remotePath, stream, onBytes: onBytes);
+  Future<String> uploadRemoteStream(ServerConfig server, String remotePath, Stream<List<int>> stream, {void Function(int bytes)? onBytes}) async {
+    return _uploadRemoteStreamViaSftp(server, remotePath, stream, onBytes: onBytes);
   }
 
   Future<void> beginLargeTransferSession(ServerConfig server) async {
@@ -1289,7 +1289,7 @@ class BackupAgentHost {
     }
   }
 
-  Future<void> _uploadRemoteStreamViaSftp(ServerConfig server, String remotePath, Stream<List<int>> stream, {void Function(int bytes)? onBytes}) async {
+  Future<String> _uploadRemoteStreamViaSftp(ServerConfig server, String remotePath, Stream<List<int>> stream, {void Function(int bytes)? onBytes}) async {
     final nativeSession = _nativeSftpSessions[server.id];
     if (nativeSession == null || _nativeSftp == null) {
       throw StateError('Native SFTP upload session is required but unavailable for ${server.sshHost}.');
@@ -1363,6 +1363,7 @@ class BackupAgentHost {
       if (pendingLength > 0) {
         writeChunk(pending, 0, pendingLength);
       }
+      return _nativeSftp.fileSha256Hex(file);
     } finally {
       if (nativeBuffer != null) {
         calloc.free(nativeBuffer!);
@@ -1399,6 +1400,7 @@ class _NativeSftpBindings {
       _openWrite = lib.lookupFunction<_SftpOpenWriteC, _SftpOpenWriteDart>('vb_sftp_open_write'),
       _read = lib.lookupFunction<_SftpReadC, _SftpReadDart>('vb_sftp_read'),
       _write = lib.lookupFunction<_SftpWriteC, _SftpWriteDart>('vb_sftp_write'),
+      _fileSha256Hex = lib.lookupFunction<_SftpFileSha256HexC, _SftpFileSha256HexDart>('vb_sftp_file_sha256_hex'),
       _closeFile = lib.lookupFunction<_SftpCloseFileC, _SftpCloseFileDart>('vb_sftp_close_file'),
       _sha256Hex = lib.lookupFunction<_Sha256HexC, _Sha256HexDart>('vb_sha256_hex');
   final _SftpConnectDart _connect;
@@ -1407,6 +1409,7 @@ class _NativeSftpBindings {
   final _SftpOpenWriteDart _openWrite;
   final _SftpReadDart _read;
   final _SftpWriteDart _write;
+  final _SftpFileSha256HexDart _fileSha256Hex;
   final _SftpCloseFileDart _closeFile;
   final _Sha256HexDart _sha256Hex;
 
@@ -1468,6 +1471,19 @@ class _NativeSftpBindings {
     return _write(file, buffer, length);
   }
 
+  String fileSha256Hex(Pointer<Void> file) {
+    final outputPtr = calloc<Uint8>(65);
+    try {
+      final rc = _fileSha256Hex(file, outputPtr, 65);
+      if (rc != 0) {
+        throw StateError('Native SFTP upload SHA256 failed.');
+      }
+      return outputPtr.cast<Utf8>().toDartString();
+    } finally {
+      calloc.free(outputPtr);
+    }
+  }
+
   void closeFile(Pointer<Void> file) {
     _closeFile(file);
   }
@@ -1506,6 +1522,8 @@ typedef _SftpReadC = Int32 Function(Pointer<Void> file, Int64 offset, Pointer<Ui
 typedef _SftpReadDart = int Function(Pointer<Void> file, int offset, Pointer<Uint8> buffer, int length);
 typedef _SftpWriteC = Int32 Function(Pointer<Void> file, Pointer<Uint8> buffer, Int32 length);
 typedef _SftpWriteDart = int Function(Pointer<Void> file, Pointer<Uint8> buffer, int length);
+typedef _SftpFileSha256HexC = Int32 Function(Pointer<Void> file, Pointer<Uint8> outHex, Int32 outLen);
+typedef _SftpFileSha256HexDart = int Function(Pointer<Void> file, Pointer<Uint8> outHex, int outLen);
 typedef _SftpCloseFileC = Void Function(Pointer<Void> file);
 typedef _SftpCloseFileDart = void Function(Pointer<Void> file);
 typedef _Sha256HexC = Int32 Function(Pointer<Uint8> data, Int32 length, Pointer<Uint8> outHex, Int32 outLen);

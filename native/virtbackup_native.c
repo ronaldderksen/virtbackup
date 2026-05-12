@@ -25,6 +25,7 @@ typedef struct {
   LIBSSH2_SFTP_HANDLE *handle;
   vb_sftp_session *sess;
   long long last_offset;
+  EVP_MD_CTX *write_sha256_ctx;
 } vb_sftp_file;
 
 static pthread_mutex_t g_libssh2_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -349,6 +350,7 @@ void *vb_sftp_open_read(void *session_ptr, const char *path) {
   file->handle = handle;
   file->sess = sess;
   file->last_offset = -1;
+  file->write_sha256_ctx = NULL;
   return (void *)file;
 }
 
@@ -373,6 +375,15 @@ void *vb_sftp_open_write(void *session_ptr, const char *path, int truncate) {
   file->handle = handle;
   file->sess = sess;
   file->last_offset = -1;
+  file->write_sha256_ctx = EVP_MD_CTX_new();
+  if (!file->write_sha256_ctx || EVP_DigestInit_ex(file->write_sha256_ctx, EVP_sha256(), NULL) != 1) {
+    if (file->write_sha256_ctx) {
+      EVP_MD_CTX_free(file->write_sha256_ctx);
+    }
+    free(file);
+    libssh2_sftp_close(handle);
+    return NULL;
+  }
   return (void *)file;
 }
 
@@ -426,10 +437,36 @@ int vb_sftp_write(void *file_ptr, const unsigned char *buffer, int length) {
       libssh2_session_set_blocking(session, 1);
       return total > 0 ? total : -1;
     }
+    if (file->write_sha256_ctx && EVP_DigestUpdate(file->write_sha256_ctx, buffer + total, (size_t)n) != 1) {
+      libssh2_session_set_blocking(session, 1);
+      return total > 0 ? total : -1;
+    }
     total += (int)n;
   }
   libssh2_session_set_blocking(session, 1);
   return total;
+}
+
+int vb_sftp_file_sha256_hex(void *file_ptr, char *out_hex, int out_len) {
+  if (!file_ptr || !out_hex || out_len < VB_SHA256_HEX_LENGTH) {
+    return -1;
+  }
+  vb_sftp_file *file = (vb_sftp_file *)file_ptr;
+  if (!file->write_sha256_ctx) {
+    return -1;
+  }
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int digest_len = 0;
+  if (EVP_DigestFinal_ex(file->write_sha256_ctx, digest, &digest_len) != 1) {
+    return -1;
+  }
+  EVP_MD_CTX_free(file->write_sha256_ctx);
+  file->write_sha256_ctx = NULL;
+  if ((int)digest_len != VB_SHA256_DIGEST_LENGTH) {
+    return -1;
+  }
+  hex_encode(digest, VB_SHA256_DIGEST_LENGTH, out_hex);
+  return 0;
 }
 
 void vb_sftp_close_file(void *file_ptr) {
@@ -437,6 +474,9 @@ void vb_sftp_close_file(void *file_ptr) {
     return;
   }
   vb_sftp_file *file = (vb_sftp_file *)file_ptr;
+  if (file->write_sha256_ctx) {
+    EVP_MD_CTX_free(file->write_sha256_ctx);
+  }
   if (file->handle) {
     libssh2_sftp_close(file->handle);
   }

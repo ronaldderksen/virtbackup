@@ -146,7 +146,7 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
   }
 
   Future<void> _runRestore() async {
-    if (_isRestoring) {
+    if (_isPreparingRestore || _isRestoring) {
       return;
     }
     final server = _getRestoreServer();
@@ -169,6 +169,9 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
         _showSnackBarInfo('Select a storage first.');
         return;
       }
+      _updateUi(() {
+        _isPreparingRestore = true;
+      });
       final precheck = await _agentApiClient.restorePrecheck(server.id, entry.xmlPath, storageId: storageId);
       var decision = 'overwrite';
       if (precheck.vmExists) {
@@ -183,6 +186,10 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
     } catch (error, stackTrace) {
       _logError('Restore failed.', error, stackTrace);
       _showSnackBarError('Restore failed: $error');
+    } finally {
+      _updateUi(() {
+        _isPreparingRestore = false;
+      });
     }
   }
 
@@ -239,6 +246,7 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
     final restoreStorages = _enabledStorages().where((storage) => storage.driverId != 'dummy').toList();
     final selectedRestoreStorageId = restoreStorages.any((storage) => storage.id == _selectedBackupStorageId) ? _selectedBackupStorageId : null;
     final canRestore =
+        !_isPreparingRestore &&
         !_isRestoring &&
         !_isDeletingRestoreEntry &&
         restoreServer != null &&
@@ -246,8 +254,8 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
         missingTools.isEmpty &&
         selectedEntry != null &&
         selectedEntry.hasAllDisks;
-    final canCheck = !_isSanityChecking && !_isRestoring && !_isDeletingRestoreEntry && selectedEntry != null;
-    final canDeleteEntry = !_isDeletingRestoreEntry && !_isLoadingRestoreEntries && !_isRestoring && selectedEntry != null;
+    final canCheck = !_isSanityChecking && !_isPreparingRestore && !_isRestoring && !_isDeletingRestoreEntry && selectedEntry != null;
+    final canDeleteEntry = !_isDeletingRestoreEntry && !_isLoadingRestoreEntries && !_isPreparingRestore && !_isRestoring && selectedEntry != null;
     final vmOptions = _restoreEntries.map((entry) => entry.vmName).toSet().toList()..sort();
     final selectedVm = _selectedRestoreVmName;
     final dateEntries = _restoreEntries.where((entry) => selectedVm == null ? true : entry.vmName == selectedVm).toList()..sort((a, b) => b.timestamp.compareTo(a.timestamp));
@@ -287,7 +295,7 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
                       initialValue: selectedRestoreStorageId,
                       decoration: const InputDecoration(labelText: 'Storage', prefixIcon: Icon(Icons.cloud_queue_outlined), border: OutlineInputBorder()),
                       items: restoreStorages.map((storage) => DropdownMenuItem<String>(value: storage.id, child: Text('${storage.name} (${storage.driverId})'))).toList(),
-                      onChanged: _isRestoring
+                      onChanged: _isPreparingRestore || _isRestoring
                           ? null
                           : (value) {
                               unawaited(_setSelectedBackupStorage(value, refreshRestoreEntries: true));
@@ -295,7 +303,7 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
                     ),
                   ),
                   const SizedBox(width: 12),
-                  OutlinedButton(onPressed: _isRestoring ? null : _openStorageEditor, child: const Text('Manage')),
+                  OutlinedButton(onPressed: _isPreparingRestore || _isRestoring ? null : _openStorageEditor, child: const Text('Manage')),
                 ],
               ),
               if (_isLoadingRestoreEntries) ...[
@@ -314,7 +322,7 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
                 initialValue: _selectedRestoreVmName,
                 decoration: const InputDecoration(labelText: 'VM', prefixIcon: Icon(Icons.memory_outlined), border: OutlineInputBorder()),
                 items: vmOptions.map((name) => DropdownMenuItem(value: name, child: Text(name))).toList(),
-                onChanged: _isLoadingRestoreEntries || vmOptions.isEmpty
+                onChanged: _isLoadingRestoreEntries || _isPreparingRestore || vmOptions.isEmpty
                     ? null
                     : (value) {
                         _updateUi(() {
@@ -340,7 +348,7 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
                       initialValue: selectedKey,
                       decoration: const InputDecoration(labelText: 'Date', prefixIcon: Icon(Icons.event_outlined), border: OutlineInputBorder()),
                       items: dateEntries.map((entry) => DropdownMenuItem(value: '${entry.timestamp}|${entry.sourceServerId}', child: Text('${entry.timestamp} • ${entry.sourceServerName}'))).toList(),
-                      onChanged: _isLoadingRestoreEntries || dateEntries.isEmpty || _isDeletingRestoreEntry
+                      onChanged: _isLoadingRestoreEntries || dateEntries.isEmpty || _isDeletingRestoreEntry || _isPreparingRestore
                           ? null
                           : (value) {
                               _updateUi(() {
@@ -366,7 +374,11 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
               const SizedBox(height: 12),
               Row(
                 children: [
-                  FilledButton.icon(onPressed: canRestore ? _runRestore : null, icon: const Icon(Icons.restore), label: Text(_isRestoring ? 'Restoring...' : 'Restore')),
+                  FilledButton.icon(
+                    onPressed: canRestore ? _runRestore : null,
+                    icon: const Icon(Icons.restore),
+                    label: Text(_isPreparingRestore ? 'Preparing...' : (_isRestoring ? 'Restoring...' : 'Restore')),
+                  ),
                   const SizedBox(width: 12),
                   OutlinedButton.icon(
                     onPressed: canCheck ? _runSanityCheck : null,

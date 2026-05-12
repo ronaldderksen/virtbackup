@@ -68,14 +68,12 @@ Blocks (0-based):
 6 -> ZERO
 100-120 -> ZERO
 disk_sha256: <sha256>
-EOF
 ```
 
 Notes:
 - `domain.xml` is embedded once per manifest.
 - Disk metadata (`disk_id`, `source_path`, `chain`, `blocks`) is repeated per disk section.
-- `disk_sha256` is written per disk section after the block mappings and contains the SHA-256 digest of the complete disk data.
-- Restore requires an `EOF` terminator line to accept a manifest as complete.
+- `disk_sha256` is written per disk section after the block mappings, contains the SHA-256 digest of the complete disk data, and marks the disk section as complete.
 
 ## Backup flow (agent)
 The agent creates one VM manifest and appends per-disk sections while the backup is running.

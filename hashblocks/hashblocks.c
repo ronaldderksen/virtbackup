@@ -290,8 +290,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   digest_to_hex(total_digest, total_digest_len, total_hex);
-  printf("EOF\n");
-  printf("SHA245 %s\n", total_hex);
+  printf("SHA256 %s\n", total_hex);
 
   EVP_MD_CTX_free(total_ctx);
   free(buf);

@@ -8,7 +8,7 @@ This document defines the required manifest format for backups and restore valid
 
 - A single manifest file is sufficient for restore context.
 - No separate sidecar files are required for restore metadata.
-- Strict end-of-file validation is required to detect incomplete manifests.
+- Strict per-disk `disk_sha256` validation is required to detect incomplete manifests.
 
 ## Versioning
 
@@ -30,7 +30,7 @@ The following fields are required in each manifest:
 - `domain_xml_b64_gz`
 - `chain`
 - `blocks`
-- `EOF` terminator line
+- `disk_sha256`
 
 `file_size` remains optional when unknown.
 
@@ -78,19 +78,15 @@ Rules:
 - `block_size` is stored in bytes.
 - `disk_sha256` contains the SHA-256 digest of the complete disk data and is written after the disk block mappings.
 
-## Mandatory File Completion Marker
+## Mandatory Disk Completion Marker
 
-After the final disk section:
-
-1. A literal `EOF` line is required.
-2. A trailing empty line is optional and intended for readability.
+After every disk block section, `disk_sha256` is required. It contains the SHA-256 digest of the complete disk data and marks that disk section as complete.
 
 Example ending:
 
 ```text
 120-140 -> ZERO
 disk_sha256: <sha256>
-EOF
 
 ```
 
@@ -98,12 +94,12 @@ EOF
 
 Restore must fail hard if any of the following is true:
 
-- `EOF` line is missing.
+- `disk_sha256` is missing from any disk section.
 - Embedded `domain_xml_b64_gz` is missing or invalid.
 - Embedded `chain` is missing or invalid.
 - Manifest shape deviates from this specification.
 
-Error message for missing terminator condition:
+Error message for missing completion marker:
 
 - `manifest incomplete`
 

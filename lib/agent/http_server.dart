@@ -349,7 +349,7 @@ class AgentHttpServer {
     final storage = _resolveStorageById(schedule.storageId);
     final vmName = _scheduledJobVmName(schedule);
     final jobId = _createJob(type, vmName: vmName, storageId: schedule.storageId, scheduleId: schedule.id);
-    _setJobContext(jobId, source: server == null ? schedule.name : _formatJobSource(server, vmName), target: storage?.storage.name, driverLabel: storage?.driverId);
+    _setJobContext(jobId, source: server == null ? schedule.name : _formatJobSource(server, vmName), storageLabel: storage?.storage.name);
     final current = _jobs[jobId];
     if (current == null) {
       return;
@@ -1456,7 +1456,10 @@ class AgentHttpServer {
       return [];
     }
     final resolvedDriverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : resolvedStorage.driverId;
-    final driverInfo = _driverCatalog[resolvedDriverId] ?? _driverCatalog['filesystem']!;
+    final driverInfo = _driverCatalog[resolvedDriverId];
+    if (driverInfo == null) {
+      throw 'unknown driverId: $resolvedDriverId';
+    }
     final backupPath = resolvedStorage.backupPath;
     if (driverInfo.usesPath && backupPath.isEmpty) {
       return [];
@@ -1509,7 +1512,10 @@ class AgentHttpServer {
       throw 'storage not found or unavailable';
     }
     final resolvedDriverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : resolvedStorage.driverId;
-    final driverInfo = _driverCatalog[resolvedDriverId] ?? _driverCatalog['filesystem']!;
+    final driverInfo = _driverCatalog[resolvedDriverId];
+    if (driverInfo == null) {
+      throw 'unknown driverId: $resolvedDriverId';
+    }
     final backupPath = resolvedStorage.backupPath;
     if (driverInfo.usesPath && backupPath.isEmpty) {
       throw 'missing backup.base_path';
@@ -1796,7 +1802,10 @@ class AgentHttpServer {
 
   drv.BackupDriver _driverForSettings(String driverId, String backupPath, {required AppSettings settings}) {
     final registry = _buildDriverRegistry(backupPath: backupPath, settings: settings);
-    final descriptor = registry[driverId] ?? registry['filesystem']!;
+    final descriptor = registry[driverId];
+    if (descriptor == null) {
+      throw 'unknown driverId: $driverId';
+    }
     return descriptor.create(const <String, dynamic>{});
   }
 
@@ -2173,7 +2182,7 @@ class AgentHttpServer {
       jobId,
       source: _formatJobSource(server, vm.name),
       target: _formatBackupTarget(driverInfo, backupPath, driverId, storageName: storage?.storage.name),
-      driverLabel: driverInfo.label,
+      storageLabel: _formatBackupTarget(driverInfo, backupPath, driverId, storageName: storage?.storage.name),
     );
     _hostLog('Backup job $jobId using driver: $driverId');
     final control = _jobControls[jobId];
@@ -2310,7 +2319,16 @@ class AgentHttpServer {
   }
 
   void _startSanityCheckJob(String jobId, String xmlPath, String timestamp, {required _ResolvedStorage storage}) {
-    final driverInfo = _driverCatalog[storage.driverId] ?? _driverCatalog['filesystem']!;
+    final driverInfo = _driverCatalog[storage.driverId];
+    if (driverInfo == null) {
+      final current = _jobs[jobId];
+      if (current != null) {
+        final message = 'unknown driverId: ${storage.driverId}';
+        _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: message));
+        _notifyNtfymeJobCompletion(jobId, type: AgentJobType.sanity, state: AgentJobState.failure, message: message);
+      }
+      return;
+    }
     final backupPath = storage.backupPath;
     if (driverInfo.usesPath && backupPath.isEmpty) {
       final current = _jobs[jobId];
@@ -2319,7 +2337,7 @@ class AgentHttpServer {
       }
       return;
     }
-    _setJobContext(jobId, source: xmlPath, driverLabel: driverInfo.label);
+    _setJobContext(jobId, source: xmlPath, storageLabel: storage.storage.name);
     final control = _jobControls[jobId];
     if (control == null) {
       return;
@@ -2415,7 +2433,10 @@ class AgentHttpServer {
       final quickCachesByBlockSizeMB = <int, _BlobDirectoryLookupCache>{};
       final checkLabel = mode == _RestoreCheckMode.quick ? 'Quick check' : 'Sanity check';
       try {
-        final driverInfo = _driverCatalog[storage.driverId] ?? _driverCatalog['filesystem']!;
+        final driverInfo = _driverCatalog[storage.driverId];
+        if (driverInfo == null) {
+          throw 'unknown driverId: ${storage.driverId}';
+        }
         final backupPath = storage.backupPath;
         if (driverInfo.usesPath && backupPath.isEmpty) {
           throw 'Backup path is not configured';
@@ -2509,9 +2530,9 @@ class AgentHttpServer {
         var lastProgressUpdate = DateTime.now();
         var mismatches = 0;
         var checked = 0;
-        final maxConcurrentDownloads = storage.storage.downloadConcurrency ?? 8;
-        if (maxConcurrentDownloads <= 0) {
-          throw '$checkLabel requires downloadConcurrency > 0.';
+        final maxConcurrentDownloads = storage.driverId == 'filesystem' ? 1 : storage.storage.downloadConcurrency;
+        if (maxConcurrentDownloads == null) {
+          throw '$checkLabel requires downloadConcurrency for storage ${storage.storage.id}.';
         }
         final blocksByBlockSizeMB = <int, List<_CheckBlockRef>>{};
 
@@ -2785,7 +2806,10 @@ class AgentHttpServer {
     final resolvedStorage = storage;
     final requestedDriverId = driverIdOverride?.trim() ?? '';
     final effectiveDriverId = requestedDriverId.isEmpty ? resolvedStorage.driverId : requestedDriverId;
-    final driverInfo = _driverCatalog[effectiveDriverId] ?? _driverCatalog['filesystem']!;
+    final driverInfo = _driverCatalog[effectiveDriverId];
+    if (driverInfo == null) {
+      throw 'unknown driverId: $effectiveDriverId';
+    }
     final backupPath = resolvedStorage.backupPath;
     if (driverInfo.usesPath && backupPath.isEmpty) {
       return RestorePrecheckResult(vmExists: false, canDefineOnly: false);
@@ -2841,6 +2865,9 @@ class AgentHttpServer {
   }
 
   Future<void> _cacheRelativeDirFromDriver({required drv.BackupDriver driver, required String relativeDir}) async {
+    if (driver is FilesystemBackupDriver) {
+      return;
+    }
     final normalizedDir = relativeDir.replaceAll('\\', '/').split('/').where((part) => part.trim().isNotEmpty && part != '.').join('/');
     if (normalizedDir.isEmpty) {
       return;
@@ -2868,11 +2895,28 @@ class AgentHttpServer {
   }
 
   void _startRestoreJob(String jobId, ServerConfig server, String xmlPath, String decision, {_ResolvedStorage? storage, String? driverIdOverride}) {
-    final defaultDriverId = storage?.driverId ?? 'filesystem';
-    final driverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : defaultDriverId;
-    final driverInfo = _driverCatalog[driverId] ?? _driverCatalog['filesystem']!;
-    _setJobContext(jobId, source: xmlPath, driverLabel: driverInfo.label);
-    final backupPath = storage?.backupPath ?? _filesystemBackupPath();
+    if (storage == null) {
+      final current = _jobs[jobId];
+      if (current != null) {
+        const message = 'Restore storage is required.';
+        _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: message));
+        _notifyNtfymeJobCompletion(jobId, type: AgentJobType.restore, state: AgentJobState.failure, message: message);
+      }
+      return;
+    }
+    final driverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : storage.driverId;
+    final driverInfo = _driverCatalog[driverId];
+    if (driverInfo == null) {
+      final current = _jobs[jobId];
+      if (current != null) {
+        final message = 'unknown driverId: $driverId';
+        _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: message));
+        _notifyNtfymeJobCompletion(jobId, type: AgentJobType.restore, state: AgentJobState.failure, message: message);
+      }
+      return;
+    }
+    _setJobContext(jobId, source: xmlPath, storageLabel: storage.storage.name);
+    final backupPath = storage.backupPath;
     if (driverInfo.usesPath && backupPath.isEmpty) {
       final current = _jobs[jobId];
       if (current != null) {
@@ -2905,8 +2949,8 @@ class AgentHttpServer {
           'backupPath': backupPath,
           'decision': decision,
           'xmlPath': xmlPath,
-          'settings': (storage?.settings ?? _agentSettings).toMap(),
-          'storage': storage?.storage.toMap(),
+          'settings': storage.settings.toMap(),
+          'storage': storage.storage.toMap(),
           'server': server.toMap(),
         });
         return;
@@ -2961,7 +3005,7 @@ class AgentHttpServer {
     return File(xmlPath).parent;
   }
 
-  void _setJobContext(String jobId, {String? source, String? target, String? driverLabel}) {
+  void _setJobContext(String jobId, {String? source, String? target, String? storageLabel}) {
     final control = _jobControls[jobId];
     if (control == null) {
       return;
@@ -2972,8 +3016,8 @@ class AgentHttpServer {
     if (target != null && target.trim().isNotEmpty) {
       control.target = target.trim();
     }
-    if (driverLabel != null && driverLabel.trim().isNotEmpty) {
-      control.driverLabel = driverLabel.trim();
+    if (storageLabel != null && storageLabel.trim().isNotEmpty) {
+      control.storageLabel = storageLabel.trim();
     }
   }
 
@@ -3013,7 +3057,8 @@ class AgentHttpServer {
       return;
     }
     final control = _jobControls[jobId];
-    final dedupeKey = '${type.name}:${state.name}';
+    final notificationStatus = _ntfymeStatusForJob(type: type, state: state, message: message);
+    final dedupeKey = '${type.name}:$notificationStatus';
     if (control != null && control.lastNtfyCompletionKey == dedupeKey) {
       return;
     }
@@ -3021,19 +3066,20 @@ class AgentHttpServer {
       control.lastNtfyCompletionKey = dedupeKey;
     }
     final duration = control?.startedAt == null ? null : DateTime.now().difference(control!.startedAt).inSeconds;
-    final status = state == AgentJobState.success ? 'success' : 'failed';
-    final storageLabel = _resolveStorageLabel(target: control?.target, driverLabel: control?.driverLabel);
-    final messageText = _buildNtfymeMessage(type, status, control?.source, control?.target);
-    final pushMessage = _buildNtfymePushMessage(messageText, storageLabel);
-    final payload = <String, dynamic>{'topic': _ntfymeTopic, 'msg': messageText, 'push_msg': pushMessage, 'type': type.name, 'status': status, 'storage': storageLabel};
+    final storageLabel = _resolveStorageLabel(storageLabel: control?.storageLabel);
+    final sourceLabel = _ntfymeSourceForJob(type: type, source: control?.source);
+    final targetLabel = type == AgentJobType.backup ? storageLabel : control?.target;
+    final messageText = _buildNtfymeMessage(type, notificationStatus);
+    final pushMessage = _buildNtfymePushMessage(message: messageText, source: sourceLabel, target: targetLabel);
+    final payload = <String, dynamic>{'topic': _ntfymeTopic, 'msg': messageText, 'push_msg': pushMessage, 'type': type.name, 'status': notificationStatus, 'storage': storageLabel};
     if (duration != null) {
       payload['duration_sec'] = duration;
     }
-    if (control?.source != null && control!.source!.trim().isNotEmpty) {
-      payload['source'] = control.source;
+    if (sourceLabel != null && sourceLabel.trim().isNotEmpty) {
+      payload['source'] = sourceLabel;
     }
-    if (control?.target != null && control!.target!.trim().isNotEmpty) {
-      payload['target'] = control.target;
+    if (type != AgentJobType.backup && targetLabel != null && targetLabel.trim().isNotEmpty) {
+      payload['target'] = targetLabel;
     }
     if (type == AgentJobType.backup && sizeBytes != null) {
       payload['size'] = _formatBytes(sizeBytes);
@@ -3041,32 +3087,59 @@ class AgentHttpServer {
     if (state == AgentJobState.failure) {
       final errorMessage = message.trim();
       payload['error'] = errorMessage.isEmpty ? messageText : errorMessage;
+    } else if (notificationStatus == 'warning') {
+      final warningMessage = message.trim();
+      payload['warning'] = warningMessage.isEmpty ? messageText : warningMessage;
     }
     _hostLog('Ntfy me notification queued: ${jsonEncode(payload)}');
     unawaited(_postNtfymeNotification(token, payload));
   }
 
-  String _buildNtfymeMessage(AgentJobType type, String status, String? source, String? target) {
+  String _ntfymeStatusForJob({required AgentJobType type, required AgentJobState state, required String message}) {
+    if (state == AgentJobState.failure) {
+      return 'failed';
+    }
+    if (type == AgentJobType.restore && message.toLowerCase().contains('warning')) {
+      return 'warning';
+    }
+    return 'success';
+  }
+
+  String _buildNtfymeMessage(AgentJobType type, String status) {
     final label = type == AgentJobType.backup ? 'Backup' : 'Restore';
-    final statusText = status == 'success' ? 'succeeded' : 'failed';
+    final statusText = switch (status) {
+      'success' => 'succeeded',
+      'warning' => 'warning',
+      _ => 'failed',
+    };
     return '$label $statusText';
   }
 
-  String _buildNtfymePushMessage(String message, String? storageLabel) {
-    final label = storageLabel?.trim() ?? '';
-    if (label.isEmpty) {
+  String _buildNtfymePushMessage({required String message, String? source, String? target}) {
+    final sourceLabel = source?.trim() ?? '';
+    final targetLabel = target?.trim() ?? '';
+    if (sourceLabel.isEmpty || targetLabel.isEmpty) {
       return message;
     }
-    return '$message on $label';
+    return '$message: $sourceLabel -> $targetLabel';
   }
 
-  String _resolveStorageLabel({String? target, String? driverLabel}) {
-    final targetLabel = target?.trim() ?? '';
-    if (targetLabel.isNotEmpty) {
-      return targetLabel;
-    }
-    final fallback = driverLabel?.trim() ?? '';
+  String _resolveStorageLabel({String? storageLabel}) {
+    final fallback = storageLabel?.trim() ?? '';
     return fallback.isEmpty ? 'Unknown storage' : fallback;
+  }
+
+  String? _ntfymeSourceForJob({required AgentJobType type, String? source}) {
+    final value = source?.trim() ?? '';
+    if (value.isEmpty || type != AgentJobType.restore) {
+      return value.isEmpty ? null : value;
+    }
+    final vmName = _extractVmNameFromXmlPath(value);
+    final timestamp = _extractTimestampFromManifestXmlPath(value);
+    if (vmName.isEmpty || timestamp.isEmpty) {
+      return value;
+    }
+    return '$vmName / $timestamp';
   }
 
   String _formatBytes(int bytes) {
@@ -3292,7 +3365,7 @@ class _JobControl {
   SendPort? workerSendPort;
   String? source;
   String? target;
-  String? driverLabel;
+  String? storageLabel;
   bool resultHandled = false;
   String? lastNtfyCompletionKey;
 }

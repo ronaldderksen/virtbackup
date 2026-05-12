@@ -108,6 +108,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _isRefreshingServer = false;
   bool _isLoadingRestoreEntries = false;
   bool _isDeletingRestoreEntry = false;
+  bool _isPreparingRestore = false;
   bool _isRestoring = false;
   bool _isSanityChecking = false;
   bool _isSendingNtfymeTest = false;

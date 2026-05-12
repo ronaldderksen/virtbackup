@@ -50,6 +50,9 @@ Key modules under `lib/agent`:
 4. VM XML is uploaded and defined with `virsh define`.
 5. Restore download concurrency is owned by the restore worker; drivers only receive an explicit read-concurrency limit.
 6. Full check now runs through the same restore worker blob pipeline as restore (`_blobStream`) and only forks at the final step: restore uploads the stream, full check hashes each emitted block and validates manifest SHA-256 values.
+7. During restore upload, the native SFTP writer computes the complete disk SHA-256 while writing. A mismatch with manifest `disk_sha256` is logged as a warning and the restore continues.
+8. Restore requires an explicit known `driverId` and `decision`; unknown restore drivers fail instead of falling back to filesystem.
+9. Restore fails when manifest blocks emit fewer bytes than `file_size`; missing trailing data is never padded with zeroes. A final partial block is truncated to `file_size`.
 
 ### Events
 
@@ -110,8 +113,7 @@ Backup uses a single path:
    - It streams lines for each block:
      - `index -> <sha256>`
      - `start-end -> ZERO`
-     - `EOF`
-     - `SHA245 <sha256>`
+     - `SHA256 <sha256>`
 
 3. **Hashblocks processing**
    - Each line advances hashblocks progress (including ZERO/existing).
@@ -199,7 +201,7 @@ Backpressure is a combination of:
 - Hashblocks `LIMIT`: throttles how far the remote hash stream advances.
 - Writer backlog thresholds: throttles SFTP reads when queued/in-flight bytes plus driver-reported buffered bytes exceed limits.
 - LIMIT is based on observed progress with a fixed lead window.
-- When SFTP reaches end-of-data for missing blocks, the agent sends one unlimited `LIMIT` to let hashblocks drain to `EOF`.
+- When SFTP reaches end-of-data for missing blocks, the agent sends one unlimited `LIMIT` to let hashblocks drain to its final `SHA256` line.
 - SFTP reads pause when writer queued bytes exceed the fixed threshold (512 MiB) and resume below it.
 - Writer concurrency: the writer worker owns the active write concurrency and retries; drivers only expose write primitives and optional transport limits.
 
@@ -295,9 +297,13 @@ The agent supports optional native SFTP via FFI:
 - Encrypted values are stored as `sshPasswordEnc` and decrypted into memory on load.
 - Ntfy me notifications are sent by the agent when backup/restore jobs finish (success or failure).
 - The agent posts JSON to `https://ntfyme.net/msg` with topic `virtbackup-job`.
+- A restore that completes with warnings sends `status: "warning"` and includes a `warning` field instead of reporting plain success.
 - `storage` is always included and contains the storage label.
-- `push_msg` is formatted as `<msg> on <storage label>`.
+- `source` is the source VM for backup and the restore point (`<vm> / <timestamp>`) for restore.
+- `target` is included only for restore and contains the restore destination.
+- `push_msg` is formatted as `<msg>: <source> -> <target-or-storage>`.
 - `size` is included for backup jobs as a human-readable size (KiB/MiB/GiB).
+- Backup notifications omit `target`; the storage destination is represented by `storage`.
 - Set `ntfymeToken` in agent settings to enable notifications; when empty, notifications are skipped.
 - The GUI can store multiple agent addresses and switch between them.
 - For `127.0.0.1`, the GUI always uses the local `agent.token` file; other agents require a token entered in the GUI (token is mandatory).
@@ -359,3 +365,4 @@ The agent supports optional native SFTP via FFI:
 - Backup uses `backupStorageId` to pick the active storage.
 - Restore storage selection is request-driven via `storageId` (`POST /servers/{id}/restore/start`), otherwise the active/default storage is used.
 - The GUI restore flow sends the currently selected backup storage as `storageId` for restore entry listing, precheck, and restore start so restore reads stay on the same storage.
+- Restore manifest caching is skipped for filesystem storage because the local manifest directory is already the source of truth; this avoids rewriting manifests and changing their mtimes during restore/precheck/listing.

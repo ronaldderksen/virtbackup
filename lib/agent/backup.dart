@@ -291,7 +291,6 @@ class BackupAgent {
       if (snapshotCreated) {
         await _dependencies.commitVmSnapshot(server, vm, disks);
       }
-      vmManifestSink.writeln('EOF');
       await _closeManifestSinkIfOpen(vmManifestSink, manifestWrite: vmManifestWrite);
       await _finalizeManifestWrite(driver: driver, manifestWrite: vmManifestWrite);
       vmManifestWrite = null;
@@ -671,7 +670,6 @@ class BackupAgent {
     var hashblocksSmoothedSpeed = 0.0;
     DateTime? hashblocksLastTick;
     String? hashblocksTotalSha256;
-    var eofSeen = false;
 
     void handleHashblocksBytes(int bytes) {
       hashblocksBytes += bytes;
@@ -940,23 +938,17 @@ class BackupAgent {
           try {
             _ensureNotCanceled();
             final trimmed = line.trim();
-            if (trimmed.isEmpty || trimmed == 'EOF') {
-              if (!eofSeen && trimmed == 'EOF') {
-                eofSeen = true;
-                hashblocksWorker.logStats(prefix: 'hashblocks stats: EOF');
-              }
+            if (trimmed.isEmpty) {
               return;
             }
-            if (trimmed.startsWith('SHA245 ')) {
-              if (!eofSeen) {
-                throw StateError('Hashblocks SHA245 line arrived before EOF.');
-              }
-              final digest = trimmed.substring('SHA245 '.length).trim();
+            if (trimmed.startsWith('SHA256 ')) {
+              final digest = trimmed.substring('SHA256 '.length).trim();
               if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(digest)) {
-                throw StateError('Invalid hashblocks SHA245 line: $trimmed');
+                throw StateError('Invalid hashblocks SHA256 line: $trimmed');
               }
               hashblocksTotalSha256 = digest;
               LogWriter.logAgentSync(level: 'info', message: 'worker=hashblocks total_sha256=$digest');
+              hashblocksWorker.logStats(prefix: 'hashblocks stats: SHA256');
               return;
             }
             await hashblocksWorker.handleLine(trimmed);
@@ -969,16 +961,13 @@ class BackupAgent {
       if (_cancelRequested) {
         throw const _BackupCanceled();
       }
-      if (eofSeen && hashblocksTotalSha256 == null) {
-        throw StateError('Hashblocks SHA245 line missing after EOF.');
+      if (hashblocksTotalSha256 == null) {
+        throw StateError('Hashblocks SHA256 line missing.');
       }
       sink.writeln('disk_sha256: $hashblocksTotalSha256');
       existsWorker.signalDone();
       await existsWorkerFuture;
       existsWorker.throwIfError();
-      if (!eofSeen) {
-        hashblocksWorker.logStats();
-      }
       missingDone = true;
       if (wakeMissingWorker != null && !wakeMissingWorker!.isCompleted) {
         wakeMissingWorker!.complete();
@@ -1004,7 +993,7 @@ class BackupAgent {
       await sink.flush();
       manifestFlushed = true;
     } finally {
-      if (!eofSeen) {
+      if (hashblocksTotalSha256 == null) {
         try {
           controller?.stop();
         } catch (_) {}
