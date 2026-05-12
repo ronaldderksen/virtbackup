@@ -79,13 +79,14 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
           title: const Text('Overwrite existing VM?'),
           content: Text(
             canDefineOnly
-                ? 'A VM named "$vmName" already exists on the restore server. You can overwrite everything or just redefine the XML.'
-                : 'A VM named "$vmName" already exists on the restore server. Overwrite it?',
+                ? 'A VM named "$vmName" already exists on the restore server. You can overwrite everything, restore with a new name, or just redefine the XML.'
+                : 'A VM named "$vmName" already exists on the restore server. You can overwrite it or restore with a new name.',
           ),
           actions: [
             TextButton(onPressed: () => Navigator.of(dialogContext).pop('cancel'), child: const Text('Cancel')),
             if (canDefineOnly) TextButton(onPressed: () => Navigator.of(dialogContext).pop('define'), child: const Text('Define XML only')),
-            FilledButton(onPressed: () => Navigator.of(dialogContext).pop('overwrite'), child: const Text('Overwrite all')),
+            OutlinedButton(onPressed: () => Navigator.of(dialogContext).pop('overwrite'), child: const Text('Overwrite all')),
+            FilledButton(onPressed: () => Navigator.of(dialogContext).pop('auto_rename'), child: const Text('Auto rename')),
           ],
         );
       },

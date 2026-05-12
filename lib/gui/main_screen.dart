@@ -104,6 +104,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _allowEmptyServerNameForTest = false;
   bool _isSavingAll = false;
   bool _isVmActionRunning = false;
+  String _vmActionStatusMessage = '';
   bool _isBackupRunning = false;
   bool _isRefreshingServer = false;
   bool _isLoadingRestoreEntries = false;
@@ -2861,6 +2862,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
     setState(() {
       _isVmActionRunning = true;
+      _vmActionStatusMessage = 'Sending ${_vmActionLabel(action)} for ${vm.name}...';
     });
     try {
       if (server.connectionType == ConnectionType.ssh) {
@@ -2883,9 +2885,20 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       if (mounted) {
         setState(() {
           _isVmActionRunning = false;
+          _vmActionStatusMessage = '';
         });
       }
     }
+  }
+
+  String _vmActionLabel(VmAction action) {
+    return switch (action) {
+      VmAction.start => 'start',
+      VmAction.reboot => 'reboot',
+      VmAction.shutdown => 'shutdown',
+      VmAction.forceReset => 'force reset',
+      VmAction.forceOff => 'force off',
+    };
   }
 
   VmPowerState _parseVmState(String state) {

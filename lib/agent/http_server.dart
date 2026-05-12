@@ -1015,6 +1015,62 @@ class AgentHttpServer {
         }
         return;
       }
+      if (request.method == 'POST' && path.startsWith('/servers/') && path.endsWith('/rename/preview')) {
+        final serverId = path.split('/')[2];
+        final server = _agentSettings.servers.firstWhere((item) => item.id == serverId, orElse: () => _missingServer());
+        if (server.id == 'missing') {
+          _json(request, 404, {'error': 'server not found'});
+          return;
+        }
+        final body = await _readJson(request);
+        final vmName = (body['vmName'] ?? '').toString().trim();
+        if (vmName.isEmpty) {
+          _json(request, 400, {'error': 'missing vmName'});
+          return;
+        }
+        try {
+          final preview = await _previewVmRename(server, vmName);
+          _json(request, 200, preview);
+        } catch (error) {
+          _json(request, 400, {'error': error.toString()});
+        }
+        return;
+      }
+      if (request.method == 'POST' && path.startsWith('/servers/') && path.endsWith('/rename/apply')) {
+        final serverId = path.split('/')[2];
+        final server = _agentSettings.servers.firstWhere((item) => item.id == serverId, orElse: () => _missingServer());
+        if (server.id == 'missing') {
+          _json(request, 404, {'success': false, 'error': 'server not found'});
+          return;
+        }
+        final body = await _readJson(request);
+        final vmName = (body['vmName'] ?? '').toString().trim();
+        final newVmName = (body['newVmName'] ?? '').toString().trim();
+        final rawDisks = body['disks'];
+        if (vmName.isEmpty || newVmName.isEmpty || rawDisks is! List) {
+          _json(request, 400, {'success': false, 'error': 'missing params'});
+          return;
+        }
+        final diskFileNames = <String, String>{};
+        for (final item in rawDisks) {
+          if (item is! Map) {
+            continue;
+          }
+          final target = (item['target'] ?? '').toString().trim();
+          final fileName = (item['fileName'] ?? '').toString().trim();
+          if (target.isNotEmpty) {
+            diskFileNames[target] = fileName;
+          }
+        }
+        try {
+          await _applyVmRename(server: server, vmName: vmName, newVmName: newVmName, diskFileNamesByTarget: diskFileNames);
+          await _refreshServer(server, reason: 'rename');
+          _json(request, 200, {'success': true});
+        } catch (error) {
+          _json(request, 400, {'success': false, 'error': error.toString()});
+        }
+        return;
+      }
       if (request.method == 'POST' && path.startsWith('/servers/') && path.endsWith('/cleanup')) {
         final serverId = path.split('/')[2];
         final server = _agentSettings.servers.firstWhere((item) => item.id == serverId, orElse: () => _missingServer());
@@ -1178,6 +1234,13 @@ class AgentHttpServer {
         final requestedDriver = (body['driverId'] ?? '').toString().trim();
         if (xmlPath.isEmpty || decision.isEmpty) {
           _json(request, 400, {'error': 'missing params'});
+          return;
+        }
+        if (decision != 'overwrite' && decision != 'define' && decision != 'auto_rename') {
+          _json(request, 400, {
+            'error': 'unknown restore decision',
+            'known': ['overwrite', 'define', 'auto_rename'],
+          });
           return;
         }
         if (requestedStorageId.isEmpty) {
@@ -2058,6 +2121,319 @@ class AgentHttpServer {
       'forceOff' => 'virsh destroy "$vmName"',
       _ => null,
     };
+  }
+
+  Future<Map<String, dynamic>> _previewVmRename(ServerConfig server, String vmName) async {
+    _validateVmRenameName(vmName);
+    final state = await _remoteVmState(server, vmName);
+    if (state != 'shut off') {
+      throw 'VM must be stopped before rename.';
+    }
+    final disks = await _remoteVmDiskPaths(server, vmName);
+    if (disks.isEmpty) {
+      throw 'VM has no file disks to rename.';
+    }
+    await _ensureVmRenameHasNoSnapshotsOrBackingChains(server, vmName: vmName, inactiveDisks: disks);
+    return {
+      'vmName': vmName,
+      'disks': disks.map((disk) => {'target': disk.key, 'path': disk.value, 'directory': _remoteDirName(disk.value), 'fileName': _remoteBaseName(disk.value)}).toList(),
+    };
+  }
+
+  Future<void> _applyVmRename({required ServerConfig server, required String vmName, required String newVmName, required Map<String, String> diskFileNamesByTarget}) async {
+    _validateVmRenameName(vmName);
+    _validateVmRenameName(newVmName);
+    final state = await _remoteVmState(server, vmName);
+    if (state != 'shut off') {
+      throw 'VM must be stopped before rename.';
+    }
+    if (newVmName != vmName && await _remoteVmExists(server, newVmName)) {
+      throw 'VM already exists: $newVmName';
+    }
+    final disks = await _remoteVmDiskPaths(server, vmName);
+    if (disks.isEmpty) {
+      throw 'VM has no file disks to rename.';
+    }
+    await _ensureVmRenameHasNoSnapshotsOrBackingChains(server, vmName: vmName, inactiveDisks: disks);
+    final pathByTarget = <String, String>{};
+    final targetPaths = <String>{};
+    var hasChanges = newVmName != vmName;
+    for (final disk in disks) {
+      final currentPath = disk.value.trim();
+      _validateVmRenameDiskPath(currentPath);
+      final newFileName = diskFileNamesByTarget[disk.key]?.trim() ?? '';
+      _validateVmRenameFileName(newFileName);
+      final dir = _remoteDirName(currentPath);
+      if (dir.isEmpty) {
+        throw 'Cannot resolve disk directory for $currentPath';
+      }
+      final newPath = '$dir/$newFileName';
+      if (!targetPaths.add(newPath)) {
+        throw 'Duplicate target disk path: $newPath';
+      }
+      if (!await _remotePathExists(server, currentPath)) {
+        throw 'Source disk does not exist: $currentPath';
+      }
+      if (newPath != currentPath && await _remotePathExists(server, newPath)) {
+        throw 'Target disk already exists: $newPath';
+      }
+      if (newPath != currentPath) {
+        hasChanges = true;
+      }
+      pathByTarget[disk.key] = newPath;
+    }
+    if (!hasChanges) {
+      throw 'No rename changes requested.';
+    }
+    final xmlResult = await _host.runSshCommand(server, 'virsh dumpxml --inactive ${_shellQuote(vmName)}');
+    if ((xmlResult.exitCode ?? 1) != 0) {
+      throw xmlResult.stderr.trim().isEmpty ? 'Cannot dump VM XML.' : xmlResult.stderr.trim();
+    }
+    final oldXml = xmlResult.stdout;
+    var xml = oldXml;
+    xml = _replaceVmRenameDomainName(xml, oldName: vmName, newName: newVmName);
+    for (final disk in disks) {
+      final newPath = pathByTarget[disk.key]!;
+      if (newPath == disk.value) {
+        continue;
+      }
+      xml = _replaceVmRenameXmlPath(xml, oldPath: disk.value, newPath: newPath);
+    }
+    final moves = <MapEntry<String, String>>[];
+    for (final disk in disks) {
+      final newPath = pathByTarget[disk.key]!;
+      if (newPath != disk.value) {
+        moves.add(MapEntry(disk.value, newPath));
+      }
+    }
+    for (final move in moves) {
+      await _runChecked(server, 'mv -- ${_shellQuote(move.key)} ${_shellQuote(move.value)}', 'Move failed: ${move.key} -> ${move.value}');
+    }
+    final tempDir = Directory.systemTemp.createTempSync('virtbackup-vm-rename-');
+    final localXml = File('${tempDir.path}${Platform.pathSeparator}${_sanitizeFileName(newVmName)}.xml');
+    final localOldXml = File('${tempDir.path}${Platform.pathSeparator}${_sanitizeFileName(vmName)}-rollback.xml');
+    final remoteXml = '/var/tmp/virtbackup/rename-${_sanitizeFileName(newVmName)}.xml';
+    final remoteOldXml = '/var/tmp/virtbackup/rename-${_sanitizeFileName(vmName)}-rollback.xml';
+    final undefineCommand = oldXml.contains(RegExp(r'<nvram(?:\s|>)')) ? 'virsh undefine ${_shellQuote(vmName)} --nvram' : 'virsh undefine ${_shellQuote(vmName)}';
+    var oldVmUndefined = false;
+    try {
+      await localXml.writeAsString(xml);
+      await localOldXml.writeAsString(oldXml);
+      await _runChecked(server, 'mkdir -p /var/tmp/virtbackup', 'Cannot create remote temp directory.');
+      await _host.uploadLocalFile(server, localXml.path, remoteXml);
+      await _host.uploadLocalFile(server, localOldXml.path, remoteOldXml);
+      await _runChecked(server, undefineCommand, 'Cannot undefine VM $vmName.');
+      oldVmUndefined = true;
+      await _runChecked(server, 'virsh define ${_shellQuote(remoteXml)}', 'Cannot define renamed VM $newVmName.');
+    } catch (error) {
+      if (oldVmUndefined && !await _remoteVmExists(server, vmName)) {
+        try {
+          await _runChecked(server, 'virsh define ${_shellQuote(remoteOldXml)}', 'Rollback define failed for VM $vmName.');
+        } catch (_) {}
+      }
+      for (final move in moves.reversed) {
+        if (await _remotePathExists(server, move.value) && !await _remotePathExists(server, move.key)) {
+          try {
+            await _runChecked(server, 'mv -- ${_shellQuote(move.value)} ${_shellQuote(move.key)}', 'Rollback move failed: ${move.value} -> ${move.key}');
+          } catch (_) {}
+        }
+      }
+      rethrow;
+    } finally {
+      try {
+        await localXml.delete();
+      } catch (_) {}
+      try {
+        await localOldXml.delete();
+      } catch (_) {}
+      try {
+        await tempDir.delete();
+      } catch (_) {}
+      try {
+        await _host.runSshCommand(server, 'rm -f -- ${_shellQuote(remoteXml)} ${_shellQuote(remoteOldXml)}');
+      } catch (_) {}
+    }
+  }
+
+  Future<String> _remoteVmState(ServerConfig server, String vmName) async {
+    final result = await _host.runSshCommand(server, 'virsh domstate ${_shellQuote(vmName)}');
+    if ((result.exitCode ?? 1) != 0) {
+      throw result.stderr.trim().isEmpty ? 'Cannot read VM state.' : result.stderr.trim();
+    }
+    return result.stdout.trim().toLowerCase();
+  }
+
+  Future<bool> _remoteVmExists(ServerConfig server, String vmName) async {
+    final result = await _host.runSshCommand(server, 'virsh dominfo ${_shellQuote(vmName)}');
+    return (result.exitCode ?? 1) == 0;
+  }
+
+  Future<bool> _remotePathExists(ServerConfig server, String path) async {
+    final result = await _host.runSshCommand(server, 'test -e ${_shellQuote(path)}');
+    return (result.exitCode ?? 1) == 0;
+  }
+
+  Future<void> _ensureVmRenameHasNoSnapshotsOrBackingChains(ServerConfig server, {required String vmName, required List<MapEntry<String, String>> inactiveDisks}) async {
+    final snapshotResult = await _host.runSshCommand(server, 'virsh snapshot-list --name ${_shellQuote(vmName)}');
+    if ((snapshotResult.exitCode ?? 1) != 0) {
+      throw snapshotResult.stderr.trim().isEmpty ? 'Cannot inspect VM snapshots.' : snapshotResult.stderr.trim();
+    }
+    final snapshots = snapshotResult.stdout.split('\n').map((line) => line.trim()).where((line) => line.isNotEmpty).toList();
+    if (snapshots.isNotEmpty) {
+      throw 'Rename is blocked: VM has snapshots.';
+    }
+
+    final activeDisks = await _remoteVmDiskPaths(server, vmName, inactive: false);
+    final inactiveByTarget = {for (final disk in inactiveDisks) disk.key: disk.value};
+    for (final activeDisk in activeDisks) {
+      final inactiveSource = inactiveByTarget[activeDisk.key];
+      if (inactiveSource != null && inactiveSource != activeDisk.value) {
+        throw 'Rename is blocked: disk ${activeDisk.key} has an active snapshot or overlay.';
+      }
+    }
+    for (final disk in inactiveDisks) {
+      final chain = await _remoteVmRenameBackingChain(server, disk.value);
+      if (chain.length > 1) {
+        throw 'Rename is blocked: disk ${disk.key} has a backing chain.';
+      }
+    }
+  }
+
+  Future<List<String>> _remoteVmRenameBackingChain(ServerConfig server, String sourcePath) async {
+    final result = await _host.runSshCommand(server, 'qemu-img info --backing-chain --force-share ${_shellQuote(sourcePath)}');
+    if ((result.exitCode ?? 1) != 0) {
+      final detail = result.stderr.trim();
+      throw detail.isEmpty ? 'Cannot inspect disk chain for $sourcePath.' : 'Cannot inspect disk chain for $sourcePath: $detail';
+    }
+    return _parseVmRenameBackingChain(result.stdout, sourcePath: sourcePath);
+  }
+
+  List<String> _parseVmRenameBackingChain(String output, {required String sourcePath}) {
+    final paths = <String>[];
+    final backingPaths = <String>[];
+    for (final line in output.split('\n')) {
+      final trimmed = line.trim();
+      if (!trimmed.startsWith('image:')) {
+        if (trimmed.startsWith('backing file:')) {
+          final value = trimmed.substring('backing file:'.length).trim();
+          if (value.isNotEmpty && value != '(null)') {
+            backingPaths.add(value);
+          }
+        }
+        continue;
+      }
+      final value = trimmed.substring('image:'.length).trim();
+      if (value.isNotEmpty && !paths.contains(value)) {
+        paths.add(value);
+      }
+    }
+    for (final path in backingPaths) {
+      if (!paths.contains(path)) {
+        paths.add(path);
+      }
+    }
+    if (paths.isEmpty) {
+      return [sourcePath];
+    }
+    if (!paths.contains(sourcePath)) {
+      paths.insert(0, sourcePath);
+    }
+    return paths;
+  }
+
+  Future<List<MapEntry<String, String>>> _remoteVmDiskPaths(ServerConfig server, String vmName, {bool inactive = true}) async {
+    final inactiveFlag = inactive ? ' --inactive' : '';
+    final result = await _host.runSshCommand(server, 'virsh domblklist --details$inactiveFlag ${_shellQuote(vmName)}');
+    if ((result.exitCode ?? 1) != 0) {
+      throw result.stderr.trim().isEmpty ? 'Cannot list VM disks.' : result.stderr.trim();
+    }
+    final disks = <MapEntry<String, String>>[];
+    for (final rawLine in result.stdout.split('\n')) {
+      final line = rawLine.trim();
+      if (line.isEmpty || line.startsWith('Type') || line.startsWith('---')) {
+        continue;
+      }
+      final columns = line.split(RegExp(r'\s+'));
+      if (columns.length < 4 || columns[0] != 'file' || columns[1] != 'disk') {
+        continue;
+      }
+      final target = columns[2].trim();
+      final source = columns.sublist(3).join(' ').trim();
+      if (target.isEmpty || source.isEmpty) {
+        continue;
+      }
+      _validateVmRenameDiskPath(source);
+      disks.add(MapEntry(target, source));
+    }
+    return disks;
+  }
+
+  void _validateVmRenameName(String value) {
+    final name = value.trim();
+    if (name.isEmpty || name.contains('/') || name.contains('\\') || name.contains(RegExp(r'[\r\n\u0000]'))) {
+      throw 'Invalid VM name.';
+    }
+  }
+
+  void _validateVmRenameDiskPath(String path) {
+    final value = path.trim();
+    if (value.isEmpty || !value.startsWith('/') || value.endsWith('/') || value.contains('://') || value.contains(RegExp(r'[\r\n\u0000]'))) {
+      throw 'Unsupported disk path: $path';
+    }
+  }
+
+  void _validateVmRenameFileName(String value) {
+    final fileName = value.trim();
+    if (fileName.isEmpty || fileName == '.' || fileName == '..' || fileName.contains('/') || fileName.contains('\\') || fileName.contains(RegExp(r'[\r\n\u0000]'))) {
+      throw 'Invalid disk file name: $value';
+    }
+  }
+
+  String _replaceVmRenameDomainName(String xml, {required String oldName, required String newName}) {
+    final pattern = RegExp('(<name>\\s*)${RegExp.escape(oldName)}(\\s*</name>)');
+    final matches = pattern.allMatches(xml).toList();
+    if (matches.length != 1) {
+      throw 'Expected exactly one VM name entry in XML, found ${matches.length}.';
+    }
+    return xml.replaceFirst(pattern, '<name>$newName</name>');
+  }
+
+  String _replaceVmRenameXmlPath(String xml, {required String oldPath, required String newPath}) {
+    final doublePattern = RegExp("file=\"${RegExp.escape(oldPath)}\"");
+    final singlePattern = RegExp("file='${RegExp.escape(oldPath)}'");
+    final doubleMatches = doublePattern.allMatches(xml).length;
+    final singleMatches = singlePattern.allMatches(xml).length;
+    if (doubleMatches + singleMatches != 1) {
+      throw 'Expected exactly one disk path in XML for $oldPath, found ${doubleMatches + singleMatches}.';
+    }
+    if (doubleMatches == 1) {
+      return xml.replaceFirst(doublePattern, 'file="$newPath"');
+    }
+    return xml.replaceFirst(singlePattern, "file='$newPath'");
+  }
+
+  Future<void> _runChecked(ServerConfig server, String command, String message) async {
+    final result = await _host.runSshCommand(server, command);
+    if ((result.exitCode ?? 1) != 0) {
+      final detail = result.stderr.trim();
+      throw detail.isEmpty ? message : '$message $detail';
+    }
+  }
+
+  String _remoteBaseName(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final index = normalized.lastIndexOf('/');
+    return index < 0 ? normalized : normalized.substring(index + 1);
+  }
+
+  String _remoteDirName(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final index = normalized.lastIndexOf('/');
+    return index <= 0 ? '' : normalized.substring(0, index);
+  }
+
+  String _shellQuote(String value) {
+    return "'${value.replaceAll("'", "'\"'\"'")}'";
   }
 
   String _createJob(AgentJobType type, {String? vmName, String? storageId, String? scheduleId}) {

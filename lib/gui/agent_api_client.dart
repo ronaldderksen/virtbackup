@@ -268,6 +268,29 @@ class AgentApiClient {
     return decoded is Map && decoded['success'] == true;
   }
 
+  Future<Map<String, dynamic>> previewVmRename(String serverId, String vmName) async {
+    final response = await _post('/servers/$serverId/rename/preview', {'vmName': vmName});
+    if (response.statusCode != 200) {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map && decoded['error'] != null) {
+        throw decoded['error'].toString();
+      }
+      throw 'Agent responded ${response.statusCode}';
+    }
+    return Map<String, dynamic>.from(jsonDecode(response.body) as Map);
+  }
+
+  Future<void> applyVmRename(String serverId, {required String vmName, required String newVmName, required List<Map<String, String>> disks}) async {
+    final response = await _post('/servers/$serverId/rename/apply', {'vmName': vmName, 'newVmName': newVmName, 'disks': disks});
+    final decoded = jsonDecode(response.body);
+    if (response.statusCode != 200 || decoded is! Map || decoded['success'] != true) {
+      if (decoded is Map && decoded['error'] != null) {
+        throw decoded['error'].toString();
+      }
+      throw 'Agent responded ${response.statusCode}';
+    }
+  }
+
   Future<bool> cleanupOverlays(String serverId, String vmName) async {
     final response = await _post('/servers/$serverId/cleanup', {'vmName': vmName});
     if (response.statusCode != 200) {

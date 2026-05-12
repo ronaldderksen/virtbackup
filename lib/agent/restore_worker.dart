@@ -107,6 +107,9 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     if (decision.isEmpty) {
       throw 'restore requires decision';
     }
+    if (decision != 'overwrite' && decision != 'define' && decision != 'auto_rename' && decision != 'full_check') {
+      throw 'unknown restore decision: $decision';
+    }
     final fullCheckOnly = decision == 'full_check';
     final xmlPath = payload['xmlPath']?.toString() ?? '';
     final settingsMap = Map<String, dynamic>.from(payload['settings'] as Map? ?? const {});
@@ -244,11 +247,29 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         allManifestData.addAll(list);
       }
       final chainRebases = _collectChainRebases(allManifestData, remoteDiskTargets.map((item) => item.remotePath).toSet());
+      var finalVmName = vmName;
+      var finalXmlContent = xmlContent;
+      var finalRemoteDiskTargets = remoteDiskTargets;
+      var restorePathMap = const <String, String>{};
 
       if (!fullCheckOnly && decision == 'overwrite') {
         ensureNotCanceled();
         await host.runSshCommand(server, 'virsh destroy "$vmName" || true');
         await host.runSshCommand(server, 'virsh undefine "$vmName" --nvram || true');
+      }
+
+      if (!fullCheckOnly && decision == 'auto_rename') {
+        final autoRenamePlan = await _buildAutoRenamePlanIfNeeded(host: host, server: server, vmName: vmName, timestamp: timestamp, xmlContent: xmlContent, targets: remoteDiskTargets);
+        if (autoRenamePlan != null) {
+          finalVmName = autoRenamePlan.vmName;
+          finalXmlContent = autoRenamePlan.xmlContent;
+          restorePathMap = autoRenamePlan.pathMap;
+          finalRemoteDiskTargets = remoteDiskTargets
+              .map((target) => target.copyWith(remotePath: restorePathMap[target.remotePath] ?? target.remotePath, diskBaseName: _baseName(restorePathMap[target.remotePath] ?? target.diskBaseName)))
+              .toList();
+          mainPort.send({'type': _typeContext, 'jobId': jobId, 'source': xmlPath, 'target': '${server.name}:$finalVmName'});
+          LogWriter.logAgentSync(level: 'info', message: 'restore: auto rename $vmName -> $finalVmName');
+        }
       }
 
       if (!fullCheckOnly && decision == 'define') {
@@ -274,7 +295,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
       }
 
       var totalBytes = 0;
-      for (final target in remoteDiskTargets) {
+      for (final target in finalRemoteDiskTargets) {
         ensureNotCanceled();
         if (target.fileSize != null && target.fileSize! > 0) {
           totalBytes += target.fileSize!;
@@ -319,16 +340,16 @@ void restoreWorkerMain(Map<String, dynamic> init) {
       var restoreWarnings = 0;
       var lastCheckProgressUpdate = DateTime.now();
 
-      for (var i = 0; i < remoteDiskTargets.length; i += 1) {
+      for (var i = 0; i < finalRemoteDiskTargets.length; i += 1) {
         ensureNotCanceled();
-        final target = remoteDiskTargets[i];
+        final target = finalRemoteDiskTargets[i];
         final remotePath = target.remotePath;
         sendStatus(
           AgentJobStatus(
             id: jobId,
             type: AgentJobType.restore,
             state: AgentJobState.running,
-            message: fullCheckOnly ? 'Sanity check: ${target.diskBaseName}' : 'Uploading disk ${i + 1} of ${remoteDiskTargets.length}...',
+            message: fullCheckOnly ? 'Sanity check: ${target.diskBaseName}' : 'Uploading disk ${i + 1} of ${finalRemoteDiskTargets.length}...',
             totalUnits: fullCheckOnly ? totalCheckBlocks : totalBytes,
             completedUnits: fullCheckOnly ? checkedBlocks : 0,
             bytesTransferred: bytesTransferred,
@@ -420,9 +441,9 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         final parts = remotePath.split('/');
         final remoteDir = parts.length > 1 ? parts.sublist(0, parts.length - 1).join('/') : '';
         if (remoteDir.isNotEmpty) {
-          await host.runSshCommand(server, 'mkdir -p "$remoteDir"');
+          await host.runSshCommand(server, 'mkdir -p ${_shellQuote(remoteDir)}');
         }
-        await host.runSshCommand(server, 'rm -f "$remotePath"');
+        await host.runSshCommand(server, 'rm -f ${_shellQuote(remotePath)}');
         final uploadedSha256 = await host.uploadRemoteStream(
           server,
           remotePath,
@@ -435,7 +456,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
                 id: jobId,
                 type: AgentJobType.restore,
                 state: AgentJobState.running,
-                message: 'Uploading disk ${i + 1} of ${remoteDiskTargets.length}...',
+                message: 'Uploading disk ${i + 1} of ${finalRemoteDiskTargets.length}...',
                 totalUnits: totalBytes,
                 completedUnits: 0,
                 bytesTransferred: bytesTransferred,
@@ -512,11 +533,13 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         );
         for (final rebase in chainRebases) {
           ensureNotCanceled();
-          await host.runSshCommand(server, 'qemu-img rebase -u -b "${rebase.backingPath}" "${rebase.overlayPath}"');
+          final overlayPath = restorePathMap[rebase.overlayPath] ?? rebase.overlayPath;
+          final backingPath = restorePathMap[rebase.backingPath] ?? rebase.backingPath;
+          await host.runSshCommand(server, 'qemu-img rebase -u -b ${_shellQuote(backingPath)} ${_shellQuote(overlayPath)}');
         }
       }
 
-      await defineOnly(jobId, host, server, xmlFile, xmlContent, timestamp, vmName);
+      await defineOnly(jobId, host, server, xmlFile, finalXmlContent, timestamp, finalVmName);
       sendResult(
         AgentJobStatus(
           id: jobId,
@@ -926,6 +949,152 @@ List<_ChainRebase> _collectChainRebases(List<_ManifestData> manifestData, Set<St
   return rebases;
 }
 
+Future<_AutoRenamePlan?> _buildAutoRenamePlanIfNeeded({
+  required BackupAgentHost host,
+  required ServerConfig server,
+  required String vmName,
+  required String timestamp,
+  required String xmlContent,
+  required List<_RestoreDiskTarget> targets,
+}) async {
+  final vmExists = await _remoteVmExists(host, server, vmName);
+  var diskPathExists = false;
+  for (final target in targets) {
+    _validateAutoRenameSourcePath(target.remotePath);
+    if (await _remotePathExists(host, server, target.remotePath)) {
+      diskPathExists = true;
+    }
+  }
+  if (!vmExists && !diskPathExists) {
+    return null;
+  }
+
+  final suffix = _autoRenameSuffixFromTimestamp(timestamp);
+  final renamedVmName = _sanitizeFileName('$vmName-$suffix');
+  if (renamedVmName.isEmpty) {
+    throw 'restore auto rename failed: cannot generate VM name';
+  }
+  if (await _remoteVmExists(host, server, renamedVmName)) {
+    throw 'restore auto rename failed: target VM already exists: $renamedVmName';
+  }
+
+  final pathMap = <String, String>{};
+  final newPaths = <String>{};
+  for (final target in targets) {
+    final renamedPath = _autoRenamePath(target.remotePath, suffix);
+    if (!newPaths.add(renamedPath)) {
+      throw 'restore auto rename failed: generated duplicate disk path $renamedPath';
+    }
+    if (await _remotePathExists(host, server, renamedPath)) {
+      throw 'restore auto rename failed: target disk already exists: $renamedPath';
+    }
+    pathMap[target.remotePath] = renamedPath;
+  }
+
+  var updatedXml = _replaceDomainNameForAutoRename(xmlContent, oldName: vmName, newName: renamedVmName);
+  updatedXml = _removeDomainUuidForAutoRename(updatedXml);
+  updatedXml = _replaceXmlDiskPathsForAutoRename(updatedXml, pathMap);
+  return _AutoRenamePlan(vmName: renamedVmName, xmlContent: updatedXml, pathMap: pathMap);
+}
+
+Future<bool> _remoteVmExists(BackupAgentHost host, ServerConfig server, String vmName) async {
+  final result = await host.runSshCommand(server, 'virsh dominfo ${_shellQuote(vmName)}');
+  return (result.exitCode ?? 1) == 0;
+}
+
+Future<bool> _remotePathExists(BackupAgentHost host, ServerConfig server, String path) async {
+  final result = await host.runSshCommand(server, 'test -e ${_shellQuote(path)}');
+  return (result.exitCode ?? 1) == 0;
+}
+
+void _validateAutoRenameSourcePath(String path) {
+  final value = path.trim();
+  if (value.isEmpty || !value.startsWith('/')) {
+    throw 'restore auto rename failed: disk path is not an absolute file path: $path';
+  }
+  if (value.endsWith('/')) {
+    throw 'restore auto rename failed: disk path is a directory path: $path';
+  }
+  if (value.contains('://') || value.contains('\n') || value.contains('\r') || value.contains('\u0000')) {
+    throw 'restore auto rename failed: unsupported disk path: $path';
+  }
+}
+
+String _autoRenamePath(String originalPath, String suffix) {
+  _validateAutoRenameSourcePath(originalPath);
+  final normalized = originalPath.trim();
+  final slash = normalized.lastIndexOf('/');
+  final dir = slash <= 0 ? '' : normalized.substring(0, slash);
+  final name = slash < 0 ? normalized : normalized.substring(slash + 1);
+  if (name.isEmpty) {
+    throw 'restore auto rename failed: disk path has no file name: $originalPath';
+  }
+  final dot = name.lastIndexOf('.');
+  final renamedName = dot > 0 ? '${name.substring(0, dot)}-$suffix${name.substring(dot)}' : '$name-$suffix';
+  return '$dir/$renamedName';
+}
+
+String _replaceDomainNameForAutoRename(String xml, {required String oldName, required String newName}) {
+  final pattern = RegExp('(<name>\\s*)${RegExp.escape(oldName)}(\\s*</name>)');
+  final matches = pattern.allMatches(xml).toList();
+  if (matches.length != 1) {
+    throw 'restore auto rename failed: expected exactly one domain name entry for $oldName, found ${matches.length}';
+  }
+  return xml.replaceFirst(pattern, '<name>$newName</name>');
+}
+
+String _removeDomainUuidForAutoRename(String xml) {
+  final pattern = RegExp(r'\s*<uuid>[^<]+</uuid>');
+  final matches = pattern.allMatches(xml).toList();
+  if (matches.length > 1) {
+    throw 'restore auto rename failed: expected at most one domain uuid entry, found ${matches.length}';
+  }
+  if (matches.isEmpty) {
+    return xml;
+  }
+  return xml.replaceFirst(pattern, '');
+}
+
+String _replaceXmlDiskPathsForAutoRename(String xml, Map<String, String> pathMap) {
+  var updated = xml;
+  var replacements = 0;
+  for (final entry in pathMap.entries) {
+    final oldPath = entry.key;
+    final newPath = entry.value;
+    final doubleQuotePattern = RegExp("file=\"${RegExp.escape(oldPath)}\"");
+    final singleQuotePattern = RegExp("file='${RegExp.escape(oldPath)}'");
+    final doubleMatches = doubleQuotePattern.allMatches(updated).length;
+    final singleMatches = singleQuotePattern.allMatches(updated).length;
+    if (doubleMatches + singleMatches > 1) {
+      throw 'restore auto rename failed: disk path appears multiple times in XML: $oldPath';
+    }
+    if (doubleMatches == 1) {
+      updated = updated.replaceFirst(doubleQuotePattern, 'file="$newPath"');
+      replacements += 1;
+    }
+    if (singleMatches == 1) {
+      updated = updated.replaceFirst(singleQuotePattern, "file='$newPath'");
+      replacements += 1;
+    }
+  }
+  if (replacements == 0) {
+    throw 'restore auto rename failed: no file-based disk source paths found in XML';
+  }
+  return updated;
+}
+
+String _autoRenameSuffixFromTimestamp(String timestamp) {
+  final match = RegExp(r'^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})').firstMatch(timestamp.trim());
+  if (match == null) {
+    throw 'restore auto rename failed: cannot derive suffix from timestamp $timestamp';
+  }
+  return '${match.group(1)}${match.group(2)}${match.group(3)}-${match.group(4)}${match.group(5)}${match.group(6)}';
+}
+
+String _shellQuote(String value) {
+  return "'${value.replaceAll("'", "'\"'\"'")}'";
+}
+
 int _blockSizeMbFromManifestBytes(int blockSizeBytes, String manifestPath) {
   const bytesPerMb = 1024 * 1024;
   if (blockSizeBytes <= 0) {
@@ -1249,6 +1418,27 @@ class _RestoreDiskTarget {
   final int blockSize;
   final int blockSizeMB;
   final int? fileSize;
+
+  _RestoreDiskTarget copyWith({String? diskBaseName, String? remotePath}) {
+    return _RestoreDiskTarget(
+      manifest: manifest,
+      diskBaseName: diskBaseName ?? this.diskBaseName,
+      remotePath: remotePath ?? this.remotePath,
+      blocks: blocks,
+      diskSha256: diskSha256,
+      blockSize: blockSize,
+      blockSizeMB: blockSizeMB,
+      fileSize: fileSize,
+    );
+  }
+}
+
+class _AutoRenamePlan {
+  const _AutoRenamePlan({required this.vmName, required this.xmlContent, required this.pathMap});
+
+  final String vmName;
+  final String xmlContent;
+  final Map<String, String> pathMap;
 }
 
 class _ChainEntry {

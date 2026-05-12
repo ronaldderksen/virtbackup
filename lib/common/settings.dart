@@ -507,6 +507,9 @@ class ScheduledJob {
     if (type == ScheduledJobType.restore && restoreDecision.isEmpty) {
       return null;
     }
+    if (type == ScheduledJobType.restore && restoreDecision != 'overwrite' && restoreDecision != 'define' && restoreDecision != 'auto_rename') {
+      return null;
+    }
     return ScheduledJob(
       id: id,
       name: name.isEmpty ? id : name,

@@ -15,7 +15,7 @@ import 'package:virtbackup/common/models.dart';
 class BackupAgentHost {
   BackupAgentHost();
   // Keep this list in sync with every remote executable used through SSH commands. hashblocks is uploaded by the agent and is intentionally excluded.
-  static const List<String> requiredRemoteTools = ['chmod', 'echo', 'find', 'lsof', 'mkdir', 'qemu-img', 'rm', 'stat', 'test', 'tr', 'virsh'];
+  static const List<String> requiredRemoteTools = ['chmod', 'echo', 'find', 'lsof', 'mkdir', 'mv', 'qemu-img', 'rm', 'stat', 'test', 'tr', 'virsh'];
   int _sftpRangeBytesSinceLog = 0;
   DateTime _sftpRangeLastLog = DateTime.now();
   int _sftpDownloadBytesSinceLog = 0;

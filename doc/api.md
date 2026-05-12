@@ -296,7 +296,7 @@ Fields:
 - `weekdays`: ISO weekday numbers (`1` Monday through `7` Sunday), used only for weekly schedules.
 - `serverId` and `storageId`: references to configured server and storage entries.
 - Backup schedules use `vmName`.
-- Restore schedules use `restoreXmlPath` and `restoreDecision`. Set `restoreXmlPath` to `__latest__` and `vmName` to a source VM name to restore the latest complete XML for that VM at runtime.
+- Restore schedules use `restoreXmlPath` and `restoreDecision` (`overwrite`, `define`, or `auto_rename`). Set `restoreXmlPath` to `__latest__` and `vmName` to a source VM name to restore the latest complete XML for that VM at runtime.
 
 ### Run schedule now
 
@@ -438,7 +438,7 @@ Response:
 }
 ```
 
-During server inventory the agent checks for required remote tools: `chmod`, `echo`, `find`, `lsof`, `mkdir`, `qemu-img`, `rm`, `stat`, `test`, `tr`, and `virsh`. `hashblocks` is uploaded by the agent and is not part of this check. Backups and restores fail before starting when any required remote tool is missing.
+During server inventory the agent checks for required remote tools: `chmod`, `echo`, `find`, `lsof`, `mkdir`, `mv`, `qemu-img`, `rm`, `stat`, `test`, `tr`, and `virsh`. `hashblocks` is uploaded by the agent and is not part of this check. Backups and restores fail before starting when any required remote tool is missing.
 Keep this list current whenever future SSH commands introduce additional remote executables.
 
 ### Refresh server inventory (manual)
@@ -477,6 +477,44 @@ Response:
 ```json
 {"success":true}
 ```
+
+### VM rename preview
+
+- `POST /servers/{serverId}/rename/preview`
+
+Body:
+```json
+{"vmName":"my-vm"}
+```
+
+Response:
+```json
+{
+  "vmName":"my-vm",
+  "disks":[
+    {"target":"vda","path":"/var/lib/libvirt/images/my-vm.qcow2","directory":"/var/lib/libvirt/images","fileName":"my-vm.qcow2"}
+  ]
+}
+```
+
+The VM must be stopped. Only file-backed disks with absolute paths are accepted. VMs with libvirt snapshots, active overlays, or disk backing chains are blocked.
+
+### VM rename apply
+
+- `POST /servers/{serverId}/rename/apply`
+
+Body:
+```json
+{
+  "vmName":"my-vm",
+  "newVmName":"my-vm-renamed",
+  "disks":[
+    {"target":"vda","fileName":"my-vm-renamed.qcow2"}
+  ]
+}
+```
+
+The agent rechecks the stopped state, snapshots, backing chains, source disk paths, target VM name, target disk paths, and XML references before applying. Disk directories cannot be changed; only the file name part is accepted.
 
 ### Cleanup overlays
 
@@ -607,11 +645,12 @@ Response:
 
 Body:
 ```json
-{"xmlPath":"/path/to/backup.xml","decision":"overwrite|define","storageId":"dest_filesystem_1739440000000000"}
+{"xmlPath":"/path/to/backup.xml","decision":"overwrite|define|auto_rename","storageId":"dest_filesystem_1739440000000000"}
 ```
 
 Notes:
 - `storageId` selects one configured storage for restore reads.
+- `auto_rename` restores with the original VM name and disk paths unless the target VM or one of the target disk paths already exists; on conflict it rewrites the VM XML and every restored disk/chain path to new file-based paths. Unsupported or ambiguous paths fail restore.
 - For backward compatibility, `driverId` is still accepted.
 
 Response:

@@ -682,6 +682,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                             decoration: _scheduleDecoration(context, labelText: 'Existing VM handling'),
                             items: const [
                               DropdownMenuItem(value: 'overwrite', child: Text('Overwrite all')),
+                              DropdownMenuItem(value: 'auto_rename', child: Text('Auto rename on conflict')),
                               DropdownMenuItem(value: 'define', child: Text('Define XML only')),
                             ],
                             onChanged: (value) => updateDialog(() => restoreDecision = value ?? 'overwrite'),

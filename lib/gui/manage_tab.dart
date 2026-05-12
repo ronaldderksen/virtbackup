@@ -58,6 +58,16 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
                     },
                   ),
                   const SizedBox(height: 12),
+                  if (_vmActionStatusMessage.isNotEmpty) ...[
+                    Row(
+                      children: [
+                        const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                        const SizedBox(width: 12),
+                        Expanded(child: Text(_vmActionStatusMessage, style: Theme.of(context).textTheme.bodyMedium)),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                  ],
                   Builder(
                     builder: (context) {
                       final server = _getSelectedServer();
@@ -99,6 +109,7 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
                                   runSpacing: 4,
                                   alignment: WrapAlignment.end,
                                   children: [
+                                    if (!isRunning) TextButton(onPressed: _isVmActionRunning || server == null ? null : () => _renameVm(server, vm), child: const Text('Rename')),
                                     if (!isRunning) TextButton(onPressed: _isVmActionRunning || server == null ? null : () => _runVmAction(server, vm, VmAction.start), child: const Text('Run')),
                                     if (isRunning) ...[
                                       TextButton(onPressed: _isVmActionRunning || server == null ? null : () => _runVmAction(server, vm, VmAction.reboot), child: const Text('Reboot')),
@@ -124,4 +135,263 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
       ),
     ];
   }
+
+  Future<void> _renameVm(ServerConfig server, VmEntry vm) async {
+    if (_isVmActionRunning) {
+      return;
+    }
+    _updateUi(() {
+      _isVmActionRunning = true;
+      _vmActionStatusMessage = 'Preparing rename for ${vm.name}...';
+    });
+    late final Map<String, dynamic> preview;
+    try {
+      if (server.connectionType != ConnectionType.ssh) {
+        throw 'Rename is only available for SSH-managed VMs.';
+      }
+      preview = await _agentApiClient.previewVmRename(server.id, vm.name);
+    } catch (error, stackTrace) {
+      _logError('VM rename preview failed.', error, stackTrace);
+      if (mounted) {
+        _showSnackBarError('Rename preview failed: $error');
+      }
+      return;
+    } finally {
+      if (mounted) {
+        _updateUi(() {
+          _isVmActionRunning = false;
+          _vmActionStatusMessage = '';
+        });
+      }
+    }
+    if (!mounted) {
+      return;
+    }
+    final request = await _showVmRenameDialog(vm.name, preview);
+    if (request == null || !mounted) {
+      return;
+    }
+    _updateUi(() {
+      _isVmActionRunning = true;
+      _vmActionStatusMessage = 'Checking rename targets for ${vm.name}...';
+    });
+    try {
+      _updateUi(() {
+        _vmActionStatusMessage = 'Renaming ${vm.name}...';
+      });
+      await _agentApiClient.applyVmRename(server.id, vmName: vm.name, newVmName: request.vmName, disks: request.disks);
+      _updateUi(() {
+        _vmActionStatusMessage = 'Refreshing VM inventory...';
+      });
+      await _loadVmInventory(server);
+      if (mounted) {
+        _showSnackBarInfo('VM renamed.');
+      }
+    } catch (error, stackTrace) {
+      _logError('VM rename failed.', error, stackTrace);
+      if (mounted) {
+        _showSnackBarError('Rename failed: $error');
+      }
+    } finally {
+      if (mounted) {
+        _updateUi(() {
+          _isVmActionRunning = false;
+          _vmActionStatusMessage = '';
+        });
+      }
+    }
+  }
+
+  Future<_VmRenameRequest?> _showVmRenameDialog(String currentVmName, Map<String, dynamic> preview) async {
+    final rawDisks = preview['disks'];
+    if (rawDisks is! List) {
+      _showSnackBarError('Rename preview did not include disks.');
+      return null;
+    }
+    final disks = rawDisks.whereType<Map>().map(_VmRenameDiskPreview.fromMap).toList();
+    if (disks.isEmpty) {
+      _showSnackBarError('Rename preview did not include file disks.');
+      return null;
+    }
+    final vmNameController = TextEditingController(text: currentVmName);
+    final diskControllers = {for (final disk in disks) disk.target: TextEditingController(text: disk.fileName)};
+    for (final disk in disks) {
+      diskControllers[disk.target]!.text = _autoVmRenameDiskFileName(vmName: currentVmName, disk: disk);
+    }
+    try {
+      return await showDialog<_VmRenameRequest>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) {
+          String? dialogError;
+          var autoDiskName = true;
+          void applyAutoDiskNames() {
+            final vmName = vmNameController.text.trim();
+            for (final disk in disks) {
+              diskControllers[disk.target]!.text = _autoVmRenameDiskFileName(vmName: vmName, disk: disk);
+            }
+          }
+
+          return StatefulBuilder(
+            builder: (context, setDialogState) {
+              return AlertDialog(
+                title: const Text('Rename VM'),
+                content: SizedBox(
+                  width: 720,
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        TextField(
+                          controller: vmNameController,
+                          decoration: const InputDecoration(labelText: 'VM name', border: OutlineInputBorder()),
+                          onChanged: (_) {
+                            if (!autoDiskName) {
+                              return;
+                            }
+                            setDialogState(applyAutoDiskNames);
+                          },
+                        ),
+                        const SizedBox(height: 16),
+                        CheckboxListTile(
+                          value: autoDiskName,
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('Auto disk names'),
+                          controlAffinity: ListTileControlAffinity.leading,
+                          onChanged: (value) {
+                            setDialogState(() {
+                              autoDiskName = value == true;
+                              if (autoDiskName) {
+                                applyAutoDiskNames();
+                              }
+                            });
+                          },
+                        ),
+                        const SizedBox(height: 8),
+                        Text('Disk file names', style: Theme.of(context).textTheme.titleSmall),
+                        const SizedBox(height: 8),
+                        for (final disk in disks) ...[
+                          Container(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            decoration: BoxDecoration(
+                              border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(disk.target, style: Theme.of(context).textTheme.labelLarge),
+                                const SizedBox(height: 4),
+                                Text(disk.directory, maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodySmall),
+                                const SizedBox(height: 8),
+                                TextField(
+                                  controller: diskControllers[disk.target],
+                                  decoration: const InputDecoration(labelText: 'File name', border: OutlineInputBorder()),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                        if (dialogError != null) ...[
+                          const SizedBox(height: 12),
+                          Text(dialogError!, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.error)),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+                actions: [
+                  TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Cancel')),
+                  FilledButton(
+                    onPressed: () {
+                      final vmName = vmNameController.text.trim();
+                      final error = _validateVmRenameDialogInput(currentVmName: currentVmName, newVmName: vmName, disks: disks, diskControllers: diskControllers);
+                      if (error != null) {
+                        setDialogState(() {
+                          dialogError = error;
+                        });
+                        return;
+                      }
+                      Navigator.of(dialogContext).pop(
+                        _VmRenameRequest(
+                          vmName: vmName,
+                          disks: [
+                            for (final disk in disks) {'target': disk.target, 'fileName': diskControllers[disk.target]!.text.trim()},
+                          ],
+                        ),
+                      );
+                    },
+                    child: const Text('Apply'),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      );
+    } finally {
+      vmNameController.dispose();
+      for (final controller in diskControllers.values) {
+        controller.dispose();
+      }
+    }
+  }
+
+  String? _validateVmRenameDialogInput({
+    required String currentVmName,
+    required String newVmName,
+    required List<_VmRenameDiskPreview> disks,
+    required Map<String, TextEditingController> diskControllers,
+  }) {
+    if (newVmName.isEmpty || newVmName.contains('/') || newVmName.contains('\\') || newVmName.contains(RegExp(r'[\r\n\u0000]'))) {
+      return 'Enter a valid VM name.';
+    }
+    var hasChanges = newVmName != currentVmName;
+    for (final disk in disks) {
+      final fileName = diskControllers[disk.target]!.text.trim();
+      if (fileName.isEmpty || fileName == '.' || fileName == '..' || fileName.contains('/') || fileName.contains('\\') || fileName.contains(RegExp(r'[\r\n\u0000]'))) {
+        return 'Enter a valid file name for ${disk.target}.';
+      }
+      if (fileName != disk.fileName) {
+        hasChanges = true;
+      }
+    }
+    if (!hasChanges) {
+      return 'Change the VM name or at least one disk file name.';
+    }
+    return null;
+  }
+
+  String _autoVmRenameDiskFileName({required String vmName, required _VmRenameDiskPreview disk}) {
+    final baseName = vmName.trim();
+    final extension = _vmRenameDiskExtension(disk.fileName);
+    return '$baseName-${disk.target}$extension';
+  }
+
+  String _vmRenameDiskExtension(String fileName) {
+    final index = fileName.lastIndexOf('.');
+    if (index <= 0 || index == fileName.length - 1) {
+      return '';
+    }
+    return fileName.substring(index);
+  }
+}
+
+class _VmRenameDiskPreview {
+  const _VmRenameDiskPreview({required this.target, required this.directory, required this.fileName});
+
+  final String target;
+  final String directory;
+  final String fileName;
+
+  factory _VmRenameDiskPreview.fromMap(Map<dynamic, dynamic> value) {
+    return _VmRenameDiskPreview(target: (value['target'] ?? '').toString(), directory: (value['directory'] ?? '').toString(), fileName: (value['fileName'] ?? '').toString());
+  }
+}
+
+class _VmRenameRequest {
+  const _VmRenameRequest({required this.vmName, required this.disks});
+
+  final String vmName;
+  final List<Map<String, String>> disks;
 }
