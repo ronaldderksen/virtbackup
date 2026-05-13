@@ -42,6 +42,7 @@ cp -r "$BUNDLE_DIR/"* "$STAGE_DIR/"
 build_agent "$AGENT_OUT"
 cp "$AGENT_OUT" "$STAGE_DIR/virtbackup-agent"
 cp -r "$ROOT_DIR/package/linux/." "$STAGE_DIR/"
+cp "$ROOT_DIR/CHANGELOG.md" "$STAGE_DIR/CHANGELOG.md"
 cp "$ROOT_DIR/TERMS.txt" "$STAGE_DIR/TERMS.txt"
 cp "$ROOT_DIR/LICENSE" "$STAGE_DIR/LICENSE"
 if [ -d "$ROOT_DIR/etc" ]; then

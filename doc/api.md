@@ -650,7 +650,7 @@ Body:
 
 Notes:
 - `storageId` selects one configured storage for restore reads.
-- `auto_rename` restores with the original VM name and disk paths unless the target VM or one of the target disk paths already exists; on conflict it rewrites the VM XML and every restored disk/chain path to new file-based paths. Unsupported or ambiguous paths fail restore.
+- `auto_rename` restores with the original VM name and disk paths unless the target VM or one of the target disk paths already exists; on conflict it rewrites the VM XML and every restored disk/chain path to new file-based paths. If a generated candidate also exists, the agent tries `-1`, `-2`, and so on until the VM name and all disk paths are free. Unsupported or ambiguous paths fail restore.
 - For backward compatibility, `driverId` is still accepted.
 
 Response:

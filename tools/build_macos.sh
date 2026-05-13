@@ -56,6 +56,7 @@ cp "$AGENT_OUT" "$STAGE_DIR/virtbackup-agent"
 if [ -d "$ROOT_DIR/package/macos" ]; then
   cp -r "$ROOT_DIR/package/macos/." "$STAGE_DIR/"
 fi
+cp "$ROOT_DIR/CHANGELOG.md" "$STAGE_DIR/CHANGELOG.md"
 cp "$ROOT_DIR/TERMS.txt" "$STAGE_DIR/TERMS.txt"
 cp "$ROOT_DIR/LICENSE" "$STAGE_DIR/LICENSE"
 if [ -d "$ROOT_DIR/etc" ]; then

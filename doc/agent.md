@@ -53,7 +53,8 @@ Key modules under `lib/agent`:
 7. During restore upload, the native SFTP writer computes the complete disk SHA-256 while writing. A mismatch with manifest `disk_sha256` is logged as a warning and the restore continues.
 8. Restore requires an explicit known `driverId` and `decision`; unknown restore drivers fail instead of falling back to filesystem.
 9. Restore fails when manifest blocks emit fewer bytes than `file_size`; missing trailing data is never padded with zeroes. A final partial block is truncated to `file_size`.
-10. Restore decision `auto_rename` keeps original names when there is no conflict. If the target VM or any restored disk path already exists, restore rewrites the VM name, removes the XML UUID, rewrites file-based disk paths for every restored disk/chain item, checks that generated VM/path targets do not exist, and fails hard when anything is unsupported or ambiguous.
+10. Restore decision `auto_rename` keeps original names when there is no conflict. If the target VM or any restored disk path already exists, restore rewrites the VM name, removes the XML UUID, rewrites file-based disk paths for every restored disk/chain item, and searches the first free restore-date suffix. If that candidate exists it tries `-1`, `-2`, and so on. Unsupported or ambiguous XML/path input still fails hard.
+11. Restore writes disks to `<target>.inprogress` paths first. After upload, hash/size checks, and any chain rebase, the worker renames all restored disks to their final XML paths immediately before `virsh define`.
 
 ### Events
 

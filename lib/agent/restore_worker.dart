@@ -47,7 +47,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     }
   }
 
-  Future<void> defineOnly(String jobId, BackupAgentHost host, ServerConfig server, File xmlFile, String xmlContent, String timestamp, String vmName) async {
+  Future<void> defineOnly(String jobId, BackupAgentHost host, ServerConfig server, File xmlFile, String xmlContent, String timestamp, String vmName, {Future<void> Function()? beforeDefine}) async {
     final remoteXmlPath = '/var/tmp/virtbackup/restore-${_sanitizeFileName(timestamp)}-${_sanitizeFileName(vmName)}.xml';
     await host.runSshCommand(server, 'mkdir -p "/var/tmp/virtbackup"');
     final xmlTempFile = File('${xmlFile.path}.restore_tmp');
@@ -75,6 +75,26 @@ void restoreWorkerMain(Map<String, dynamic> init) {
       if (await xmlTempFile.exists()) {
         await xmlTempFile.delete();
       }
+    }
+    if (beforeDefine != null) {
+      sendStatus(
+        AgentJobStatus(
+          id: jobId,
+          type: AgentJobType.restore,
+          state: AgentJobState.running,
+          message: 'Finalizing disk files...',
+          totalUnits: 0,
+          completedUnits: 0,
+          bytesTransferred: 0,
+          speedBytesPerSec: 0,
+          physicalBytesTransferred: 0,
+          physicalSpeedBytesPerSec: 0,
+          totalBytes: 0,
+          sanityBytesTransferred: 0,
+          sanitySpeedBytesPerSec: 0,
+        ),
+      );
+      await beforeDefine();
     }
     sendStatus(
       AgentJobStatus(
@@ -251,6 +271,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
       var finalXmlContent = xmlContent;
       var finalRemoteDiskTargets = remoteDiskTargets;
       var restorePathMap = const <String, String>{};
+      var restoreInProgressPathMap = const <String, String>{};
 
       if (!fullCheckOnly && decision == 'overwrite') {
         ensureNotCanceled();
@@ -339,6 +360,9 @@ void restoreWorkerMain(Map<String, dynamic> init) {
       var mismatches = 0;
       var restoreWarnings = 0;
       var lastCheckProgressUpdate = DateTime.now();
+      if (!fullCheckOnly) {
+        restoreInProgressPathMap = _buildRestoreInProgressPathMap(finalRemoteDiskTargets);
+      }
 
       for (var i = 0; i < finalRemoteDiskTargets.length; i += 1) {
         ensureNotCanceled();
@@ -438,15 +462,17 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           continue;
         }
 
-        final parts = remotePath.split('/');
+        final uploadPath = restoreInProgressPathMap[remotePath] ?? remotePath;
+        final parts = uploadPath.split('/');
         final remoteDir = parts.length > 1 ? parts.sublist(0, parts.length - 1).join('/') : '';
         if (remoteDir.isNotEmpty) {
           await host.runSshCommand(server, 'mkdir -p ${_shellQuote(remoteDir)}');
         }
         await host.runSshCommand(server, 'rm -f ${_shellQuote(remotePath)}');
+        await host.runSshCommand(server, 'rm -f ${_shellQuote(uploadPath)}');
         final uploadedSha256 = await host.uploadRemoteStream(
           server,
-          remotePath,
+          uploadPath,
           blobStream,
           onBytes: (bytes) {
             bytesTransferred += bytes;
@@ -476,7 +502,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         }
         if (target.fileSize != null && target.fileSize! > 0) {
           try {
-            final remoteSize = await host.runSshCommand(server, 'stat -c %s "$remotePath"');
+            final remoteSize = await host.runSshCommand(server, 'stat -c %s ${_shellQuote(uploadPath)}');
             final remoteValue = int.tryParse(remoteSize.stdout.trim());
             if (remoteValue == target.fileSize) {
               LogWriter.logAgentSync(level: 'info', message: 'restore: ${target.diskBaseName} size=${target.fileSize} remote_size=$remoteValue');
@@ -513,33 +539,43 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         return;
       }
 
-      if (chainRebases.isNotEmpty) {
-        sendStatus(
-          AgentJobStatus(
-            id: jobId,
-            type: AgentJobType.restore,
-            state: AgentJobState.running,
-            message: 'Rebasing restored overlays...',
-            totalUnits: totalBytes,
-            completedUnits: 0,
-            bytesTransferred: bytesTransferred,
-            speedBytesPerSec: 0,
-            physicalBytesTransferred: 0,
-            physicalSpeedBytesPerSec: 0,
-            totalBytes: totalBytes,
-            sanityBytesTransferred: 0,
-            sanitySpeedBytesPerSec: 0,
-          ),
-        );
-        for (final rebase in chainRebases) {
-          ensureNotCanceled();
-          final overlayPath = restorePathMap[rebase.overlayPath] ?? rebase.overlayPath;
-          final backingPath = restorePathMap[rebase.backingPath] ?? rebase.backingPath;
-          await host.runSshCommand(server, 'qemu-img rebase -u -b ${_shellQuote(backingPath)} ${_shellQuote(overlayPath)}');
-        }
-      }
-
-      await defineOnly(jobId, host, server, xmlFile, finalXmlContent, timestamp, finalVmName);
+      await defineOnly(
+        jobId,
+        host,
+        server,
+        xmlFile,
+        finalXmlContent,
+        timestamp,
+        finalVmName,
+        beforeDefine: () async {
+          await _finalizeRestoreInProgressDisks(host: host, server: server, targets: finalRemoteDiskTargets, inProgressPathMap: restoreInProgressPathMap);
+          if (chainRebases.isNotEmpty) {
+            sendStatus(
+              AgentJobStatus(
+                id: jobId,
+                type: AgentJobType.restore,
+                state: AgentJobState.running,
+                message: 'Rebasing restored overlays...',
+                totalUnits: totalBytes,
+                completedUnits: 0,
+                bytesTransferred: bytesTransferred,
+                speedBytesPerSec: 0,
+                physicalBytesTransferred: 0,
+                physicalSpeedBytesPerSec: 0,
+                totalBytes: totalBytes,
+                sanityBytesTransferred: 0,
+                sanitySpeedBytesPerSec: 0,
+              ),
+            );
+            for (final rebase in chainRebases) {
+              ensureNotCanceled();
+              final overlayPath = restorePathMap[rebase.overlayPath] ?? rebase.overlayPath;
+              final backingPath = restorePathMap[rebase.backingPath] ?? rebase.backingPath;
+              await host.runSshCommand(server, 'qemu-img rebase -u -b ${_shellQuote(backingPath)} ${_shellQuote(overlayPath)}');
+            }
+          }
+        },
+      );
       sendResult(
         AgentJobStatus(
           id: jobId,
@@ -969,26 +1005,39 @@ Future<_AutoRenamePlan?> _buildAutoRenamePlanIfNeeded({
     return null;
   }
 
-  final suffix = _autoRenameSuffixFromTimestamp(timestamp);
-  final renamedVmName = _sanitizeFileName('$vmName-$suffix');
-  if (renamedVmName.isEmpty) {
-    throw 'restore auto rename failed: cannot generate VM name';
-  }
-  if (await _remoteVmExists(host, server, renamedVmName)) {
-    throw 'restore auto rename failed: target VM already exists: $renamedVmName';
-  }
+  final baseSuffix = _autoRenameSuffixFromTimestamp(timestamp);
+  String? renamedVmName;
+  Map<String, String>? pathMap;
+  for (var attempt = 0; ; attempt += 1) {
+    final suffix = attempt == 0 ? baseSuffix : '$baseSuffix-$attempt';
+    final candidateVmName = _sanitizeFileName('$vmName-$suffix');
+    if (candidateVmName.isEmpty) {
+      throw 'restore auto rename failed: cannot generate VM name';
+    }
+    if (await _remoteVmExists(host, server, candidateVmName)) {
+      continue;
+    }
 
-  final pathMap = <String, String>{};
-  final newPaths = <String>{};
-  for (final target in targets) {
-    final renamedPath = _autoRenamePath(target.remotePath, suffix);
-    if (!newPaths.add(renamedPath)) {
-      throw 'restore auto rename failed: generated duplicate disk path $renamedPath';
+    final candidatePathMap = <String, String>{};
+    final candidatePaths = <String>{};
+    var pathConflict = false;
+    for (final target in targets) {
+      final renamedPath = _autoRenamePath(target.remotePath, suffix);
+      if (!candidatePaths.add(renamedPath)) {
+        throw 'restore auto rename failed: generated duplicate disk path $renamedPath';
+      }
+      if (await _remotePathExists(host, server, renamedPath)) {
+        pathConflict = true;
+        break;
+      }
+      candidatePathMap[target.remotePath] = renamedPath;
     }
-    if (await _remotePathExists(host, server, renamedPath)) {
-      throw 'restore auto rename failed: target disk already exists: $renamedPath';
+    if (pathConflict) {
+      continue;
     }
-    pathMap[target.remotePath] = renamedPath;
+    renamedVmName = candidateVmName;
+    pathMap = candidatePathMap;
+    break;
   }
 
   var updatedXml = _replaceDomainNameForAutoRename(xmlContent, oldName: vmName, newName: renamedVmName);
@@ -1005,6 +1054,69 @@ Future<bool> _remoteVmExists(BackupAgentHost host, ServerConfig server, String v
 Future<bool> _remotePathExists(BackupAgentHost host, ServerConfig server, String path) async {
   final result = await host.runSshCommand(server, 'test -e ${_shellQuote(path)}');
   return (result.exitCode ?? 1) == 0;
+}
+
+Map<String, String> _buildRestoreInProgressPathMap(List<_RestoreDiskTarget> targets) {
+  final map = <String, String>{};
+  final inProgressPaths = <String>{};
+  for (final target in targets) {
+    final finalPath = target.remotePath.trim();
+    if (finalPath.isEmpty) {
+      throw 'restore in-progress path failed: empty target path for ${target.diskBaseName}';
+    }
+    final inProgressPath = '$finalPath.inprogress';
+    if (inProgressPath == finalPath) {
+      throw 'restore in-progress path failed: target path is unchanged for ${target.diskBaseName}';
+    }
+    if (!inProgressPaths.add(inProgressPath)) {
+      throw 'restore in-progress path failed: duplicate temporary disk path $inProgressPath';
+    }
+    map[finalPath] = inProgressPath;
+  }
+  return map;
+}
+
+Future<void> _finalizeRestoreInProgressDisks({
+  required BackupAgentHost host,
+  required ServerConfig server,
+  required List<_RestoreDiskTarget> targets,
+  required Map<String, String> inProgressPathMap,
+}) async {
+  final finalized = <MapEntry<String, String>>[];
+  try {
+    for (final target in targets) {
+      final finalPath = target.remotePath;
+      final inProgressPath = inProgressPathMap[finalPath];
+      if (inProgressPath == null || inProgressPath.isEmpty) {
+        throw 'restore finalize failed: missing temporary path for ${target.diskBaseName}';
+      }
+      if (!await _remotePathExists(host, server, inProgressPath)) {
+        throw 'restore finalize failed: temporary disk does not exist: $inProgressPath';
+      }
+      if (await _remotePathExists(host, server, finalPath)) {
+        throw 'restore finalize failed: target disk already exists: $finalPath';
+      }
+    }
+    for (final target in targets) {
+      final finalPath = target.remotePath;
+      final inProgressPath = inProgressPathMap[finalPath]!;
+      final result = await host.runSshCommand(server, 'mv -- ${_shellQuote(inProgressPath)} ${_shellQuote(finalPath)}');
+      if ((result.exitCode ?? 1) != 0) {
+        final detail = result.stderr.trim();
+        throw detail.isEmpty ? 'restore finalize failed: cannot rename $inProgressPath to $finalPath' : 'restore finalize failed: cannot rename $inProgressPath to $finalPath: $detail';
+      }
+      finalized.add(MapEntry(inProgressPath, finalPath));
+    }
+  } catch (_) {
+    for (final move in finalized.reversed) {
+      if (await _remotePathExists(host, server, move.value) && !await _remotePathExists(host, server, move.key)) {
+        try {
+          await host.runSshCommand(server, 'mv -- ${_shellQuote(move.value)} ${_shellQuote(move.key)}');
+        } catch (_) {}
+      }
+    }
+    rethrow;
+  }
 }
 
 void _validateAutoRenameSourcePath(String path) {
