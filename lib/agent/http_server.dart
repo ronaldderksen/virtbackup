@@ -1031,7 +1031,8 @@ class AgentHttpServer {
         try {
           final preview = await _previewVmRename(server, vmName);
           _json(request, 200, preview);
-        } catch (error) {
+        } catch (error, stackTrace) {
+          _hostLogError('VM rename preview failed for ${server.name}/$vmName.', error, stackTrace);
           _json(request, 400, {'error': error.toString()});
         }
         return;
@@ -1066,7 +1067,8 @@ class AgentHttpServer {
           await _applyVmRename(server: server, vmName: vmName, newVmName: newVmName, diskFileNamesByTarget: diskFileNames);
           await _refreshServer(server, reason: 'rename');
           _json(request, 200, {'success': true});
-        } catch (error) {
+        } catch (error, stackTrace) {
+          _hostLogError('VM rename apply failed for ${server.name}/$vmName -> $newVmName.', error, stackTrace);
           _json(request, 400, {'success': false, 'error': error.toString()});
         }
         return;
@@ -2133,7 +2135,7 @@ class AgentHttpServer {
     if (disks.isEmpty) {
       throw 'VM has no file disks to rename.';
     }
-    await _ensureVmRenameHasNoSnapshotsOrBackingChains(server, vmName: vmName, inactiveDisks: disks);
+    await _ensureVmRenameHasNoSnapshotsCheckpointsOrBackingChains(server, vmName: vmName, inactiveDisks: disks);
     return {
       'vmName': vmName,
       'disks': disks.map((disk) => {'target': disk.key, 'path': disk.value, 'directory': _remoteDirName(disk.value), 'fileName': _remoteBaseName(disk.value)}).toList(),
@@ -2154,7 +2156,7 @@ class AgentHttpServer {
     if (disks.isEmpty) {
       throw 'VM has no file disks to rename.';
     }
-    await _ensureVmRenameHasNoSnapshotsOrBackingChains(server, vmName: vmName, inactiveDisks: disks);
+    await _ensureVmRenameHasNoSnapshotsCheckpointsOrBackingChains(server, vmName: vmName, inactiveDisks: disks);
     final pathByTarget = <String, String>{};
     final targetPaths = <String>{};
     var hasChanges = newVmName != vmName;
@@ -2229,13 +2231,17 @@ class AgentHttpServer {
       if (oldVmUndefined && !await _remoteVmExists(server, vmName)) {
         try {
           await _runChecked(server, 'virsh define ${_shellQuote(remoteOldXml)}', 'Rollback define failed for VM $vmName.');
-        } catch (_) {}
+        } catch (rollbackError, rollbackStackTrace) {
+          _hostLogError('VM rename rollback define failed for $vmName.', rollbackError, rollbackStackTrace);
+        }
       }
       for (final move in moves.reversed) {
         if (await _remotePathExists(server, move.value) && !await _remotePathExists(server, move.key)) {
           try {
             await _runChecked(server, 'mv -- ${_shellQuote(move.value)} ${_shellQuote(move.key)}', 'Rollback move failed: ${move.value} -> ${move.key}');
-          } catch (_) {}
+          } catch (rollbackError, rollbackStackTrace) {
+            _hostLogError('VM rename rollback move failed for ${move.value} -> ${move.key}.', rollbackError, rollbackStackTrace);
+          }
         }
       }
       rethrow;
@@ -2256,8 +2262,10 @@ class AgentHttpServer {
   }
 
   Future<String> _remoteVmState(ServerConfig server, String vmName) async {
-    final result = await _host.runSshCommand(server, 'virsh domstate ${_shellQuote(vmName)}');
+    final command = 'virsh domstate ${_shellQuote(vmName)}';
+    final result = await _host.runSshCommand(server, command);
     if ((result.exitCode ?? 1) != 0) {
+      _logFailedRemoteCommand(command: command, result: result);
       throw result.stderr.trim().isEmpty ? 'Cannot read VM state.' : result.stderr.trim();
     }
     return result.stdout.trim().toLowerCase();
@@ -2273,14 +2281,27 @@ class AgentHttpServer {
     return (result.exitCode ?? 1) == 0;
   }
 
-  Future<void> _ensureVmRenameHasNoSnapshotsOrBackingChains(ServerConfig server, {required String vmName, required List<MapEntry<String, String>> inactiveDisks}) async {
-    final snapshotResult = await _host.runSshCommand(server, 'virsh snapshot-list --name ${_shellQuote(vmName)}');
+  Future<void> _ensureVmRenameHasNoSnapshotsCheckpointsOrBackingChains(ServerConfig server, {required String vmName, required List<MapEntry<String, String>> inactiveDisks}) async {
+    final snapshotCommand = 'virsh snapshot-list --name ${_shellQuote(vmName)}';
+    final snapshotResult = await _host.runSshCommand(server, snapshotCommand);
     if ((snapshotResult.exitCode ?? 1) != 0) {
+      _logFailedRemoteCommand(command: snapshotCommand, result: snapshotResult);
       throw snapshotResult.stderr.trim().isEmpty ? 'Cannot inspect VM snapshots.' : snapshotResult.stderr.trim();
     }
     final snapshots = snapshotResult.stdout.split('\n').map((line) => line.trim()).where((line) => line.isNotEmpty).toList();
     if (snapshots.isNotEmpty) {
       throw 'Rename is blocked: VM has snapshots.';
+    }
+
+    final checkpointCommand = 'virsh checkpoint-list --name ${_shellQuote(vmName)}';
+    final checkpointResult = await _host.runSshCommand(server, checkpointCommand);
+    if ((checkpointResult.exitCode ?? 1) != 0) {
+      _logFailedRemoteCommand(command: checkpointCommand, result: checkpointResult);
+      throw checkpointResult.stderr.trim().isEmpty ? 'Cannot inspect VM checkpoints.' : checkpointResult.stderr.trim();
+    }
+    final checkpoints = checkpointResult.stdout.split('\n').map((line) => line.trim()).where((line) => line.isNotEmpty).toList();
+    if (checkpoints.isNotEmpty) {
+      throw 'Rename is blocked: VM has checkpoints.';
     }
 
     final activeDisks = await _remoteVmDiskPaths(server, vmName, inactive: false);
@@ -2300,8 +2321,10 @@ class AgentHttpServer {
   }
 
   Future<List<String>> _remoteVmRenameBackingChain(ServerConfig server, String sourcePath) async {
-    final result = await _host.runSshCommand(server, 'qemu-img info --backing-chain --force-share ${_shellQuote(sourcePath)}');
+    final command = 'qemu-img info --backing-chain --force-share ${_shellQuote(sourcePath)}';
+    final result = await _host.runSshCommand(server, command);
     if ((result.exitCode ?? 1) != 0) {
+      _logFailedRemoteCommand(command: command, result: result);
       final detail = result.stderr.trim();
       throw detail.isEmpty ? 'Cannot inspect disk chain for $sourcePath.' : 'Cannot inspect disk chain for $sourcePath: $detail';
     }
@@ -2343,8 +2366,10 @@ class AgentHttpServer {
 
   Future<List<MapEntry<String, String>>> _remoteVmDiskPaths(ServerConfig server, String vmName, {bool inactive = true}) async {
     final inactiveFlag = inactive ? ' --inactive' : '';
-    final result = await _host.runSshCommand(server, 'virsh domblklist --details$inactiveFlag ${_shellQuote(vmName)}');
+    final command = 'virsh domblklist --details$inactiveFlag ${_shellQuote(vmName)}';
+    final result = await _host.runSshCommand(server, command);
     if ((result.exitCode ?? 1) != 0) {
+      _logFailedRemoteCommand(command: command, result: result);
       throw result.stderr.trim().isEmpty ? 'Cannot list VM disks.' : result.stderr.trim();
     }
     final disks = <MapEntry<String, String>>[];
@@ -2415,8 +2440,22 @@ class AgentHttpServer {
   Future<void> _runChecked(ServerConfig server, String command, String message) async {
     final result = await _host.runSshCommand(server, command);
     if ((result.exitCode ?? 1) != 0) {
+      _logFailedRemoteCommand(command: command, result: result);
       final detail = result.stderr.trim();
       throw detail.isEmpty ? message : '$message $detail';
+    }
+  }
+
+  void _logFailedRemoteCommand({required String command, required SshCommandResult result}) {
+    _hostLog('Remote command failed: $command');
+    _hostLog('Remote command exit code: ${result.exitCode ?? 'unknown'}');
+    final output = result.stdout.trim();
+    if (output.isNotEmpty) {
+      _hostLog('Remote command stdout: $output');
+    }
+    final errorOutput = result.stderr.trim();
+    if (errorOutput.isNotEmpty) {
+      _hostLog('Remote command stderr: $errorOutput');
     }
   }
 

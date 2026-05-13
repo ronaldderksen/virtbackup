@@ -497,7 +497,7 @@ Response:
 }
 ```
 
-The VM must be stopped. Only file-backed disks with absolute paths are accepted. VMs with libvirt snapshots, active overlays, or disk backing chains are blocked.
+The VM must be stopped. Only file-backed disks with absolute paths are accepted. VMs with libvirt snapshots, libvirt checkpoints, active overlays, or disk backing chains are blocked.
 
 ### VM rename apply
 
@@ -514,7 +514,7 @@ Body:
 }
 ```
 
-The agent rechecks the stopped state, snapshots, backing chains, source disk paths, target VM name, target disk paths, and XML references before applying. Disk directories cannot be changed; only the file name part is accepted.
+The agent rechecks the stopped state, snapshots, checkpoints, backing chains, source disk paths, target VM name, target disk paths, and XML references before applying. Disk directories cannot be changed; only the file name part is accepted.
 
 ### Cleanup overlays
 

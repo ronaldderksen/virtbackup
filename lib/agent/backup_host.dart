@@ -379,8 +379,8 @@ class BackupAgentHost {
       final session = await client.execute(command);
       final stdoutText = await utf8.decodeStream(session.stdout);
       final stderrText = await utf8.decodeStream(session.stderr);
-      final exitCode = session.exitCode;
       await session.done;
+      final exitCode = session.exitCode;
       LogWriter.logAgentSync(level: 'trace', message: 'SSH exit code: ${exitCode ?? 0}');
       final trimmedStdout = stdoutText.trim();
       final trimmedStderr = stderrText.trim();
