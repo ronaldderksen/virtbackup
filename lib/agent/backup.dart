@@ -868,7 +868,8 @@ class BackupAgent {
         resolvedZeroOrExistingBlocks += 1;
         hashblocksWorker.markExisting();
       },
-      onMissing: () {
+      onMissing: (hash) {
+        _blobDirectoryCache?.markHashKnown(hash);
         hashblocksWorker.markMissing();
       },
     );
@@ -1099,11 +1100,7 @@ class BackupAgent {
   Future<void> _scheduleWriteBlob(String hash, Uint8List bytes, BackupDriver driver) async {
     _ensureNotCanceled();
     _blobDirectoryCache?.markHashKnown(hash);
-    final future = driver.writeBlob(hash, bytes);
-    final tracking = future.then((_) {});
-    _inFlightWrites.add(tracking);
-    tracking.whenComplete(() => _inFlightWrites.remove(tracking));
-    return future;
+    await driver.writeBlob(hash, bytes);
   }
 
   Future<void> _drainPendingWrites() async {

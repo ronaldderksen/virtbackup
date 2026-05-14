@@ -59,7 +59,9 @@ else
 fi
 
 if [ "$RELEASE" = true ]; then
-  RELEASE_DIR="$SCRIPT_DIR/../../virtbackup_backend/public/downloads"
+  BACKEND_PUBLIC_DIR="$SCRIPT_DIR/../../virtbackup_backend/public"
+  RELEASE_DIR="$BACKEND_PUBLIC_DIR/downloads"
+  CHANGELOG_RELEASE_PATH="$BACKEND_PUBLIC_DIR/CHANGELOG.md"
   if [ ! -d "$RELEASE_DIR" ]; then
     echo "Release directory not found: $RELEASE_DIR" >&2
     exit 1
@@ -71,5 +73,7 @@ if [ "$RELEASE" = true ]; then
     exit 1
   fi
   cp "$TGZ_PATH" "$RELEASE_PATH"
+  cp "$ROOT_DIR/CHANGELOG.md" "$CHANGELOG_RELEASE_PATH"
   echo "Released TGZ: $RELEASE_PATH"
+  echo "Released changelog: $CHANGELOG_RELEASE_PATH"
 fi

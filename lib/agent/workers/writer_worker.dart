@@ -115,6 +115,10 @@ class _WriterWorker {
             }
           }
         } catch (error, stackTrace) {
+          if (error is BackupWriteConflictMismatch) {
+            LogWriter.logAgentSync(level: 'error', message: 'worker=writer write conflict mismatch hash=${doneWrite.block.hash} error=$error');
+            Error.throwWithStackTrace(error, stackTrace);
+          }
           final retryAttempt = doneWrite.block.attempt + 1;
           if (retryAttempt > maxRetryAttempts) {
             LogWriter.logAgentSync(level: 'error', message: 'worker=writer write failed after retries hash=${doneWrite.block.hash} attempts=$retryAttempt error=$error');

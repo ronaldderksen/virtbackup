@@ -17,7 +17,7 @@ class _ExistsWorker {
   final void Function(int bytes) handleBytes;
   final void Function() ensureNotCanceled;
   final void Function() onExisting;
-  final void Function() onMissing;
+  final void Function(String hash) onMissing;
 
   final List<_MissingEntry> _queue = <_MissingEntry>[];
   Completer<void>? _wakeWorker;
@@ -64,7 +64,7 @@ class _ExistsWorker {
             await _flushPendingMissingIfGap(entry.index);
             continue;
           }
-          onMissing();
+          onMissing(entry.hash);
           if (_pendingMissingStart < 0) {
             _pendingMissingStart = entry.index;
           } else {

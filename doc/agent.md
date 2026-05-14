@@ -285,6 +285,7 @@ The agent supports optional native SFTP via FFI:
 
 ## Runtime Notes
 
+- `CHANGELOG.md` entries must be written for users, not programmers: focus on visible behavior, operational impact, and reliability improvements instead of internal implementation details.
 - Backup and restore jobs run inside worker isolates to keep the HTTP listener responsive under heavy driver load (for example large Google Drive uploads).
 - Dedup block size comes from `agent.yaml` (`blockSizeMB`) and is applied for backup; restore uses `block_size` from each manifest.
 - Progress sampling interval: `agentLogInterval` (currently 30s).

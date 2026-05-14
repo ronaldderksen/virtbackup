@@ -610,6 +610,26 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     }
   }
 
+  Future<Uint8List?> _readRemoteFileBytesNative(String remotePath, {int? length}) async {
+    final builder = BytesBuilder(copy: false);
+    try {
+      await for (final chunk in _openBlobStreamNative(remotePath, length: length)) {
+        builder.add(chunk);
+      }
+    } on _NativeBlobMissing {
+      return null;
+    }
+    return builder.takeBytes();
+  }
+
+  String _nativeSha256Hex(Uint8List bytes) {
+    final bindings = _nativeSftp;
+    if (bindings == null) {
+      throw StateError('Native SHA256 is required for SFTP conflict verification.');
+    }
+    return bindings.sha256Hex(bytes);
+  }
+
   Future<void> _writeBlobWithTiming({required String hash, required String remoteTemp, required String remotePath, required Uint8List data}) async {
     final label = 'write blob $hash';
     final pool = _poolForLabel(label);
@@ -632,10 +652,11 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         await _remoteRename(lease.sftp, remoteTemp, remotePath);
       } catch (error) {
         if (_isSftpFailureCode(error, 4)) {
-          _logDebug('driver=sftp rename code=4 label="$label" remotePath="$remotePath" checking idempotent-success');
-          final recovered = await _isRenameIdempotentSuccess(sftp: lease.sftp, hash: hash, remotePath: remotePath, expectedBytes: data.length);
+          _logDebug('driver=sftp rename code=4 label="$label" remotePath="$remotePath" checking existing target sha256');
+          final recovered = await _verifyExistingTargetForRenameConflict(hash: hash, remotePath: remotePath, expectedBytes: data.length);
           if (recovered) {
             _logDebug('driver=sftp rename recovered label="$label" remotePath="$remotePath"');
+            await _tryRemoveRemoteFile(lease.sftp, remoteTemp);
             lease.release();
             released = true;
             opStopwatch.stop();
@@ -665,23 +686,29 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   }
 
   bool _isSftpFailureCode(Object error, int code) {
-    return error.toString().contains('Failure(code $code)');
+    return RegExp('(?:Failure)?\\(code\\s*$code\\)').hasMatch(error.toString());
   }
 
-  Future<bool> _isRenameIdempotentSuccess({required SftpClient sftp, required String hash, required String remotePath, required int expectedBytes}) async {
-    try {
-      final targetAttrs = await _remoteStat(sftp, remotePath);
-      final targetSize = targetAttrs.size;
-      if (targetSize == null) {
-        return false;
-      }
-      if (targetSize != expectedBytes) {
-        return false;
-      }
-      return true;
-    } catch (_) {
-      return false;
+  void _logConflictCheck(String level, String message) {
+    LogWriter.logAgentSync(level: level, message: message);
+  }
+
+  Future<bool> _verifyExistingTargetForRenameConflict({required String hash, required String remotePath, required int expectedBytes}) async {
+    final existingBytes = await _readRemoteFileBytesNative(remotePath);
+    if (existingBytes == null) {
+      final message = 'driver=sftp rename conflict check failed hash=$hash remotePath="$remotePath" existing=missing expectedBytes=$expectedBytes';
+      _logConflictCheck('error', message);
+      throw BackupWriteConflictMismatch(message);
     }
+    final existingSha256 = _nativeSha256Hex(existingBytes);
+    final matches = existingBytes.length == expectedBytes && existingSha256 == hash;
+    final message =
+        'driver=sftp rename conflict check hash=$hash remotePath="$remotePath" expectedBytes=$expectedBytes actualBytes=${existingBytes.length} actualSha256=$existingSha256 result=${matches ? 'match' : 'mismatch'}';
+    _logConflictCheck(matches ? 'info' : 'error', message);
+    if (!matches) {
+      throw BackupWriteConflictMismatch(message);
+    }
+    return true;
   }
 
   Future<T> _withSftp<T>(String label, Future<T> Function(SftpClient sftp) action) async {
@@ -1142,7 +1169,8 @@ class _NativeSftpBindings {
       _openWrite = lib.lookupFunction<_SftpOpenWriteC, _SftpOpenWriteDart>('vb_sftp_open_write'),
       _read = lib.lookupFunction<_SftpReadC, _SftpReadDart>('vb_sftp_read'),
       _write = lib.lookupFunction<_SftpWriteC, _SftpWriteDart>('vb_sftp_write'),
-      _closeFile = lib.lookupFunction<_SftpCloseFileC, _SftpCloseFileDart>('vb_sftp_close_file');
+      _closeFile = lib.lookupFunction<_SftpCloseFileC, _SftpCloseFileDart>('vb_sftp_close_file'),
+      _sha256Hex = lib.lookupFunction<_Sha256HexC, _Sha256HexDart>('vb_sha256_hex');
 
   final _SftpConnectDart _connect;
   final _SftpDisconnectDart _disconnect;
@@ -1151,6 +1179,7 @@ class _NativeSftpBindings {
   final _SftpReadDart _read;
   final _SftpWriteDart _write;
   final _SftpCloseFileDart _closeFile;
+  final _Sha256HexDart _sha256Hex;
 
   static _NativeSftpBindings? tryLoad() {
     final candidates = <String>[];
@@ -1214,6 +1243,27 @@ class _NativeSftpBindings {
 
   void closeFile(Pointer<Void> file) {
     _closeFile(file);
+  }
+
+  String sha256Hex(Uint8List bytes) {
+    Pointer<Uint8>? inputPtr;
+    if (bytes.isNotEmpty) {
+      inputPtr = calloc<Uint8>(bytes.length);
+      inputPtr.asTypedList(bytes.length).setAll(0, bytes);
+    }
+    final outputPtr = calloc<Uint8>(65);
+    try {
+      final rc = _sha256Hex(inputPtr ?? nullptr.cast<Uint8>(), bytes.length, outputPtr, 65);
+      if (rc != 0) {
+        throw StateError('Native SHA256 failed.');
+      }
+      return outputPtr.cast<Utf8>().toDartString();
+    } finally {
+      if (inputPtr != null) {
+        calloc.free(inputPtr);
+      }
+      calloc.free(outputPtr);
+    }
   }
 }
 
@@ -1436,3 +1486,5 @@ typedef _SftpWriteC = Int32 Function(Pointer<Void> file, Pointer<Uint8> buffer, 
 typedef _SftpWriteDart = int Function(Pointer<Void> file, Pointer<Uint8> buffer, int length);
 typedef _SftpCloseFileC = Void Function(Pointer<Void> file);
 typedef _SftpCloseFileDart = void Function(Pointer<Void> file);
+typedef _Sha256HexC = Int32 Function(Pointer<Uint8> data, Int32 length, Pointer<Uint8> outHex, Int32 outLen);
+typedef _Sha256HexDart = int Function(Pointer<Uint8> data, int length, Pointer<Uint8> outHex, int outLen);

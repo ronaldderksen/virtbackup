@@ -72,6 +72,15 @@ abstract class BackupDriver {
   void setReadConcurrencyLimit(int concurrency) {}
 }
 
+class BackupWriteConflictMismatch implements Exception {
+  const BackupWriteConflictMismatch(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 abstract class RemoteBlobDriver {
   Future<bool> blobExistsRemote(String hash);
   Future<int?> blobLength(String hash);
