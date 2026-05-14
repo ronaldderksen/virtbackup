@@ -302,8 +302,11 @@ The agent supports optional native SFTP via FFI:
 - Virt Backup account access and refresh tokens are stored in `agent.yaml` under the local agent hostname with the same AES-GCM encryption. Access tokens are valid for 7 days, or 15 minutes when login was started from a debug GUI; refresh tokens are valid for 30 days and rotate when the agent refreshes them.
 - Settings writes are staged to `agent.yaml.tmp`, read back with the normal settings loader, and only then promoted to `agent.yaml`.
 - Encrypted values are stored as `sshPasswordEnc` and decrypted into memory on load.
-- Ntfy me notifications are sent by the agent when backup/restore jobs finish (success or failure).
+- Job result notifications are sent by the agent when backup/restore jobs finish (success or failure).
 - The agent posts JSON to `https://ntfyme.net/msg` with topic `virtbackup-job`.
+- Email notifications are sent through the Virt Backup backend when `notificationEmail` is configured and the agent is signed in to a Virt Backup account.
+- The agent sends only `to`, `subject`, `textBody`, and `htmlBody` to the backend email endpoint; Mailgun is used only by the backend.
+- `POST /notifications/email/test` sends a test email through the same agent-to-backend path.
 - A restore that completes with warnings sends `status: "warning"` and includes a `warning` field instead of reporting plain success.
 - `storage` is always included and contains the storage label.
 - `source` is the source VM for backup and the restore point (`<vm> / <timestamp>`) for restore.
@@ -311,7 +314,7 @@ The agent supports optional native SFTP via FFI:
 - `push_msg` is formatted as `<msg>: <source> -> <target-or-storage>`.
 - `size` is included for backup jobs as a human-readable size (KiB/MiB/GiB).
 - Backup notifications omit `target`; the storage destination is represented by `storage`.
-- Set `ntfymeToken` in agent settings to enable notifications; when empty, notifications are skipped.
+- Set `ntfymeToken` in agent settings to enable Ntfy me messages; set `notificationEmail` and sign in to a Virt Backup account to enable email notifications. Notification failures are logged and do not change job state.
 - The GUI can store multiple agent addresses and switch between them.
 - For `127.0.0.1`, the GUI always uses the local `agent.token` file; other agents require a token entered in the GUI (token is mandatory).
 - Google Drive OAuth refresh/access tokens are stored encrypted in storage params (`storage[*].params.accessTokenEnc`, `storage[*].params.refreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.

@@ -193,6 +193,28 @@ class AgentApiClient {
     return NtfymeTestResult(success: false, message: 'Agent responded ${response.statusCode}');
   }
 
+  Future<EmailTestResult> sendEmailTest({required String to}) async {
+    final response = await _post('/notifications/email/test', {'to': to});
+    if (response.statusCode == 200) {
+      try {
+        final decoded = jsonDecode(response.body);
+        if (decoded is Map) {
+          final message = decoded['message']?.toString() ?? 'Test email sent.';
+          return EmailTestResult(success: decoded['success'] == true, message: message);
+        }
+      } catch (_) {}
+      return const EmailTestResult(success: true, message: 'Test email sent.');
+    }
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map) {
+        final message = decoded['error']?.toString() ?? 'Agent responded ${response.statusCode}';
+        return EmailTestResult(success: false, message: message);
+      }
+    } catch (_) {}
+    return EmailTestResult(success: false, message: 'Agent responded ${response.statusCode}');
+  }
+
   Future<SftpTestResult> testSftpConnection({required String host, required int port, required String username, required String password, required String basePath}) async {
     final response = await _post('/sftp/test', {'host': host, 'port': port, 'username': username, 'password': password, 'basePath': basePath});
     if (response.statusCode == 200) {
@@ -538,6 +560,13 @@ class AgentEvent {
 
 class NtfymeTestResult {
   const NtfymeTestResult({required this.success, required this.message});
+
+  final bool success;
+  final String message;
+}
+
+class EmailTestResult {
+  const EmailTestResult({required this.success, required this.message});
 
   final bool success;
   final String message;

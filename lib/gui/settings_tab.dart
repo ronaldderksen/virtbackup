@@ -261,11 +261,35 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                 const SizedBox(height: 20),
                 Divider(color: colorScheme.outline.withValues(alpha: 0.2), height: 24),
                 const SizedBox(height: 8),
+                Text('Notifications', style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _notificationEmailController,
+                  decoration: const InputDecoration(
+                    labelText: 'Email address',
+                    helperText: 'Used to send job result emails through your Virt Backup account.',
+                    prefixIcon: Icon(Icons.email_outlined),
+                    border: OutlineInputBorder(),
+                  ),
+                  keyboardType: TextInputType.emailAddress,
+                  textInputAction: TextInputAction.done,
+                  validator: _validateNotificationEmail,
+                ),
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: FilledButton.icon(
+                    onPressed: _isSendingEmailTest ? null : _sendEmailTestMessage,
+                    icon: const Icon(Icons.send_outlined),
+                    label: Text(_isSendingEmailTest ? 'Sending...' : 'Send test email'),
+                  ),
+                ),
+                const SizedBox(height: 12),
                 TextFormField(
                   controller: _ntfymeTokenController,
                   decoration: const InputDecoration(
                     labelText: 'Ntfy me token',
-                    helperText: 'Used to send Ntfy me job notifications.',
+                    helperText: 'Used to send Ntfy me job result messages.',
                     prefixIcon: Icon(Icons.notifications_outlined),
                     border: OutlineInputBorder(),
                   ),

@@ -8,6 +8,7 @@
 - SFTP backups now handle "file already exists" conflicts more safely by checking the existing backup block before continuing.
 - Backups with many repeated blocks now avoid uploading the same new block more than once during a single run.
 - Improved SFTP retry handling to prevent one temporary write problem from being reported twice.
+- Added job result email notifications through the Virt Backup backend and Mailgun, including a GUI test email button.
 
 ## 0.9.2 - 2026-05-13
 

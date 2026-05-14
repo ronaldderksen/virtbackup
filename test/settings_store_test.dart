@@ -35,6 +35,7 @@ void main() {
         maxConcurrentJobsPerVm: 1,
         maxConcurrentJobsPerStorage: 1,
         ntfymeToken: '',
+        notificationEmail: '',
         virtBackupAccount: VirtBackupAccountTokens.empty(),
         schedules: <ScheduledJob>[],
       );
@@ -87,6 +88,7 @@ schedules:
         maxConcurrentJobsPerVm: 1,
         maxConcurrentJobsPerStorage: 1,
         ntfymeToken: '',
+        notificationEmail: '',
         virtBackupAccount: VirtBackupAccountTokens.empty(),
         schedules: <ScheduledJob>[],
       );

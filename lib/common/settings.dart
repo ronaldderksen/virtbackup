@@ -18,6 +18,7 @@ class AppSettings {
     required this.maxConcurrentJobsPerVm,
     required this.maxConcurrentJobsPerStorage,
     required this.ntfymeToken,
+    required this.notificationEmail,
     required this.virtBackupAccount,
     required this.schedules,
   });
@@ -35,6 +36,7 @@ class AppSettings {
   final int maxConcurrentJobsPerVm;
   final int maxConcurrentJobsPerStorage;
   final String ntfymeToken;
+  final String notificationEmail;
   final VirtBackupAccountTokens virtBackupAccount;
   final List<ScheduledJob> schedules;
 
@@ -52,6 +54,7 @@ class AppSettings {
     int? maxConcurrentJobsPerVm,
     int? maxConcurrentJobsPerStorage,
     String? ntfymeToken,
+    String? notificationEmail,
     VirtBackupAccountTokens? virtBackupAccount,
     List<ScheduledJob>? schedules,
   }) {
@@ -80,6 +83,7 @@ class AppSettings {
       maxConcurrentJobsPerVm: maxConcurrentJobsPerVm ?? this.maxConcurrentJobsPerVm,
       maxConcurrentJobsPerStorage: maxConcurrentJobsPerStorage ?? this.maxConcurrentJobsPerStorage,
       ntfymeToken: ntfymeToken ?? this.ntfymeToken,
+      notificationEmail: notificationEmail ?? this.notificationEmail,
       virtBackupAccount: virtBackupAccount ?? this.virtBackupAccount,
       schedules: normalizedSchedules,
     );
@@ -98,6 +102,7 @@ class AppSettings {
       'maxConcurrentJobsPerVm': maxConcurrentJobsPerVm,
       'maxConcurrentJobsPerStorage': maxConcurrentJobsPerStorage,
       'ntfymeToken': ntfymeToken,
+      'notificationEmail': notificationEmail,
       'virtBackupAccount': virtBackupAccount.toMap(),
       'servers': servers.map((server) => server.toMap()).toList(),
       'storage': storage.map((storage) => storage.toMap()).toList(),
@@ -154,6 +159,7 @@ class AppSettings {
       maxConcurrentJobsPerVm: _parsePositiveInt(json['maxConcurrentJobsPerVm'], field: 'maxConcurrentJobsPerVm', defaultValue: 1),
       maxConcurrentJobsPerStorage: _parsePositiveInt(json['maxConcurrentJobsPerStorage'], field: 'maxConcurrentJobsPerStorage', defaultValue: 1),
       ntfymeToken: (json['ntfymeToken'] ?? '').toString(),
+      notificationEmail: (json['notificationEmail'] ?? '').toString(),
       virtBackupAccount: VirtBackupAccountTokens.fromMap(Map<String, dynamic>.from(json['virtBackupAccount'] is Map ? json['virtBackupAccount'] as Map : const <String, dynamic>{})),
       servers: servers,
       schedules: normalizedSchedules,
@@ -174,6 +180,7 @@ class AppSettings {
     maxConcurrentJobsPerVm: 1,
     maxConcurrentJobsPerStorage: 1,
     ntfymeToken: '',
+    notificationEmail: '',
     virtBackupAccount: VirtBackupAccountTokens.empty(),
     schedules: <ScheduledJob>[],
   );

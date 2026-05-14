@@ -21,9 +21,9 @@ If the token is missing/invalid the agent responds with:
 
 # Virt Backup Account API (HTTPS)
 
-Base URL: `https://virtbackup.net/`
+Base URL: `https://virtbackup.net/` (`https://sandbox.virtbackup.net/` in Flutter debug builds)
 
-Local development hostname checks for Ronald's Mac mini and Linux host `nuc04` are kept in the app, but account login uses `https://virtbackup.net/`.
+Account login uses `https://virtbackup.net/` in release builds and `https://sandbox.virtbackup.net/` in Flutter debug builds.
 
 The desktop app uses this API only for account sign-in status. It does not gate backup, restore, schedule, or storage functionality.
 
@@ -190,6 +190,7 @@ Response:
   "maxConcurrentJobsPerVm":1,
   "maxConcurrentJobsPerStorage":1,
   "ntfymeToken":"",
+  "notificationEmail":"",
   "servers":[],
   "storage":[
     {
@@ -286,13 +287,13 @@ schedules:
 
 `GET /config` and `POST /config` still use the flat schedule list for the current agent.
 The agent checks enabled schedules every 30 seconds and starts matching backup or restore jobs at the configured local agent time.
-Backup and restore starts are guarded by `maxConcurrentBackupRestoreJobs`, `maxConcurrentJobsPerVm`, and `maxConcurrentJobsPerStorage`. All three are stored in `agent.yaml`, default to `1`, and also apply to manual schedule runs. When a due schedule is blocked by a guard, the agent records a failed job and sends the configured ntfyme failure notification.
+Backup and restore starts are guarded by `maxConcurrentBackupRestoreJobs`, `maxConcurrentJobsPerVm`, and `maxConcurrentJobsPerStorage`. All three are stored in `agent.yaml`, default to `1`, and also apply to manual schedule runs. When a due schedule is blocked by a guard, the agent records a failed job and sends the configured job result notifications.
 Backup fails before creating its own snapshot when an existing snapshot or overlay indicates cleanup is required, regardless of whether the job was started manually, via API, or by a schedule. Backup also checks disk backing chains before creating its own snapshot. With the hidden root setting `requireSimpleDisksForBackup: true`, backing chains fail the backup because only simple disks are currently supported. Multiple simple disks are allowed. Set `requireSimpleDisksForBackup: false` in `agent.yaml` only to bypass the backing-chain guard; it does not allow backups while cleanup is required.
 After a successful snapshot commit, the agent scans VM disk directories for `.virtbackup-` overlay files and removes only files that are no longer referenced by the VM and have no open users according to `lsof`.
 
 Fields:
 - `name`: generated from schedule type, server, storage, and VM. Clients should not expose this as an editable field.
-- `waitForRunningJobs`: when `true`, an automatic schedule run that is blocked by a concurrency guard remains pending and starts when the guard allows it. When `false`, the blocked run is recorded as a failed job and sends the configured ntfyme failure notification.
+- `waitForRunningJobs`: when `true`, an automatic schedule run that is blocked by a concurrency guard remains pending and starts when the guard allows it. When `false`, the blocked run is recorded as a failed job and sends the configured job result notifications.
 - `type`: `backup` or `restore`.
 - `frequency`: `every5Minutes`, `hourly`, `daily`, or `weekly`.
 - `time`: local agent time in `HH:mm` format. Hourly schedules use the minute portion and run every hour on that minute. `every5Minutes` schedules also use the minute portion as an offset, for example `00:02` runs at `:02`, `:07`, `:12`, and so on.
@@ -365,9 +366,10 @@ Currently emitted event types:
 - `vm.lifecycle`
 - `agent.job_failure`
 
-## Notifications (Ntfy me)
+## Notifications
 
 - `POST /ntfyme/test`
+- `POST /notifications/email/test`
 
 Body (optional `token`; if missing, the agent uses `ntfymeToken` from config):
 ```json
@@ -377,6 +379,37 @@ Body (optional `token`; if missing, the agent uses `ntfymeToken` from config):
 Response (success):
 ```json
 {"success":true,"message":"Test notification delivered.","statusCode":200}
+```
+
+Email test body (optional `to`; if missing, the agent uses `notificationEmail` from config):
+
+```json
+{"to":"user@example.com"}
+```
+
+Email test response (success):
+
+```json
+{"success":true,"message":"Test email delivered.","statusCode":200}
+```
+
+Job result notifications are built by the agent. Ntfy me messages are sent directly to Ntfy me when `ntfymeToken` is configured. Email notifications are sent only when `notificationEmail` is configured and the agent is signed in to a Virt Backup account. The agent posts `to`, `subject`, `textBody`, and `htmlBody` to the Virt Backup backend; the backend performs only Mailgun delivery. Notification failures are logged and do not change the job state.
+
+Backend email transport endpoint:
+
+- `POST /api/notifications/email`
+
+Headers:
+
+```http
+Authorization: Bearer <Virt Backup account access token>
+Content-Type: application/json
+```
+
+Body:
+
+```json
+{"to":"user@example.com","subject":"Backup succeeded: server:vm","textBody":"Backup succeeded\n\n...","htmlBody":"<!doctype html><html>...</html>"}
 ```
 
 ## OAuth

@@ -436,6 +436,7 @@ class AppSettingsStore {
       'maxConcurrentJobsPerVm',
       'maxConcurrentJobsPerStorage',
       'ntfymeToken',
+      'notificationEmail',
       'virtBackupAccount',
       'servers',
       'storage',

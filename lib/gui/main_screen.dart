@@ -82,6 +82,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   final TextEditingController _serverNameController = TextEditingController();
   final TextEditingController _backupPathController = TextEditingController();
   final TextEditingController _ntfymeTokenController = TextEditingController();
+  final TextEditingController _notificationEmailController = TextEditingController();
   final TextEditingController _sshHostController = TextEditingController();
   final TextEditingController _sshPortController = TextEditingController(text: '22');
   final TextEditingController _sshUserController = TextEditingController();
@@ -97,6 +98,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String? _editingServerId;
   String _savedBackupPath = '';
   String _savedNtfymeToken = '';
+  String _savedNotificationEmail = '';
   String? _selectedBackupStorageId;
   final Map<String, List<VmEntry>> _vmCacheByServerId = {};
   int _selectedMenuIndex = 2;
@@ -112,6 +114,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _isPreparingRestore = false;
   bool _isRestoring = false;
   bool _isSanityChecking = false;
+  bool _isSendingEmailTest = false;
   bool _isSendingNtfymeTest = false;
   bool _isGdriveConnecting = false;
   String _scheduleFilterServerId = '';
@@ -183,10 +186,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _guiLogRotated = false;
 
   static Uri _defaultAccountBaseUri() {
-    final host = Platform.localHostname.toLowerCase();
-    final isRonaldMac = Platform.isMacOS && (host == 'mac-mini-van-ronald' || host == 'mac-mini-van-ronald.local');
-    final isNuc04Linux = Platform.isLinux && host == 'nuc04';
-    return Uri.https(isRonaldMac || isNuc04Linux ? 'virtbackup.net' : 'virtbackup.net');
+    return Uri.https(kDebugMode ? 'sandbox.virtbackup.net' : 'virtbackup.net');
   }
 
   @override
@@ -208,6 +208,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _serverNameController.dispose();
     _backupPathController.dispose();
     _ntfymeTokenController.dispose();
+    _notificationEmailController.dispose();
     _sshHostController.dispose();
     _sshPortController.dispose();
     _sshUserController.dispose();
@@ -626,6 +627,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     unawaited(_configureGuiLogWriter(backupPath: _savedBackupPath, rotateOnStartup: true));
     _ntfymeTokenController.text = _agentSettings.ntfymeToken;
     _savedNtfymeToken = _ntfymeTokenController.text.trim();
+    _notificationEmailController.text = _agentSettings.notificationEmail;
+    _savedNotificationEmail = _notificationEmailController.text.trim();
     _servers
       ..clear()
       ..addAll(_agentSettings.servers);
@@ -1700,6 +1703,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _apiBaseUrlController.addListener(_handleFieldChanged);
     _backupPathController.addListener(_handleFieldChanged);
     _ntfymeTokenController.addListener(_handleFieldChanged);
+    _notificationEmailController.addListener(_handleFieldChanged);
   }
 
   void _handleFieldChanged() {
@@ -1939,7 +1943,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   }
 
   bool _localHasChanges() {
-    return _backupPathController.text.trim() != _savedBackupPath || _ntfymeTokenController.text.trim() != _savedNtfymeToken;
+    return _backupPathController.text.trim() != _savedBackupPath || _ntfymeTokenController.text.trim() != _savedNtfymeToken || _notificationEmailController.text.trim() != _savedNotificationEmail;
   }
 
   bool _hasAnyChanges() {
@@ -2014,6 +2018,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     try {
       final trimmedPath = _backupPathController.text.trim();
       final trimmedToken = _ntfymeTokenController.text.trim();
+      final trimmedNotificationEmail = _notificationEmailController.text.trim();
       final updatedStorages = List<BackupStorage>.from(_agentSettings.storage);
       final filesystemIndex = updatedStorages.indexWhere((storage) => storage.id == AppSettings.filesystemStorageId);
       if (filesystemIndex >= 0) {
@@ -2030,15 +2035,70 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
           _selectedBackupStorageId ??= AppSettings.filesystemStorageId;
         }
       }
-      _agentSettings = _agentSettings.copyWith(backupPath: trimmedPath, ntfymeToken: trimmedToken, backupStorageId: _selectedBackupStorageId, storage: updatedStorages);
+      _agentSettings = _agentSettings.copyWith(
+        backupPath: trimmedPath,
+        ntfymeToken: trimmedToken,
+        notificationEmail: trimmedNotificationEmail,
+        backupStorageId: _selectedBackupStorageId,
+        storage: updatedStorages,
+      );
       await _pushAgentSettings();
       _savedBackupPath = trimmedPath;
       unawaited(_configureGuiLogWriter(backupPath: trimmedPath));
       _savedNtfymeToken = trimmedToken;
+      _savedNotificationEmail = trimmedNotificationEmail;
       if (mounted && showSnackBar) {
         _showSnackBarInfo('Local settings saved');
       }
     } finally {}
+  }
+
+  String? _validateNotificationEmail(String? value) {
+    final email = value?.trim() ?? '';
+    if (email.isEmpty) {
+      return null;
+    }
+    final at = email.indexOf('@');
+    if (email.length < 5 || email.length > 254 || at <= 0 || at != email.lastIndexOf('@') || !email.substring(at + 1).contains('.')) {
+      return 'Enter a valid email address';
+    }
+    return null;
+  }
+
+  Future<void> _sendEmailTestMessage() async {
+    final email = _notificationEmailController.text.trim();
+    final validationError = _validateNotificationEmail(email);
+    if (email.isEmpty) {
+      _showSnackBarError('Enter an email address first.');
+      return;
+    }
+    if (validationError != null) {
+      _showSnackBarError(validationError);
+      return;
+    }
+    if (!_agentReachable || _agentAuthFailed || _agentTokenMissing) {
+      _showSnackBarError('Agent is not reachable.');
+      return;
+    }
+    setState(() {
+      _isSendingEmailTest = true;
+    });
+    try {
+      final result = await _agentApiClient.sendEmailTest(to: email);
+      if (result.success) {
+        _showSnackBarInfo(result.message);
+      } else {
+        _showSnackBarError('Email test failed: ${result.message}');
+      }
+    } catch (error) {
+      _showSnackBarError('Email test failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSendingEmailTest = false;
+        });
+      }
+    }
   }
 
   Future<void> _sendNtfymeTestMessage() async {

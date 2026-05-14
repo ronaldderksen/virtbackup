@@ -400,7 +400,7 @@ class AgentHttpServer {
       return;
     }
     _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: message));
-    _notifyNtfymeJobCompletion(jobId, type: AgentJobType.backup, state: AgentJobState.failure, message: message);
+    _notifyJobCompletion(jobId, type: AgentJobType.backup, state: AgentJobState.failure, message: message);
   }
 
   Future<String> _startScheduledRestore(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage) async {
@@ -456,7 +456,7 @@ class AgentHttpServer {
       return;
     }
     _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: message));
-    _notifyNtfymeJobCompletion(jobId, type: type, state: AgentJobState.failure, message: message);
+    _notifyJobCompletion(jobId, type: type, state: AgentJobState.failure, message: message);
   }
 
   String _scheduledJobVmName(ScheduledJob schedule) {
@@ -919,6 +919,22 @@ class AgentHttpServer {
           _json(request, 200, {'success': true, 'message': 'Test notification delivered.', 'statusCode': result.statusCode});
         } else {
           _json(request, 502, {'success': false, 'error': result.error ?? 'Ntfy me request failed.', 'statusCode': result.statusCode, 'body': result.body});
+        }
+        return;
+      }
+      if (request.method == 'POST' && path == '/notifications/email/test') {
+        final body = await _readJson(request);
+        final bodyTo = (body['to'] ?? '').toString().trim();
+        final to = bodyTo.isNotEmpty ? bodyTo : _agentSettings.notificationEmail.trim();
+        if (to.isEmpty) {
+          _json(request, 400, {'success': false, 'error': 'Email address is not configured.'});
+          return;
+        }
+        final result = await _postEmailMessage(to: to, subject: 'Virt Backup test email', textBody: _buildTestEmailTextBody(), htmlBody: _buildTestEmailHtmlBody());
+        if (result.ok) {
+          _json(request, 200, {'success': true, 'message': 'Test email delivered.', 'statusCode': result.statusCode});
+        } else {
+          _json(request, 502, {'success': false, 'error': result.error ?? 'Email request failed.', 'statusCode': result.statusCode, 'body': result.body});
         }
         return;
       }
@@ -2819,7 +2835,7 @@ class AgentHttpServer {
             driverBufferedBytes: current?.driverBufferedBytes ?? 0,
           ),
         );
-        _notifyNtfymeJobCompletion(jobId, type: AgentJobType.backup, state: state, message: result.message ?? '', sizeBytes: sizeBytes);
+        _notifyJobCompletion(jobId, type: AgentJobType.backup, state: state, message: result.message ?? '', sizeBytes: sizeBytes);
         workerReceive.close();
         control.workerReceivePort = null;
         control.workerSendPort = null;
@@ -2847,7 +2863,7 @@ class AgentHttpServer {
       if (current != null) {
         final message = 'unknown driverId: ${storage.driverId}';
         _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: message));
-        _notifyNtfymeJobCompletion(jobId, type: AgentJobType.sanity, state: AgentJobState.failure, message: message);
+        _notifyJobCompletion(jobId, type: AgentJobType.sanity, state: AgentJobState.failure, message: message);
       }
       return;
     }
@@ -2908,7 +2924,7 @@ class AgentHttpServer {
         final status = AgentJobStatus.fromMap(Map<String, dynamic>.from(payload['status'] as Map));
         final sanityStatus = _toSanityJobStatus(status);
         _updateJob(jobId, sanityStatus);
-        _notifyNtfymeJobCompletion(jobId, type: AgentJobType.sanity, state: sanityStatus.state, message: sanityStatus.message);
+        _notifyJobCompletion(jobId, type: AgentJobType.sanity, state: sanityStatus.state, message: sanityStatus.message);
         workerReceive.close();
         control.workerReceivePort = null;
         control.workerSendPort = null;
@@ -3422,7 +3438,7 @@ class AgentHttpServer {
       if (current != null) {
         const message = 'Restore storage is required.';
         _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: message));
-        _notifyNtfymeJobCompletion(jobId, type: AgentJobType.restore, state: AgentJobState.failure, message: message);
+        _notifyJobCompletion(jobId, type: AgentJobType.restore, state: AgentJobState.failure, message: message);
       }
       return;
     }
@@ -3433,7 +3449,7 @@ class AgentHttpServer {
       if (current != null) {
         final message = 'unknown driverId: $driverId';
         _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: message));
-        _notifyNtfymeJobCompletion(jobId, type: AgentJobType.restore, state: AgentJobState.failure, message: message);
+        _notifyJobCompletion(jobId, type: AgentJobType.restore, state: AgentJobState.failure, message: message);
       }
       return;
     }
@@ -3443,7 +3459,7 @@ class AgentHttpServer {
       final current = _jobs[jobId];
       if (current != null) {
         _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: 'Backup path is empty.'));
-        _notifyNtfymeJobCompletion(jobId, type: AgentJobType.restore, state: AgentJobState.failure, message: 'Backup path is empty.');
+        _notifyJobCompletion(jobId, type: AgentJobType.restore, state: AgentJobState.failure, message: 'Backup path is empty.');
       }
       return;
     }
@@ -3495,7 +3511,7 @@ class AgentHttpServer {
         final status = AgentJobStatus.fromMap(Map<String, dynamic>.from(payload['status'] as Map));
         _updateJob(jobId, status);
         final sizeBytes = status.totalBytes > 0 ? status.totalBytes : null;
-        _notifyNtfymeJobCompletion(jobId, type: AgentJobType.restore, state: status.state, message: status.message, sizeBytes: sizeBytes);
+        _notifyJobCompletion(jobId, type: AgentJobType.restore, state: status.state, message: status.message, sizeBytes: sizeBytes);
         workerReceive.close();
         control.workerReceivePort = null;
         control.workerSendPort = null;
@@ -3569,55 +3585,130 @@ class AgentHttpServer {
     return driverId.trim().isEmpty ? driverInfo.id : driverId.trim();
   }
 
-  void _notifyNtfymeJobCompletion(String jobId, {required AgentJobType type, required AgentJobState state, required String message, int? sizeBytes}) {
+  void _notifyJobCompletion(String jobId, {required AgentJobType type, required AgentJobState state, required String message, int? sizeBytes}) {
     if (state != AgentJobState.success && state != AgentJobState.failure) {
       return;
     }
-    final token = _agentSettings.ntfymeToken.trim();
-    if (token.isEmpty) {
-      _hostLog('Ntfy me notification skipped (no token configured).');
-      return;
-    }
     final control = _jobControls[jobId];
-    final notificationStatus = _ntfymeStatusForJob(type: type, state: state, message: message);
-    final dedupeKey = '${type.name}:$notificationStatus';
+    final notification = _buildJobCompletionNotification(jobId, type: type, state: state, message: message, sizeBytes: sizeBytes);
+    final dedupeKey = '${type.name}:${notification.status}';
     if (control != null && control.lastNtfyCompletionKey == dedupeKey) {
       return;
     }
     if (control != null) {
       control.lastNtfyCompletionKey = dedupeKey;
     }
+    _sendNtfymeNotification(notification);
+    _sendEmailNotification(notification);
+  }
+
+  _JobCompletionNotification _buildJobCompletionNotification(String jobId, {required AgentJobType type, required AgentJobState state, required String message, int? sizeBytes}) {
+    final control = _jobControls[jobId];
+    final notificationStatus = _notificationStatusForJob(type: type, state: state, message: message);
     final duration = control?.startedAt == null ? null : DateTime.now().difference(control!.startedAt).inSeconds;
     final storageLabel = _resolveStorageLabel(storageLabel: control?.storageLabel);
-    final sourceLabel = _ntfymeSourceForJob(type: type, source: control?.source);
+    final sourceLabel = _notificationSourceForJob(type: type, source: control?.source);
     final targetLabel = type == AgentJobType.backup ? storageLabel : control?.target;
-    final messageText = _buildNtfymeMessage(type, notificationStatus);
-    final pushMessage = _buildNtfymePushMessage(message: messageText, source: sourceLabel, target: targetLabel);
-    final payload = <String, dynamic>{'topic': _ntfymeTopic, 'msg': messageText, 'push_msg': pushMessage, 'type': type.name, 'status': notificationStatus, 'storage': storageLabel};
-    if (duration != null) {
-      payload['duration_sec'] = duration;
+    final title = _buildNotificationTitle(type, notificationStatus);
+    final detailMessage = message.trim();
+    return _JobCompletionNotification(
+      jobId: jobId,
+      type: type,
+      status: notificationStatus,
+      title: title,
+      message: detailMessage,
+      source: sourceLabel,
+      target: targetLabel,
+      storage: storageLabel,
+      durationSeconds: duration,
+      sizeBytes: sizeBytes,
+      error: state == AgentJobState.failure ? (detailMessage.isEmpty ? title : detailMessage) : null,
+      warning: notificationStatus == 'warning' ? (detailMessage.isEmpty ? title : detailMessage) : null,
+    );
+  }
+
+  void _sendNtfymeNotification(_JobCompletionNotification notification) {
+    final token = _agentSettings.ntfymeToken.trim();
+    if (token.isEmpty) {
+      _hostLog('Ntfy me notification skipped (no token configured).');
+      return;
     }
-    if (sourceLabel != null && sourceLabel.trim().isNotEmpty) {
-      payload['source'] = sourceLabel;
+    final pushMessage = _buildNtfymePushMessage(message: notification.title, source: notification.source, target: notification.target);
+    final payload = <String, dynamic>{
+      'topic': _ntfymeTopic,
+      'msg': notification.title,
+      'push_msg': pushMessage,
+      'type': notification.type.name,
+      'status': notification.status,
+      'storage': notification.storage,
+    };
+    if (notification.durationSeconds != null) {
+      payload['duration_sec'] = notification.durationSeconds;
     }
-    if (type != AgentJobType.backup && targetLabel != null && targetLabel.trim().isNotEmpty) {
-      payload['target'] = targetLabel;
+    if (notification.source != null && notification.source!.trim().isNotEmpty) {
+      payload['source'] = notification.source;
     }
-    if (type == AgentJobType.backup && sizeBytes != null) {
-      payload['size'] = _formatBytes(sizeBytes);
+    if (notification.type != AgentJobType.backup && notification.target != null && notification.target!.trim().isNotEmpty) {
+      payload['target'] = notification.target;
     }
-    if (state == AgentJobState.failure) {
-      final errorMessage = message.trim();
-      payload['error'] = errorMessage.isEmpty ? messageText : errorMessage;
-    } else if (notificationStatus == 'warning') {
-      final warningMessage = message.trim();
-      payload['warning'] = warningMessage.isEmpty ? messageText : warningMessage;
+    if (notification.type == AgentJobType.backup && notification.sizeBytes != null) {
+      payload['size'] = _formatBytes(notification.sizeBytes!);
+    }
+    if (notification.error != null && notification.error!.trim().isNotEmpty) {
+      payload['error'] = notification.error;
+    } else if (notification.warning != null && notification.warning!.trim().isNotEmpty) {
+      payload['warning'] = notification.warning;
     }
     _hostLog('Ntfy me notification queued: ${jsonEncode(payload)}');
     unawaited(_postNtfymeNotification(token, payload));
   }
 
-  String _ntfymeStatusForJob({required AgentJobType type, required AgentJobState state, required String message}) {
+  void _sendEmailNotification(_JobCompletionNotification notification) {
+    final to = _agentSettings.notificationEmail.trim();
+    if (to.isEmpty) {
+      _hostLog('Email notification skipped (no email address configured).');
+      return;
+    }
+    unawaited(() async {
+      final result = await _postEmailMessage(to: to, subject: _buildEmailSubject(notification), textBody: _buildEmailTextBody(notification), htmlBody: _buildEmailHtmlBody(notification));
+      if (result.ok) {
+        _hostLog('Email notification delivered (${result.statusCode}).');
+      } else {
+        _hostLog('Email notification failed${result.statusCode == null ? '' : ' (${result.statusCode})'}: ${result.body ?? result.error ?? 'unknown error'}');
+      }
+    }());
+  }
+
+  Future<_NotificationEmailResult> _postEmailMessage({required String to, required String subject, required String textBody, required String htmlBody}) async {
+    try {
+      await _maybeRefreshVirtBackupAccount();
+      final account = _agentSettings.virtBackupAccount;
+      if (!account.isConnected || account.accountBaseUrl.trim().isEmpty || account.accessToken.trim().isEmpty) {
+        return _NotificationEmailResult.failure('Virt Backup account is not signed in.');
+      }
+      final endpoint = Uri.parse(account.accountBaseUrl).replace(path: '/api/notifications/email', queryParameters: null, fragment: null);
+      final client = HttpClient();
+      try {
+        final request = await client.postUrl(endpoint);
+        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${account.accessToken}');
+        request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+        request.add(utf8.encode(jsonEncode(<String, String>{'to': to, 'subject': subject, 'textBody': textBody, 'htmlBody': htmlBody})));
+        final response = await request.close();
+        final responseBody = await response.transform(utf8.decoder).join();
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          return _NotificationEmailResult.failure('HTTP ${response.statusCode}', statusCode: response.statusCode, body: responseBody);
+        }
+        return _NotificationEmailResult.success(response.statusCode, responseBody);
+      } finally {
+        client.close(force: true);
+      }
+    } catch (error, stackTrace) {
+      _hostLogError('Email notification failed.', error, stackTrace);
+      return _NotificationEmailResult.failure(error.toString());
+    }
+  }
+
+  String _notificationStatusForJob({required AgentJobType type, required AgentJobState state, required String message}) {
     if (state == AgentJobState.failure) {
       return 'failed';
     }
@@ -3627,14 +3718,147 @@ class AgentHttpServer {
     return 'success';
   }
 
-  String _buildNtfymeMessage(AgentJobType type, String status) {
-    final label = type == AgentJobType.backup ? 'Backup' : 'Restore';
+  String _buildNotificationTitle(AgentJobType type, String status) {
+    final label = switch (type) {
+      AgentJobType.backup => 'Backup',
+      AgentJobType.restore => 'Restore',
+      AgentJobType.sanity => 'Check',
+    };
     final statusText = switch (status) {
       'success' => 'succeeded',
       'warning' => 'warning',
       _ => 'failed',
     };
     return '$label $statusText';
+  }
+
+  String _buildEmailSubject(_JobCompletionNotification notification) {
+    final source = notification.source?.trim() ?? '';
+    return source.isEmpty ? notification.title : '${notification.title}: $source';
+  }
+
+  String _buildEmailTextBody(_JobCompletionNotification notification) {
+    final lines = <String>[notification.title, '', 'Job ID: ${notification.jobId}', 'Type: ${notification.type.name}', 'Status: ${notification.status}', 'Storage: ${notification.storage}'];
+    final source = notification.source?.trim() ?? '';
+    if (source.isNotEmpty) {
+      lines.add('Source: $source');
+    }
+    final target = notification.target?.trim() ?? '';
+    if (target.isNotEmpty) {
+      lines.add('Target: $target');
+    }
+    if (notification.durationSeconds != null) {
+      lines.add('Duration: ${notification.durationSeconds}s');
+    }
+    if (notification.sizeBytes != null) {
+      lines.add('Size: ${_formatBytes(notification.sizeBytes!)}');
+    }
+    return lines.join('\n');
+  }
+
+  String _buildEmailHtmlBody(_JobCompletionNotification notification) {
+    final rows = <String>[
+      _buildEmailMetaRow('Job ID', notification.jobId),
+      _buildEmailMetaRow('Type', notification.type.name),
+      _buildEmailMetaRow('Status', notification.status),
+      _buildEmailMetaRow('Storage', notification.storage),
+    ];
+    final source = notification.source?.trim() ?? '';
+    if (source.isNotEmpty) {
+      rows.add(_buildEmailMetaRow('Source', source));
+    }
+    final target = notification.target?.trim() ?? '';
+    if (target.isNotEmpty) {
+      rows.add(_buildEmailMetaRow('Target', target));
+    }
+    if (notification.durationSeconds != null) {
+      rows.add(_buildEmailMetaRow('Duration', '${notification.durationSeconds}s'));
+    }
+    if (notification.sizeBytes != null) {
+      rows.add(_buildEmailMetaRow('Size', _formatBytes(notification.sizeBytes!)));
+    }
+    return '''
+<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#111827;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f4f6;padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+            <tr>
+              <td style="padding:28px 32px;background:${_emailAccentColor(notification.status)};">
+                <div style="font-size:13px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.78);">Virt Backup</div>
+                <h1 style="margin:10px 0 0 0;font-size:28px;line-height:1.2;color:#ffffff;">${_escapeEmailHtml(notification.title)}</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:28px 32px;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+                  ${rows.join('\n')}
+                </table>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+''';
+  }
+
+  String _buildTestEmailTextBody() {
+    return 'Test email delivered\n\nThis test email confirms that Virt Backup can send notification emails through your backend account.';
+  }
+
+  String _buildTestEmailHtmlBody() {
+    return '''
+<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#111827;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f4f6;padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+            <tr>
+              <td style="padding:28px 32px;background:#2563eb;">
+                <div style="font-size:13px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.78);">Virt Backup</div>
+                <h1 style="margin:10px 0 0 0;font-size:28px;line-height:1.2;color:#ffffff;">Test email delivered</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:28px 32px;">
+                <p style="margin:0;font-size:15px;line-height:1.6;color:#111827;">This test email confirms that Virt Backup can send notification emails through your backend account.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+''';
+  }
+
+  String _buildEmailMetaRow(String label, String value) {
+    return '''
+      <tr>
+        <td style="width:160px;padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:700;color:#64748b;">${_escapeEmailHtml(label)}</td>
+        <td style="padding:10px 0;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827;">${_escapeEmailHtml(value)}</td>
+      </tr>
+''';
+  }
+
+  String _emailAccentColor(String status) {
+    return switch (status) {
+      'success' => '#047857',
+      'warning' => '#b45309',
+      _ => '#b91c1c',
+    };
+  }
+
+  String _escapeEmailHtml(String value) {
+    return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
   }
 
   String _buildNtfymePushMessage({required String message, String? source, String? target}) {
@@ -3651,7 +3875,7 @@ class AgentHttpServer {
     return fallback.isEmpty ? 'Unknown storage' : fallback;
   }
 
-  String? _ntfymeSourceForJob({required AgentJobType type, String? source}) {
+  String? _notificationSourceForJob({required AgentJobType type, String? source}) {
     final value = source?.trim() ?? '';
     if (value.isEmpty || type != AgentJobType.restore) {
       return value.isEmpty ? null : value;
@@ -3982,6 +4206,48 @@ class _EventStreamState {
 
   final HttpResponse response;
   bool closed = false;
+}
+
+class _JobCompletionNotification {
+  const _JobCompletionNotification({
+    required this.jobId,
+    required this.type,
+    required this.status,
+    required this.title,
+    required this.message,
+    required this.source,
+    required this.target,
+    required this.storage,
+    required this.durationSeconds,
+    required this.sizeBytes,
+    required this.error,
+    required this.warning,
+  });
+
+  final String jobId;
+  final AgentJobType type;
+  final String status;
+  final String title;
+  final String message;
+  final String? source;
+  final String? target;
+  final String storage;
+  final int? durationSeconds;
+  final int? sizeBytes;
+  final String? error;
+  final String? warning;
+}
+
+class _NotificationEmailResult {
+  const _NotificationEmailResult._(this.ok, {this.statusCode, this.body, this.error});
+
+  final bool ok;
+  final int? statusCode;
+  final String? body;
+  final String? error;
+
+  factory _NotificationEmailResult.success(int statusCode, String body) => _NotificationEmailResult._(true, statusCode: statusCode, body: body);
+  factory _NotificationEmailResult.failure(String error, {int? statusCode, String? body}) => _NotificationEmailResult._(false, statusCode: statusCode, body: body, error: error);
 }
 
 class _NtfymeResult {
