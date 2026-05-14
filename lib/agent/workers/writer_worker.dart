@@ -44,13 +44,18 @@ class _WriterWorker {
   DateTime? _lastEventLoopYieldAt;
 
   Completer<void>? _wakeWriter;
+  final Completer<void> _cancelSignal = Completer<void>();
   bool _done = false;
+  bool _canceled = false;
   Object? _writerError;
   StackTrace? _writerStack;
 
   int backlogBytes() => _queuedBytes + _inFlightBytes + driverBufferedBytes();
 
   void enqueue(String hash, Uint8List bytes) {
+    if (_canceled) {
+      return;
+    }
     final shardKey = _shardKeyForHash(hash);
     final bucket = _writeQueues.putIfAbsent(shardKey, () {
       _shardQueue.add(shardKey);
@@ -68,6 +73,19 @@ class _WriterWorker {
 
   void signalDone() {
     _done = true;
+    if (_wakeWriter != null && !_wakeWriter!.isCompleted) {
+      _wakeWriter!.complete();
+      _wakeWriter = null;
+    }
+  }
+
+  void cancel() {
+    _canceled = true;
+    _done = true;
+    _clearQueuedWrites();
+    if (!_cancelSignal.isCompleted) {
+      _cancelSignal.complete();
+    }
     if (_wakeWriter != null && !_wakeWriter!.isCompleted) {
       _wakeWriter!.complete();
       _wakeWriter = null;
@@ -155,9 +173,9 @@ class _WriterWorker {
         _maybeRecoverConcurrency();
         if (!isWriteReady()) {
           if (waitForWriteReady != null) {
-            await waitForWriteReady!();
+            await Future.any<void>(<Future<void>>[waitForWriteReady!(), _cancelSignal.future]);
           } else {
-            await Future<void>.delayed(const Duration(milliseconds: 50));
+            await Future.any<void>(<Future<void>>[Future<void>.delayed(const Duration(milliseconds: 50)), _cancelSignal.future]);
           }
           continue;
         }
@@ -217,9 +235,9 @@ class _WriterWorker {
           _maybeLogLoopDebug('wait-shard-ready', writeFutures.length);
           final waitDuration = _nextRetryWait();
           if (waitDuration == null) {
-            await Future<void>.delayed(const Duration(milliseconds: 50));
+            await Future.any<void>(<Future<void>>[Future<void>.delayed(const Duration(milliseconds: 50)), _cancelSignal.future]);
           } else {
-            await Future<void>.delayed(waitDuration);
+            await Future.any<void>(<Future<void>>[Future<void>.delayed(waitDuration), _cancelSignal.future]);
           }
           continue;
         }
@@ -240,6 +258,9 @@ class _WriterWorker {
   }
 
   void _requeue(_MissingBlock block) {
+    if (_canceled) {
+      return;
+    }
     final shardKey = _shardKeyForHash(block.hash);
     final bucket = _writeQueues.putIfAbsent(shardKey, () {
       _shardQueue.add(shardKey);
@@ -252,6 +273,14 @@ class _WriterWorker {
       _wakeWriter!.complete();
       _wakeWriter = null;
     }
+  }
+
+  void _clearQueuedWrites() {
+    _writeQueues.clear();
+    _shardQueue.clear();
+    _queuedBlocks = 0;
+    _queuedBytes = 0;
+    _reportMetrics();
   }
 
   Duration _retryDelayForAttempt(int attempt) {

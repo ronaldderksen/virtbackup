@@ -628,6 +628,8 @@ Additional fields may be present (physical throughput, ETA, and writer backlog m
 
 - `POST /jobs/{jobId}/cancel`
 
+When the job belongs to a multi-VM schedule run, canceling it cancels the current schedule run. Any other running jobs from that run receive a cancel request, and the agent does not start the remaining VMs from that run. Future runs of the schedule are not disabled.
+
 Response:
 ```json
 {"success":true}

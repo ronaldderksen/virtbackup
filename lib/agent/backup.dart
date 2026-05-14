@@ -117,6 +117,7 @@ class BackupAgent {
   void cancel() {
     _cancelRequested = true;
     _activeHashblocksController?.stop();
+    _stopProgressLogTimer();
     _setProgress(_progress.copyWith(statusMessage: 'Canceling...'));
   }
 
@@ -300,7 +301,7 @@ class BackupAgent {
       return BackupAgentResult(success: true, message: message);
     } catch (error, stackTrace) {
       runError = error;
-      final isCanceled = error is _BackupCanceled;
+      final isCanceled = error is _BackupCanceled || _cancelRequested;
       if (!isCanceled) {
         _onError?.call('VM backup failed.', error, stackTrace);
       }
@@ -1008,11 +1009,20 @@ class BackupAgent {
         wakeSftpReadResume = null;
       }
       existsWorker.signalDone();
-      writerWorker.signalDone();
-      if (writerFutureRef != null && !writerAwaited) {
+      if (_cancelRequested) {
+        writerWorker.cancel();
+        try {
+          await driver.closeConnections();
+        } catch (_) {}
+      } else {
+        writerWorker.signalDone();
+      }
+      if (!_cancelRequested && writerFutureRef != null && !writerAwaited) {
         await writerFutureRef;
       }
-      await _drainPendingWrites();
+      if (!_cancelRequested) {
+        await _drainPendingWrites();
+      }
       if (!manifestFlushed) {
         await sink.flush();
       }
