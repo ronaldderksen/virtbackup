@@ -226,6 +226,7 @@ Response:
       "weekdays":[],
       "serverId":"server_1739440000000003",
       "storageId":"dest_sftp_1739440000000001",
+      "backupAllVms":false,
       "vmName":"app01",
       "restoreXmlPath":"",
       "restoreDecision":""
@@ -241,6 +242,7 @@ Response:
       "weekdays":[1],
       "serverId":"server_1739440000000005",
       "storageId":"dest_sftp_1739440000000001",
+      "backupAllVms":false,
       "vmName":"app01",
       "restoreXmlPath":"__latest__",
       "restoreDecision":"overwrite"
@@ -276,6 +278,7 @@ schedules:
       weekdays: []
       serverId: server_1739440000000003
       storageId: dest_sftp_1739440000000001
+      backupAllVms: false
       vmName: app01
       restoreXmlPath: ''
       restoreDecision: ''
@@ -295,7 +298,7 @@ Fields:
 - `time`: local agent time in `HH:mm` format. Hourly schedules use the minute portion and run every hour on that minute. `every5Minutes` schedules also use the minute portion as an offset, for example `00:02` runs at `:02`, `:07`, `:12`, and so on.
 - `weekdays`: ISO weekday numbers (`1` Monday through `7` Sunday), used only for weekly schedules.
 - `serverId` and `storageId`: references to configured server and storage entries.
-- Backup schedules use `vmName`.
+- Backup schedules use `vmName`, or set `backupAllVms: true` and leave `vmName` empty. All-VM backup schedules read the VM inventory once at the beginning of the run and then start one backup job per VM sequentially; VMs added during the run are picked up by the next run.
 - Restore schedules use `restoreXmlPath` and `restoreDecision` (`overwrite`, `define`, or `auto_rename`). Set `restoreXmlPath` to `__latest__` and `vmName` to a source VM name to restore the latest complete XML for that VM at runtime.
 
 ### Run schedule now

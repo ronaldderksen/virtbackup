@@ -235,7 +235,7 @@ class AgentHttpServer {
     return now.difference(parsed).inDays < 2;
   }
 
-  Future<String> _startScheduledJob(ScheduledJob schedule) async {
+  Future<String> _startScheduledJob(ScheduledJob schedule, {bool allowDisabled = false}) async {
     final server = _serverById(schedule.serverId);
     if (server == null) {
       throw StateError('server not found: ${schedule.serverId}');
@@ -246,6 +246,9 @@ class AgentHttpServer {
     }
     switch (schedule.type) {
       case ScheduledJobType.backup:
+        if (schedule.backupAllVms) {
+          return _startScheduledAllVmBackup(schedule, server, storage, allowDisabled: allowDisabled);
+        }
         return _startScheduledBackup(schedule, server, storage);
       case ScheduledJobType.restore:
         return _startScheduledRestore(schedule, server, storage);
@@ -274,6 +277,99 @@ class AgentHttpServer {
     if (schedule.vmName.trim().isEmpty) {
       throw StateError('backup schedule requires vmName');
     }
+    return _startScheduledBackupForVm(schedule, server, storage, VmEntry(id: schedule.vmName, name: schedule.vmName, powerState: VmPowerState.stopped));
+  }
+
+  Future<String> _startScheduledAllVmBackup(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage, {required bool allowDisabled}) async {
+    final vmSnapshot = await _loadScheduledBackupVmSnapshot(server);
+    if (vmSnapshot.isEmpty) {
+      throw StateError('backup schedule found no VMs on ${server.name}');
+    }
+    final firstJobId = _startScheduledBackupForVm(schedule, server, storage, vmSnapshot.first);
+    if (vmSnapshot.length > 1) {
+      unawaited(_continueScheduledAllVmBackup(schedule.id, server.id, storage.storage.id, vmSnapshot.skip(1).toList(), firstJobId, allowDisabled: allowDisabled));
+    }
+    return firstJobId;
+  }
+
+  Future<List<VmEntry>> _loadScheduledBackupVmSnapshot(ServerConfig server) async {
+    final missingTools = await _host.missingRequiredRemoteTools(server);
+    _missingToolsByServerId[server.id] = missingTools;
+    if (missingTools.contains('tr') || missingTools.contains('virsh')) {
+      throw StateError('backup schedule failed: server is missing required tools: ${missingTools.join(', ')}');
+    }
+    final vms = await _host.loadVmInventory(server);
+    vms.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return vms;
+  }
+
+  Future<void> _continueScheduledAllVmBackup(String scheduleId, String serverId, String storageId, List<VmEntry> remainingVms, String previousJobId, {required bool allowDisabled}) async {
+    var lastJobId = previousJobId;
+    for (final vm in remainingVms) {
+      final previousStatus = await _waitForJobToFinish(lastJobId);
+      if (previousStatus?.state == AgentJobState.canceled) {
+        _hostLog('All-VM backup schedule stopped after canceled job $lastJobId.');
+        return;
+      }
+      final schedule = _scheduleById(scheduleId);
+      if (schedule == null || (!allowDisabled && !schedule.enabled) || !schedule.backupAllVms) {
+        _hostLog('All-VM backup schedule $scheduleId stopped because the schedule changed.');
+        return;
+      }
+      final server = _serverById(serverId);
+      if (server == null) {
+        _hostLog('All-VM backup schedule "${schedule.name}" stopped because server $serverId no longer exists.');
+        return;
+      }
+      final storage = _resolveStorageById(storageId);
+      if (storage == null) {
+        _hostLog('All-VM backup schedule "${schedule.name}" stopped because storage $storageId is unavailable.');
+        return;
+      }
+      try {
+        lastJobId = _startScheduledBackupForVm(schedule, server, storage, vm);
+      } on _JobGuardRejected catch (error) {
+        if (!schedule.waitForRunningJobs) {
+          _hostLog('All-VM backup schedule "${schedule.name}" stopped before ${vm.name}. ${error.message}');
+          _failScheduledBackupVmStart(schedule, vm.name, error.message);
+          return;
+        }
+        lastJobId = await _waitAndStartScheduledBackupForVm(schedule, server, storage, vm, allowDisabled: allowDisabled);
+      } catch (error, stackTrace) {
+        _hostLog('All-VM backup schedule "${schedule.name}" failed before ${vm.name}. $error');
+        _hostLog(stackTrace.toString());
+        _failScheduledBackupVmStart(schedule, vm.name, error.toString());
+        return;
+      }
+    }
+  }
+
+  Future<String> _waitAndStartScheduledBackupForVm(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage, VmEntry vm, {required bool allowDisabled}) async {
+    while (true) {
+      await Future<void>.delayed(const Duration(seconds: 30));
+      final currentSchedule = _scheduleById(schedule.id);
+      if (currentSchedule == null || (!allowDisabled && !currentSchedule.enabled) || !currentSchedule.backupAllVms || !currentSchedule.waitForRunningJobs) {
+        throw StateError('schedule changed while waiting for running jobs');
+      }
+      try {
+        return _startScheduledBackupForVm(currentSchedule, server, storage, vm);
+      } on _JobGuardRejected catch (_) {}
+    }
+  }
+
+  Future<AgentJobStatus?> _waitForJobToFinish(String jobId) async {
+    final current = _jobs[jobId];
+    if (current == null || current.state != AgentJobState.running) {
+      return current;
+    }
+    final control = _jobControls[jobId];
+    if (control == null) {
+      return current;
+    }
+    return control.completed.future;
+  }
+
+  String _startScheduledBackupForVm(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage, VmEntry vm) {
     final backupPath = storage.backupPath;
     final registry = _buildDriverRegistry(backupPath: backupPath, settings: storage.settings);
     final descriptor = registry[storage.driverId] ?? registry['filesystem']!;
@@ -284,22 +380,27 @@ class AgentHttpServer {
     if (validationError != null && validationError.isNotEmpty) {
       throw StateError(validationError);
     }
-    final guardMessage = _jobStartGuardMessage(type: AgentJobType.backup, vmName: schedule.vmName, storageId: storage.storage.id);
+    final guardMessage = _jobStartGuardMessage(type: AgentJobType.backup, vmName: vm.name, storageId: storage.storage.id);
     if (guardMessage != null) {
       throw _JobGuardRejected(guardMessage);
     }
-    final jobId = _createJob(AgentJobType.backup, vmName: schedule.vmName, storageId: storage.storage.id, scheduleId: schedule.id);
-    _hostLog('Schedule "${schedule.name}" starting backup job $jobId.');
-    _startBackupJob(
-      jobId,
-      server,
-      VmEntry(id: schedule.vmName, name: schedule.vmName, powerState: VmPowerState.stopped),
-      backupPath,
-      driverIdOverride: storage.driverId,
-      driverParams: storage.driverParams,
-      storage: storage,
-    );
+    final jobId = _createJob(AgentJobType.backup, vmName: vm.name, storageId: storage.storage.id, scheduleId: schedule.id);
+    _hostLog('Schedule "${schedule.name}" starting backup job $jobId for ${vm.name}.');
+    _startBackupJob(jobId, server, vm, backupPath, driverIdOverride: storage.driverId, driverParams: storage.driverParams, storage: storage);
     return jobId;
+  }
+
+  void _failScheduledBackupVmStart(ScheduledJob schedule, String vmName, String message) {
+    final storage = _resolveStorageById(schedule.storageId);
+    final jobId = _createJob(AgentJobType.backup, vmName: vmName, storageId: schedule.storageId, scheduleId: schedule.id);
+    final server = _serverById(schedule.serverId);
+    _setJobContext(jobId, source: server == null ? vmName : _formatJobSource(server, vmName), storageLabel: storage?.storage.name);
+    final current = _jobs[jobId];
+    if (current == null) {
+      return;
+    }
+    _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: message));
+    _notifyNtfymeJobCompletion(jobId, type: AgentJobType.backup, state: AgentJobState.failure, message: message);
   }
 
   Future<String> _startScheduledRestore(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage) async {
@@ -1181,7 +1282,7 @@ class AgentHttpServer {
           return;
         }
         try {
-          final jobId = await _startScheduledJob(schedule);
+          final jobId = await _startScheduledJob(schedule, allowDisabled: true);
           _json(request, 200, AgentJobStart(jobId: jobId).toMap());
         } on _JobGuardRejected catch (error) {
           _json(request, 409, {'error': error.message});
@@ -2545,6 +2646,12 @@ class AgentHttpServer {
     final previous = _jobs[jobId];
     final next = previous != null && status.scheduleId.isEmpty && previous.scheduleId.isNotEmpty ? status.copyWith(scheduleId: previous.scheduleId) : status;
     _jobs[jobId] = next;
+    if (next.state != AgentJobState.running) {
+      final control = _jobControls[jobId];
+      if (control != null && !control.completed.isCompleted) {
+        control.completed.complete(next);
+      }
+    }
     if (status.state == AgentJobState.failure && previous?.state != AgentJobState.failure) {
       _publishEvent('agent.job_failure', {'jobId': status.id, 'type': status.type.name, 'message': status.message});
     }
@@ -3773,6 +3880,7 @@ class _JobControl {
   final DateTime startedAt;
   final String? vmName;
   final String? storageId;
+  final Completer<AgentJobStatus> completed = Completer<AgentJobStatus>();
   bool canceled = false;
   BackupAgent? backupAgent;
   Isolate? workerIsolate;
