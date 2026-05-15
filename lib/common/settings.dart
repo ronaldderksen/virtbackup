@@ -308,7 +308,7 @@ class AppSettings {
     final typeLabel = schedule.type == ScheduledJobType.backup ? 'Backup' : 'Restore';
     final serverName = _serverNameForId(servers, schedule.serverId);
     final storageName = _storageNameForId(storage, schedule.storageId);
-    final vmLabel = schedule.backupAllVms ? 'all VMs' : (schedule.vmName.trim().isEmpty ? 'VM' : schedule.vmName.trim());
+    final vmLabel = schedule.backupAllVms || schedule.restoreAllLatestVms ? 'all VMs' : (schedule.vmName.trim().isEmpty ? 'VM' : schedule.vmName.trim());
     final direction = schedule.type == ScheduledJobType.backup ? 'to' : 'from';
     return '$typeLabel $vmLabel on $serverName $direction $storageName';
   }
@@ -414,6 +414,7 @@ class ScheduledJob {
     required this.serverId,
     required this.storageId,
     required this.backupAllVms,
+    required this.restoreAllLatestVms,
     required this.vmName,
     required this.restoreXmlPath,
     required this.restoreDecision,
@@ -430,6 +431,7 @@ class ScheduledJob {
   final String serverId;
   final String storageId;
   final bool backupAllVms;
+  final bool restoreAllLatestVms;
   final String vmName;
   final String restoreXmlPath;
   final String restoreDecision;
@@ -447,6 +449,7 @@ class ScheduledJob {
       'serverId': serverId,
       'storageId': storageId,
       'backupAllVms': backupAllVms,
+      'restoreAllLatestVms': restoreAllLatestVms,
       'vmName': vmName,
       'restoreXmlPath': restoreXmlPath,
       'restoreDecision': restoreDecision,
@@ -465,6 +468,7 @@ class ScheduledJob {
     String? serverId,
     String? storageId,
     bool? backupAllVms,
+    bool? restoreAllLatestVms,
     String? vmName,
     String? restoreXmlPath,
     String? restoreDecision,
@@ -481,6 +485,7 @@ class ScheduledJob {
       serverId: serverId ?? this.serverId,
       storageId: storageId ?? this.storageId,
       backupAllVms: backupAllVms ?? this.backupAllVms,
+      restoreAllLatestVms: restoreAllLatestVms ?? this.restoreAllLatestVms,
       vmName: vmName ?? this.vmName,
       restoreXmlPath: restoreXmlPath ?? this.restoreXmlPath,
       restoreDecision: restoreDecision ?? this.restoreDecision,
@@ -506,14 +511,15 @@ class ScheduledJob {
     }
     final vmName = (json['vmName'] ?? '').toString().trim();
     final backupAllVms = json['backupAllVms'] == true;
+    final restoreAllLatestVms = json['restoreAllLatestVms'] == true;
     final restoreXmlPath = (json['restoreXmlPath'] ?? '').toString().trim();
     if (type == ScheduledJobType.backup && !backupAllVms && vmName.isEmpty) {
       return null;
     }
-    if (type == ScheduledJobType.restore && restoreXmlPath.isEmpty) {
+    if (type == ScheduledJobType.restore && !restoreAllLatestVms && restoreXmlPath.isEmpty) {
       return null;
     }
-    if (type == ScheduledJobType.restore && restoreXmlPath == latestRestoreXmlPath && vmName.isEmpty) {
+    if (type == ScheduledJobType.restore && !restoreAllLatestVms && restoreXmlPath == latestRestoreXmlPath && vmName.isEmpty) {
       return null;
     }
     final restoreDecision = (json['restoreDecision'] ?? '').toString().trim();
@@ -535,8 +541,9 @@ class ScheduledJob {
       serverId: serverId,
       storageId: storageId,
       backupAllVms: type == ScheduledJobType.backup && backupAllVms,
-      vmName: type == ScheduledJobType.backup && backupAllVms ? '' : vmName,
-      restoreXmlPath: restoreXmlPath,
+      restoreAllLatestVms: type == ScheduledJobType.restore && restoreAllLatestVms,
+      vmName: type == ScheduledJobType.backup && backupAllVms || type == ScheduledJobType.restore && restoreAllLatestVms ? '' : vmName,
+      restoreXmlPath: type == ScheduledJobType.restore && restoreAllLatestVms ? latestRestoreXmlPath : restoreXmlPath,
       restoreDecision: restoreDecision,
     );
   }

@@ -41,7 +41,8 @@ Key modules under `lib/agent`:
    - Commit snapshot if applicable.
    - Remove unused `.virtbackup-` overlay files after commit only after verifying the VM no longer references them and `lsof` reports no open users.
 4. Progress is reported to job status, and summarized on completion.
-5. A backup schedule can target one VM or all VMs on the selected server. All-VM schedules capture the VM inventory once at the start of the schedule run and then launch individual backup jobs sequentially for that captured list.
+5. A backup schedule can target one VM or all VMs on the selected server. All-VM backup schedules capture the VM inventory once at the start of the schedule run and then launch individual backup jobs sequentially for that captured list.
+6. A restore schedule can target one XML, the latest complete XML for one VM, or the latest complete XML for every VM in the selected storage. All-latest restore schedules resolve the latest complete XML per VM at the start of the schedule run and then launch individual restore jobs sequentially, using the configured existing VM handling for each job.
 
 ### Restore
 
