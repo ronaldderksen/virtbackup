@@ -25,6 +25,7 @@ part 'manage_tab.dart';
 part 'backup_tab.dart';
 part 'restore_tab.dart';
 part 'schedules_tab.dart';
+part 'queue_tab.dart';
 part 'ssh_service.dart';
 part 'service.dart';
 
@@ -155,11 +156,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   int? _backupEtaSeconds;
   int _backupPhysicalRemainingBytes = 0;
   int _backupPhysicalTotalBytes = 0;
-  double _backupPhysicalProgressPercent = 0;
   int _backupTotalBytes = 0;
   int _backupSanityCheckBytesTransferred = 0;
   double _backupSanityCheckSpeedBytesPerSec = 0;
   List<AgentJobStatus> _latestAgentJobs = <AgentJobStatus>[];
+  List<ScheduleQueueEntry> _latestScheduleQueue = <ScheduleQueueEntry>[];
   final AgentApiClient _agentApiClient = AgentApiClient();
   AppSettings _agentSettings = AppSettings.empty();
   bool _agentReachable = true;
@@ -176,6 +177,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   Timer? _agentReconnectTimer;
   bool _isLoadingAgentSettings = false;
   bool _isLoadingAccountSession = false;
+  bool _isLoadingScheduleQueue = false;
   bool _isSigningInAccount = false;
   bool _isSigningOutAccount = false;
   String? _accountEmail;
@@ -1197,6 +1199,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     try {
       final jobs = await _agentApiClient.fetchJobs();
       _latestAgentJobs = jobs;
+      await _syncScheduleQueue(updateUi: false);
       if (mounted) {
         _updateUi(() {});
       }
@@ -1227,6 +1230,19 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     } catch (error, stackTrace) {
       _logError('Failed to sync running jobs.', error, stackTrace);
       _notifyAgentErrorOnce('Unable to load jobs from agent: $error');
+    }
+  }
+
+  Future<void> _syncScheduleQueue({bool updateUi = true}) async {
+    try {
+      final queue = await _agentApiClient.fetchScheduleQueue();
+      _latestScheduleQueue = queue;
+      if (mounted && updateUi) {
+        _updateUi(() {});
+      }
+    } catch (error, stackTrace) {
+      _logError('Failed to sync schedule queue.', error, stackTrace);
+      _notifyAgentErrorOnce('Unable to load schedule queue from agent: $error');
     }
   }
 
@@ -1296,6 +1312,9 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     if (index == 4 && _selectedBackupStorageId != null) {
       await _loadRestoreEntries();
     }
+    if (index == 5) {
+      await _refreshScheduleQueue();
+    }
   }
 
   String _menuTitle(int index) {
@@ -1310,6 +1329,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         return 'Restore';
       case 4:
         return 'Schedules';
+      case 5:
+        return 'Queue';
       default:
         return 'Settings';
     }
@@ -1327,6 +1348,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         return 'Restore a VM from a backup.';
       case 4:
         return 'Schedule recurring backup and restore jobs.';
+      case 5:
+        return 'View schedule runs waiting for active jobs to finish.';
       default:
         return 'Configure servers and storage for backups.';
     }
@@ -1372,6 +1395,53 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     return '$current/$total';
   }
 
+  String _formatProgressSizeWithPercent(int bytes, int totalBytes) {
+    final value = _formatTotalSizeWithTotal(bytes, totalBytes);
+    if (totalBytes <= 0) {
+      return value;
+    }
+    final percent = ((bytes / totalBytes) * 100).clamp(0, 100).toStringAsFixed(1);
+    return '$value • $percent%';
+  }
+
+  String _formatBackupStatusLine(AgentJobStatus status) {
+    return _formatJobStatusLine(status);
+  }
+
+  String _formatRestoreStatusLine(AgentJobStatus status) {
+    return _formatJobStatusLine(status);
+  }
+
+  String _formatJobStatusLine(AgentJobStatus status) {
+    final parts = <String>[];
+    final vmName = status.vmName.trim();
+    if (vmName.isNotEmpty) {
+      parts.add('VM: $vmName');
+    }
+    final storageName = _storageNameForId(status.storageId).trim();
+    if (storageName.isNotEmpty) {
+      parts.add('Storage: $storageName');
+    }
+    final message = status.message.trim();
+    if (message.isNotEmpty) {
+      parts.add(message);
+    }
+    return parts.join(' • ');
+  }
+
+  String _storageNameForId(String id) {
+    final normalized = id.trim();
+    if (normalized.isEmpty) {
+      return '';
+    }
+    for (final storage in _agentSettings.storage) {
+      if (storage.id == normalized) {
+        return storage.name;
+      }
+    }
+    return normalized;
+  }
+
   String _fullCheckUiText(String text) {
     return text.replaceAll('Sanity check', 'Full check').replaceAll('Sanity Check', 'Full Check');
   }
@@ -1407,7 +1477,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
     setState(() {
       _isBackupRunning = status.state == AgentJobState.running;
-      _backupStatusMessage = status.message;
+      _backupStatusMessage = _formatBackupStatusLine(status);
       _backupCompletedDisks = status.completedUnits;
       _backupTotalDisks = status.totalUnits;
       _backupBytesTransferred = status.bytesTransferred;
@@ -1417,7 +1487,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       _backupEtaSeconds = status.etaSeconds;
       _backupPhysicalRemainingBytes = status.physicalRemainingBytes;
       _backupPhysicalTotalBytes = status.physicalTotalBytes;
-      _backupPhysicalProgressPercent = status.physicalProgressPercent;
       _backupTotalBytes = status.totalBytes;
       _backupSanityCheckBytesTransferred = status.sanityBytesTransferred;
       _backupSanityCheckSpeedBytesPerSec = status.sanitySpeedBytesPerSec;
@@ -1517,7 +1586,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
     setState(() {
       _isRestoring = status.state == AgentJobState.running;
-      _restoreStatusMessage = status.message;
+      _restoreStatusMessage = _formatRestoreStatusLine(status);
       _restoreTotalBytes = status.totalUnits;
       _restoreBytesTransferred = status.bytesTransferred;
       _restoreSpeedBytesPerSec = status.speedBytesPerSec;
@@ -3102,6 +3171,16 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                       _buildRailItem(index: 3, icon: Icons.restore_outlined, selectedIcon: Icons.restore, label: 'Restore', colorScheme: colorScheme, railTheme: railTheme, enabled: true),
                       const SizedBox(height: 8),
                       _buildRailItem(index: 4, icon: Icons.event_repeat_outlined, selectedIcon: Icons.event_repeat, label: 'Schedules', colorScheme: colorScheme, railTheme: railTheme, enabled: true),
+                      const SizedBox(height: 8),
+                      _buildRailItem(
+                        index: 5,
+                        icon: Icons.pending_actions_outlined,
+                        selectedIcon: Icons.pending_actions,
+                        label: 'Queue',
+                        colorScheme: colorScheme,
+                        railTheme: railTheme,
+                        enabled: true,
+                      ),
                       const Spacer(),
                       _buildRailItem(
                         index: 0,
@@ -3179,6 +3258,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                 if (_selectedMenuIndex == 2) ..._buildBackupSection(colorScheme),
                                 if (_selectedMenuIndex == 3) ..._buildRestoreSection(colorScheme),
                                 if (_selectedMenuIndex == 4) ..._buildScheduleSection(colorScheme),
+                                if (_selectedMenuIndex == 5) ..._buildQueueSection(colorScheme),
                               ],
                             ),
                           ),
@@ -3227,11 +3307,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  'Progress: ${_formatTotalSizeWithTotal(_backupBytesTransferred, _backupTotalBytes)} • Avg: ${_formatSpeed(_backupAverageSpeedBytesPerSec)} • ETA: ${_formatEta(_backupEtaSeconds)}',
+                                  'Progress: ${_formatProgressSizeWithPercent(_backupBytesTransferred, _backupTotalBytes)} • Avg: ${_formatSpeed(_backupAverageSpeedBytesPerSec)} • ETA: ${_formatEta(_backupEtaSeconds)}',
                                   style: Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
                                 ),
                                 Text(
-                                  'Flush: ${_backupPhysicalProgressPercent.toStringAsFixed(1)}% (${_formatTotalSizeWithTotal(_backupPhysicalBytesTransferred, _backupPhysicalTotalBytes)}) • Speed: ${_formatSpeed(_backupPhysicalSpeedBytesPerSec)} • Remaining: ${_formatTotalSize(_backupPhysicalRemainingBytes)}',
+                                  'Written: ${_formatTotalSizeWithTotal(_backupPhysicalBytesTransferred, _backupPhysicalTotalBytes)} • Remaining: ${_formatTotalSize(_backupPhysicalRemainingBytes)} • Speed: ${_formatSpeed(_backupPhysicalSpeedBytesPerSec)}',
                                   style: Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
                                 ),
                               ],

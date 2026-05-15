@@ -322,6 +322,44 @@ When the schedule has `waitForRunningJobs: true` and another job is running, the
 {"jobId":"","queued":true}
 ```
 
+### List schedule queue
+
+- `GET /schedule-queue`
+
+Returns running schedule jobs and schedule runs that are waiting for running jobs to finish.
+
+Response:
+```json
+[
+  {
+    "scheduleId":"schedule_1739440000000",
+    "scheduleName":"Backup nuc04 to Google Drive",
+    "type":"backup",
+    "serverId":"server_1",
+    "serverName":"nuc04",
+    "storageId":"gdrive",
+    "storageName":"Google Drive",
+    "runKey":"schedule_1739440000000:manual:1739440000000000",
+    "status":"waiting",
+    "manual":true,
+    "queuedAt":"2026-05-15T11:00:00.000Z",
+    "position":1,
+    "jobId":""
+  }
+]
+```
+
+### Remove waiting schedule run
+
+- `POST /schedule-queue/{scheduleId}/remove`
+
+Removes a waiting schedule run from the queue. Running jobs must be canceled through `POST /jobs/{jobId}/cancel`.
+
+Response:
+```json
+{"success":true}
+```
+
 The GUI schedules list includes quick filters for server, backup/restore type, server-VM combination, and storage. These filters are local UI state and are not stored in `agent.yaml`.
 Rows for schedules with a running job are highlighted in the GUI. The agent includes `scheduleId` in job status responses for jobs started from a schedule.
 
@@ -610,7 +648,7 @@ Response:
 
 Response (array):
 ```json
-[{"id":"<job-id>","type":"backup","state":"running","message":"","totalUnits":0,"completedUnits":0,"bytesTransferred":0,"speedBytesPerSec":0}]
+[{"id":"<job-id>","type":"backup","state":"running","message":"","vmName":"vm01","storageId":"gdrive","totalUnits":0,"completedUnits":0,"bytesTransferred":0,"speedBytesPerSec":0}]
 ```
 
 ### Get job status
@@ -624,6 +662,8 @@ Response (subset):
   "type":"backup|restore|sanity",
   "state":"running|success|failure|canceled",
   "message":"...",
+  "vmName":"vm01",
+  "storageId":"gdrive",
   "totalUnits":0,
   "completedUnits":0,
   "bytesTransferred":0,

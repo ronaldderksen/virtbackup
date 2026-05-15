@@ -329,6 +329,8 @@ class AgentJobStatus {
     this.writerInFlightBytes = 0,
     this.driverBufferedBytes = 0,
     this.scheduleId = '',
+    this.vmName = '',
+    this.storageId = '',
   });
 
   final String id;
@@ -354,6 +356,8 @@ class AgentJobStatus {
   final int writerInFlightBytes;
   final int driverBufferedBytes;
   final String scheduleId;
+  final String vmName;
+  final String storageId;
 
   Map<String, dynamic> toMap() {
     return {
@@ -380,6 +384,8 @@ class AgentJobStatus {
       'writerInFlightBytes': writerInFlightBytes,
       'driverBufferedBytes': driverBufferedBytes,
       'scheduleId': scheduleId,
+      'vmName': vmName,
+      'storageId': storageId,
     };
   }
 
@@ -410,6 +416,8 @@ class AgentJobStatus {
       writerInFlightBytes: (json['writerInFlightBytes'] as num?)?.toInt() ?? 0,
       driverBufferedBytes: (json['driverBufferedBytes'] as num?)?.toInt() ?? 0,
       scheduleId: (json['scheduleId'] ?? '').toString(),
+      vmName: (json['vmName'] ?? '').toString(),
+      storageId: (json['storageId'] ?? '').toString(),
     );
   }
 
@@ -435,6 +443,8 @@ class AgentJobStatus {
     int? writerInFlightBytes,
     int? driverBufferedBytes,
     String? scheduleId,
+    String? vmName,
+    String? storageId,
   }) {
     return AgentJobStatus(
       id: id,
@@ -460,6 +470,8 @@ class AgentJobStatus {
       writerInFlightBytes: writerInFlightBytes ?? this.writerInFlightBytes,
       driverBufferedBytes: driverBufferedBytes ?? this.driverBufferedBytes,
       scheduleId: scheduleId ?? this.scheduleId,
+      vmName: vmName ?? this.vmName,
+      storageId: storageId ?? this.storageId,
     );
   }
 }
@@ -476,6 +488,74 @@ class AgentJobStart {
 
   factory AgentJobStart.fromMap(Map<String, dynamic> json) {
     return AgentJobStart(jobId: (json['jobId'] ?? '').toString(), queued: json['queued'] == true);
+  }
+}
+
+class ScheduleQueueEntry {
+  ScheduleQueueEntry({
+    required this.scheduleId,
+    required this.scheduleName,
+    required this.type,
+    required this.serverId,
+    required this.serverName,
+    required this.storageId,
+    required this.storageName,
+    required this.runKey,
+    required this.status,
+    required this.manual,
+    required this.queuedAt,
+    required this.position,
+    this.jobId = '',
+  });
+
+  final String scheduleId;
+  final String scheduleName;
+  final String type;
+  final String serverId;
+  final String serverName;
+  final String storageId;
+  final String storageName;
+  final String runKey;
+  final String status;
+  final bool manual;
+  final DateTime? queuedAt;
+  final int position;
+  final String jobId;
+
+  Map<String, dynamic> toMap() {
+    return {
+      'scheduleId': scheduleId,
+      'scheduleName': scheduleName,
+      'type': type,
+      'serverId': serverId,
+      'serverName': serverName,
+      'storageId': storageId,
+      'storageName': storageName,
+      'runKey': runKey,
+      'status': status,
+      'manual': manual,
+      'queuedAt': queuedAt?.toUtc().toIso8601String(),
+      'position': position,
+      'jobId': jobId,
+    };
+  }
+
+  factory ScheduleQueueEntry.fromMap(Map<String, dynamic> json) {
+    return ScheduleQueueEntry(
+      scheduleId: (json['scheduleId'] ?? '').toString(),
+      scheduleName: (json['scheduleName'] ?? '').toString(),
+      type: (json['type'] ?? '').toString(),
+      serverId: (json['serverId'] ?? '').toString(),
+      serverName: (json['serverName'] ?? '').toString(),
+      storageId: (json['storageId'] ?? '').toString(),
+      storageName: (json['storageName'] ?? '').toString(),
+      runKey: (json['runKey'] ?? '').toString(),
+      status: (json['status'] ?? '').toString(),
+      manual: json['manual'] == true,
+      queuedAt: DateTime.tryParse((json['queuedAt'] ?? '').toString()),
+      position: (json['position'] as num?)?.toInt() ?? 0,
+      jobId: (json['jobId'] ?? '').toString(),
+    );
   }
 }
 

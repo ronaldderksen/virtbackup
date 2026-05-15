@@ -234,20 +234,20 @@ class AgentHttpServer {
     return parts.length == 3 && parts[1] == 'manual';
   }
 
-  bool _scheduleRunKeyIsRecent(String key, DateTime now) {
+  DateTime? _scheduleRunQueuedAt(String key) {
     final parts = key.split(':');
     if (parts.length == 3 && parts[1] == 'manual') {
       final micros = int.tryParse(parts[2]);
-      if (micros == null) {
-        return false;
-      }
-      final parsed = DateTime.fromMicrosecondsSinceEpoch(micros);
-      return now.difference(parsed).inDays < 2;
+      return micros == null ? null : DateTime.fromMicrosecondsSinceEpoch(micros);
     }
     if (parts.length < 2) {
-      return false;
+      return null;
     }
-    final parsed = DateTime.tryParse(parts.sublist(1).join(':').replaceFirst(' ', 'T'));
+    return DateTime.tryParse(parts.sublist(1).join(':').replaceFirst(' ', 'T'));
+  }
+
+  bool _scheduleRunKeyIsRecent(String key, DateTime now) {
+    final parsed = _scheduleRunQueuedAt(key);
     if (parsed == null) {
       return false;
     }
@@ -298,6 +298,100 @@ class AgentHttpServer {
       }
     }
     return null;
+  }
+
+  List<ScheduleQueueEntry> _scheduleQueueEntries() {
+    final entries = <ScheduleQueueEntry>[];
+    var position = 1;
+    final runningScheduleIds = <String>{};
+    final runningJobs = _jobs.values.where((job) => job.scheduleId.trim().isNotEmpty && job.state == AgentJobState.running).toList()
+      ..sort((a, b) {
+        final aControl = _jobControls[a.id];
+        final bControl = _jobControls[b.id];
+        final aStartedAt = aControl?.startedAt;
+        final bStartedAt = bControl?.startedAt;
+        if (aStartedAt == null && bStartedAt == null) {
+          return a.id.compareTo(b.id);
+        }
+        if (aStartedAt == null) {
+          return 1;
+        }
+        if (bStartedAt == null) {
+          return -1;
+        }
+        return aStartedAt.compareTo(bStartedAt);
+      });
+    for (final job in runningJobs) {
+      final schedule = _scheduleById(job.scheduleId);
+      if (schedule == null) {
+        continue;
+      }
+      runningScheduleIds.add(schedule.id);
+      final server = _serverById(schedule.serverId);
+      final storage = _resolveStorageById(schedule.storageId);
+      entries.add(
+        ScheduleQueueEntry(
+          scheduleId: schedule.id,
+          scheduleName: schedule.name,
+          type: schedule.type.name,
+          serverId: schedule.serverId,
+          serverName: server?.name ?? '',
+          storageId: schedule.storageId,
+          storageName: storage?.storage.name ?? '',
+          runKey: _jobControls[job.id]?.scheduleRunId ?? '',
+          status: 'running',
+          manual: _scheduleRunKeyIsManual(_jobControls[job.id]?.scheduleRunId ?? ''),
+          queuedAt: _jobControls[job.id]?.startedAt,
+          position: position,
+          jobId: job.id,
+        ),
+      );
+      position += 1;
+    }
+    final waitingEntries = Map<String, String>.from(_waitingScheduleRuns).entries.toList()
+      ..sort((a, b) {
+        final aQueuedAt = _scheduleRunQueuedAt(a.value);
+        final bQueuedAt = _scheduleRunQueuedAt(b.value);
+        if (aQueuedAt == null && bQueuedAt == null) {
+          return a.key.compareTo(b.key);
+        }
+        if (aQueuedAt == null) {
+          return 1;
+        }
+        if (bQueuedAt == null) {
+          return -1;
+        }
+        return aQueuedAt.compareTo(bQueuedAt);
+      });
+    for (final entry in waitingEntries) {
+      final schedule = _scheduleById(entry.key);
+      if (schedule == null) {
+        continue;
+      }
+      if (runningScheduleIds.contains(schedule.id)) {
+        continue;
+      }
+      final server = _serverById(schedule.serverId);
+      final storage = _resolveStorageById(schedule.storageId);
+      entries.add(
+        ScheduleQueueEntry(
+          scheduleId: schedule.id,
+          scheduleName: schedule.name,
+          type: schedule.type.name,
+          serverId: schedule.serverId,
+          serverName: server?.name ?? '',
+          storageId: schedule.storageId,
+          storageName: storage?.storage.name ?? '',
+          runKey: entry.value,
+          status: 'waiting',
+          manual: _scheduleRunKeyIsManual(entry.value),
+          queuedAt: _scheduleRunQueuedAt(entry.value),
+          position: position,
+        ),
+      );
+      position += 1;
+    }
+    return entries;
   }
 
   String _startScheduledBackup(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage, {required String scheduleRunId}) {
@@ -1516,6 +1610,25 @@ class AgentHttpServer {
           storage: resolvedStorage,
           freshRequested: effectiveFreshRequested,
         );
+        return;
+      }
+      if (request.method == 'GET' && path == '/schedule-queue') {
+        _json(request, 200, _scheduleQueueEntries().map((entry) => entry.toMap()).toList());
+        return;
+      }
+      if (request.method == 'POST' && path.startsWith('/schedule-queue/') && path.endsWith('/remove')) {
+        final parts = path.split('/');
+        if (parts.length < 4) {
+          _json(request, 400, {'error': 'missing schedule id'});
+          return;
+        }
+        final scheduleId = Uri.decodeComponent(parts[2]);
+        final removed = _waitingScheduleRuns.remove(scheduleId) != null;
+        if (!removed) {
+          _json(request, 404, {'error': 'waiting schedule run not found'});
+          return;
+        }
+        _json(request, 200, {'success': true});
         return;
       }
       if (request.method == 'POST' && path.startsWith('/schedules/') && path.endsWith('/run')) {
@@ -2857,6 +2970,8 @@ class AgentHttpServer {
       physicalTotalBytes: 0,
       physicalProgressPercent: 0,
       scheduleId: scheduleId?.trim() ?? '',
+      vmName: vmName?.trim() ?? '',
+      storageId: storageId?.trim() ?? '',
     );
     _jobControls[jobId] = _JobControl(startedAt: DateTime.now(), vmName: vmName, storageId: storageId, scheduleRunId: normalizedScheduleRunId);
     return jobId;
@@ -2902,7 +3017,13 @@ class AgentHttpServer {
 
   void _updateJob(String jobId, AgentJobStatus status) {
     final previous = _jobs[jobId];
-    final next = previous != null && status.scheduleId.isEmpty && previous.scheduleId.isNotEmpty ? status.copyWith(scheduleId: previous.scheduleId) : status;
+    final next = previous == null
+        ? status
+        : status.copyWith(
+            scheduleId: status.scheduleId.isEmpty ? previous.scheduleId : status.scheduleId,
+            vmName: status.vmName.isEmpty ? previous.vmName : status.vmName,
+            storageId: status.storageId.isEmpty ? previous.storageId : status.storageId,
+          );
     _jobs[jobId] = next;
     if (next.state != AgentJobState.running) {
       final control = _jobControls[jobId];

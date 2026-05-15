@@ -354,8 +354,27 @@ class AgentApiClient {
     return decoded.whereType<Map>().map((item) => AgentJobStatus.fromMap(Map<String, dynamic>.from(item))).toList();
   }
 
+  Future<List<ScheduleQueueEntry>> fetchScheduleQueue() async {
+    final response = await _get('/schedule-queue');
+    if (response.statusCode != 200) {
+      throw 'Agent responded ${response.statusCode}';
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! List) {
+      return <ScheduleQueueEntry>[];
+    }
+    return decoded.whereType<Map>().map((item) => ScheduleQueueEntry.fromMap(Map<String, dynamic>.from(item))).toList();
+  }
+
   Future<void> cancelJob(String jobId) async {
     final response = await _post('/jobs/$jobId/cancel', {});
+    if (response.statusCode != 200) {
+      throw 'Agent responded ${response.statusCode}';
+    }
+  }
+
+  Future<void> removeQueuedScheduleRun(String scheduleId) async {
+    final response = await _post('/schedule-queue/${Uri.encodeComponent(scheduleId)}/remove', {});
     if (response.statusCode != 200) {
       throw 'Agent responded ${response.statusCode}';
     }
