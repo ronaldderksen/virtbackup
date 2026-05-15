@@ -47,15 +47,24 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                   itemBuilder: (context, index) {
                     final schedule = schedules[index];
                     final isRunning = _scheduleIsRunning(schedule);
+                    final isStarting = _scheduleIsStarting(schedule);
                     return ListTile(
                       contentPadding: EdgeInsets.zero,
-                      selected: isRunning,
+                      selected: isRunning || isStarting,
                       selectedTileColor: colorScheme.primaryContainer.withValues(alpha: 0.45),
-                      tileColor: isRunning ? colorScheme.primaryContainer.withValues(alpha: 0.45) : null,
+                      tileColor: isRunning || isStarting ? colorScheme.primaryContainer.withValues(alpha: 0.45) : null,
                       leading: Icon(schedule.type == ScheduledJobType.backup ? Icons.backup_outlined : Icons.restore_outlined),
                       title: Row(
                         children: [
                           Expanded(child: Text(schedule.name)),
+                          if (isStarting) ...[
+                            const SizedBox(width: 8),
+                            Chip(
+                              visualDensity: VisualDensity.compact,
+                              label: const Text('Starting'),
+                              avatar: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: colorScheme.onPrimaryContainer)),
+                            ),
+                          ],
                           if (isRunning) ...[
                             const SizedBox(width: 8),
                             Chip(
@@ -71,7 +80,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          TextButton.icon(onPressed: () => _runScheduleNow(schedule), icon: const Icon(Icons.play_arrow), label: const Text('Run')),
+                          TextButton.icon(onPressed: isStarting || isRunning ? null : () => _runScheduleNow(schedule), icon: const Icon(Icons.play_arrow), label: const Text('Run')),
                           Switch(value: schedule.enabled, onChanged: (value) => _toggleSchedule(schedule, value)),
                           IconButton(
                             tooltip: 'Edit',
@@ -93,6 +102,10 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
 
   bool _scheduleIsRunning(ScheduledJob schedule) {
     return _latestAgentJobs.any((job) => job.scheduleId == schedule.id && job.state == AgentJobState.running);
+  }
+
+  bool _scheduleIsStarting(ScheduledJob schedule) {
+    return _startingScheduleIds.contains(schedule.id);
   }
 
   int _compareSchedulesForList(ScheduledJob a, ScheduledJob b) {
@@ -354,6 +367,12 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
   }
 
   Future<void> _runScheduleNow(ScheduledJob schedule) async {
+    if (_startingScheduleIds.contains(schedule.id)) {
+      return;
+    }
+    _updateUi(() {
+      _startingScheduleIds.add(schedule.id);
+    });
     try {
       final start = await _agentApiClient.runSchedule(schedule.id);
       if (start.queued) {
@@ -365,6 +384,12 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
     } catch (error, stackTrace) {
       _logError('Schedule run failed.', error, stackTrace);
       _showSnackBarError('Schedule run failed: $error');
+    } finally {
+      if (mounted) {
+        _updateUi(() {
+          _startingScheduleIds.remove(schedule.id);
+        });
+      }
     }
   }
 

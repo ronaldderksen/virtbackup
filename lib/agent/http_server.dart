@@ -3072,7 +3072,27 @@ class AgentHttpServer {
     control?.canceled = true;
     control?.backupAgent?.cancel();
     control?.workerSendPort?.send({'type': 'cancel'});
-    _updateJob(jobId, job.copyWith(message: 'Canceling...'));
+    _updateJob(jobId, job.copyWith(message: 'Canceling. Waiting for active storage operation to stop...', speedBytesPerSec: 0, physicalSpeedBytesPerSec: 0, sanitySpeedBytesPerSec: 0));
+    if (job.type == AgentJobType.restore) {
+      unawaited(_forceStopRestoreWorkerAfterCancel(jobId));
+    }
+  }
+
+  Future<void> _forceStopRestoreWorkerAfterCancel(String jobId) async {
+    await Future<void>.delayed(const Duration(seconds: 10));
+    final control = _jobControls[jobId];
+    final job = _jobs[jobId];
+    if (control == null || job == null || !control.canceled || job.state != AgentJobState.running) {
+      return;
+    }
+    _hostLog('Restore job $jobId did not stop after cancel request; killing worker isolate.');
+    control.workerReceivePort?.close();
+    control.workerReceivePort = null;
+    control.workerSendPort = null;
+    control.workerIsolate?.kill(priority: Isolate.immediate);
+    control.workerIsolate = null;
+    _updateJob(jobId, job.copyWith(state: AgentJobState.canceled, message: 'Canceled', speedBytesPerSec: 0, physicalSpeedBytesPerSec: 0, sanitySpeedBytesPerSec: 0));
+    _notifyJobCompletion(jobId, type: AgentJobType.restore, state: AgentJobState.canceled, message: 'Canceled', sizeBytes: job.totalBytes > 0 ? job.totalBytes : null);
   }
 
   bool _isJobCanceled(String jobId) {
@@ -3882,6 +3902,9 @@ class AgentHttpServer {
       }
       if (type == 'status') {
         final status = AgentJobStatus.fromMap(Map<String, dynamic>.from(payload['status'] as Map));
+        if (control.canceled) {
+          return;
+        }
         _updateJob(jobId, status);
         return;
       }
@@ -3896,9 +3919,11 @@ class AgentHttpServer {
       }
       if (type == 'result') {
         final status = AgentJobStatus.fromMap(Map<String, dynamic>.from(payload['status'] as Map));
-        _updateJob(jobId, status);
-        final sizeBytes = status.totalBytes > 0 ? status.totalBytes : null;
-        _notifyJobCompletion(jobId, type: AgentJobType.restore, state: status.state, message: status.message, sizeBytes: sizeBytes);
+        final current = _jobs[jobId];
+        final next = control.canceled ? status.copyWith(state: AgentJobState.canceled, message: 'Canceled', speedBytesPerSec: 0) : status;
+        _updateJob(jobId, next);
+        final sizeBytes = next.totalBytes > 0 ? next.totalBytes : (current != null && current.totalBytes > 0 ? current.totalBytes : null);
+        _notifyJobCompletion(jobId, type: AgentJobType.restore, state: next.state, message: next.message, sizeBytes: sizeBytes);
         workerReceive.close();
         control.workerReceivePort = null;
         control.workerSendPort = null;

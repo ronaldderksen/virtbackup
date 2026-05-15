@@ -475,6 +475,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           uploadPath,
           blobStream,
           onBytes: (bytes) {
+            ensureNotCanceled();
             bytesTransferred += bytes;
             final speed = speedTicker.tick(bytes);
             sendStatus(
@@ -495,6 +496,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
               ),
             );
           },
+          isCanceled: () => canceled,
         );
         if (uploadedSha256 != target.diskSha256) {
           restoreWarnings += 1;
@@ -594,7 +596,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         ),
       );
     } catch (error, stackTrace) {
-      final isCanceled = error is _Canceled;
+      final isCanceled = error is _Canceled || canceled;
       if (!isCanceled) {
         LogWriter.logAgentSync(level: 'error', message: 'Restore failed: $error');
         if (!_isExpectedRestoreFailure(error)) {

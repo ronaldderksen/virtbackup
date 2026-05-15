@@ -114,6 +114,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _isDeletingRestoreEntry = false;
   bool _isPreparingRestore = false;
   bool _isRestoring = false;
+  bool _restoreCanceling = false;
   bool _isSanityChecking = false;
   bool _isSendingEmailTest = false;
   bool _isSendingNtfymeTest = false;
@@ -147,6 +148,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   int _sanityCheckedBlocks = 0;
   int _sanityTotalBlocks = 0;
   String _backupStatusMessage = '';
+  bool _backupCanceling = false;
   int _backupCompletedDisks = 0;
   int _backupTotalDisks = 0;
   int _backupBytesTransferred = 0;
@@ -161,6 +163,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   double _backupSanityCheckSpeedBytesPerSec = 0;
   List<AgentJobStatus> _latestAgentJobs = <AgentJobStatus>[];
   List<ScheduleQueueEntry> _latestScheduleQueue = <ScheduleQueueEntry>[];
+  final Set<String> _startingScheduleIds = <String>{};
   final AgentApiClient _agentApiClient = AgentApiClient();
   AppSettings _agentSettings = AppSettings.empty();
   bool _agentReachable = true;
@@ -1478,6 +1481,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     setState(() {
       _isBackupRunning = status.state == AgentJobState.running;
       _backupStatusMessage = _formatBackupStatusLine(status);
+      _backupCanceling = status.message.toLowerCase().startsWith('canceling');
       _backupCompletedDisks = status.completedUnits;
       _backupTotalDisks = status.totalUnits;
       _backupBytesTransferred = status.bytesTransferred;
@@ -1587,6 +1591,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     setState(() {
       _isRestoring = status.state == AgentJobState.running;
       _restoreStatusMessage = _formatRestoreStatusLine(status);
+      _restoreCanceling = status.message.toLowerCase().startsWith('canceling');
       _restoreTotalBytes = status.totalUnits;
       _restoreBytesTransferred = status.bytesTransferred;
       _restoreSpeedBytesPerSec = status.speedBytesPerSec;
@@ -3288,7 +3293,9 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                           ClipRRect(
                             borderRadius: BorderRadius.circular(6),
                             child: LinearProgressIndicator(
-                              value: (_backupSanityCheckBytesTransferred > 0 || _backupSanityCheckSpeedBytesPerSec > 0)
+                              value: _backupCanceling
+                                  ? null
+                                  : (_backupSanityCheckBytesTransferred > 0 || _backupSanityCheckSpeedBytesPerSec > 0)
                                   ? (_backupTotalBytes > 0 ? (_backupSanityCheckBytesTransferred / _backupTotalBytes).clamp(0, 1).toDouble() : null)
                                   : (_backupTotalBytes > 0
                                         ? (_backupBytesTransferred / _backupTotalBytes).clamp(0, 1).toDouble()
@@ -3299,10 +3306,15 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                           Row(
                             children: [
                               Expanded(child: Text(_backupStatusMessage, style: Theme.of(context).textTheme.bodyMedium)),
-                              TextButton.icon(onPressed: _backupJobId == null ? null : _cancelBackupJob, icon: const Icon(Icons.cancel_outlined), label: const Text('Cancel')),
+                              TextButton.icon(onPressed: _backupJobId == null || _backupCanceling ? null : _cancelBackupJob, icon: const Icon(Icons.cancel_outlined), label: const Text('Cancel')),
                             ],
                           ),
-                          if (_backupSanityCheckBytesTransferred <= 0 && _backupSanityCheckSpeedBytesPerSec <= 0)
+                          if (_backupCanceling)
+                            Text(
+                              'Waiting for the active storage request to return before the job can close.',
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
+                            ),
+                          if (!_backupCanceling && _backupSanityCheckBytesTransferred <= 0 && _backupSanityCheckSpeedBytesPerSec <= 0)
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -3316,7 +3328,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                 ),
                               ],
                             ),
-                          if (_backupSanityCheckBytesTransferred > 0 || _backupSanityCheckSpeedBytesPerSec > 0)
+                          if (!_backupCanceling && (_backupSanityCheckBytesTransferred > 0 || _backupSanityCheckSpeedBytesPerSec > 0))
                             Text(
                               'Speed: ${_formatSpeed(_backupSanityCheckSpeedBytesPerSec)} • Total: ${_formatTotalSizeWithTotal(_backupSanityCheckBytesTransferred, _backupTotalBytes)}',
                               style: Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
@@ -3345,19 +3357,25 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                         children: [
                           ClipRRect(
                             borderRadius: BorderRadius.circular(6),
-                            child: LinearProgressIndicator(value: _restoreTotalBytes > 0 ? (_restoreBytesTransferred / _restoreTotalBytes).clamp(0, 1).toDouble() : null),
+                            child: LinearProgressIndicator(value: _restoreCanceling ? null : (_restoreTotalBytes > 0 ? (_restoreBytesTransferred / _restoreTotalBytes).clamp(0, 1).toDouble() : null)),
                           ),
                           const SizedBox(height: 8),
                           Row(
                             children: [
                               Expanded(child: Text(_restoreStatusMessage, style: Theme.of(context).textTheme.bodyMedium)),
-                              TextButton.icon(onPressed: _restoreJobId == null ? null : _cancelRestoreJob, icon: const Icon(Icons.cancel_outlined), label: const Text('Cancel')),
+                              TextButton.icon(onPressed: _restoreJobId == null || _restoreCanceling ? null : _cancelRestoreJob, icon: const Icon(Icons.cancel_outlined), label: const Text('Cancel')),
                             ],
                           ),
-                          Text(
-                            'Speed: ${_formatSpeed(_restoreSpeedBytesPerSec)} • Total: ${_formatTotalSizeWithTotal(_restoreBytesTransferred, _restoreTotalBytes)}',
-                            style: Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
-                          ),
+                          if (_restoreCanceling)
+                            Text(
+                              'Waiting for the active storage request to return before the job can close.',
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
+                            )
+                          else
+                            Text(
+                              'Speed: ${_formatSpeed(_restoreSpeedBytesPerSec)} • Total: ${_formatTotalSizeWithTotal(_restoreBytesTransferred, _restoreTotalBytes)}',
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+                            ),
                         ],
                       ),
                     ),

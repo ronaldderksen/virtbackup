@@ -269,8 +269,8 @@ class BackupAgentHost {
     await _uploadLocalFileViaSftp(server, localPath, remotePath, onBytes: onBytes);
   }
 
-  Future<String> uploadRemoteStream(ServerConfig server, String remotePath, Stream<List<int>> stream, {void Function(int bytes)? onBytes}) async {
-    return _uploadRemoteStreamViaSftp(server, remotePath, stream, onBytes: onBytes);
+  Future<String> uploadRemoteStream(ServerConfig server, String remotePath, Stream<List<int>> stream, {void Function(int bytes)? onBytes, bool Function()? isCanceled}) async {
+    return _uploadRemoteStreamViaSftp(server, remotePath, stream, onBytes: onBytes, isCanceled: isCanceled);
   }
 
   Future<void> beginLargeTransferSession(ServerConfig server) async {
@@ -1289,7 +1289,7 @@ class BackupAgentHost {
     }
   }
 
-  Future<String> _uploadRemoteStreamViaSftp(ServerConfig server, String remotePath, Stream<List<int>> stream, {void Function(int bytes)? onBytes}) async {
+  Future<String> _uploadRemoteStreamViaSftp(ServerConfig server, String remotePath, Stream<List<int>> stream, {void Function(int bytes)? onBytes, bool Function()? isCanceled}) async {
     final nativeSession = _nativeSftpSessions[server.id];
     if (nativeSession == null || _nativeSftp == null) {
       throw StateError('Native SFTP upload session is required but unavailable for ${server.sshHost}.');
@@ -1306,6 +1306,9 @@ class BackupAgentHost {
     var pendingLength = 0;
 
     void writeChunk(Uint8List source, int start, int length) {
+      if (isCanceled?.call() == true) {
+        throw const _RemoteStreamUploadCanceled();
+      }
       if (length <= 0) {
         return;
       }
@@ -1338,6 +1341,9 @@ class BackupAgentHost {
 
     try {
       await for (final chunk in stream) {
+        if (isCanceled?.call() == true) {
+          throw const _RemoteStreamUploadCanceled();
+        }
         final current = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
         var offset = 0;
         if (pendingLength > 0) {
@@ -1383,6 +1389,10 @@ class _NativeSftpReadHandle {
 
   final Pointer<Void> file;
   bool inUse;
+}
+
+class _RemoteStreamUploadCanceled implements Exception {
+  const _RemoteStreamUploadCanceled();
 }
 
 class _NativeSftpReadLease {
