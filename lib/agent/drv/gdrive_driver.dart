@@ -29,6 +29,20 @@ class _PermanentGdriveConfigError implements Exception {
   String toString() => message;
 }
 
+class _DriveApiException implements Exception {
+  _DriveApiException({required this.action, required this.statusCode, required this.body, this.retryAfter});
+
+  final String action;
+  final int statusCode;
+  final String body;
+  final Duration? retryAfter;
+
+  bool get isTransient => statusCode == 429 || statusCode >= 500 || body.contains('userRateLimitExceeded') || body.contains('rateLimitExceeded');
+
+  @override
+  String toString() => 'Drive $action failed: $statusCode $body';
+}
+
 class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
   GdriveBackupDriver({required AppSettings settings, required Future<void> Function(AppSettings) persistSettings, Directory? settingsDir, void Function(String message)? logInfo})
     : _settings = settings,
@@ -310,7 +324,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       return;
     }
     final shardKey = hash.substring(0, 2);
-    final parentId = await _findFolderByPath(<String>[..._blobsPathPrefix(), shardKey]);
+    final parentId = _cachedFolderByPath(<String>[..._blobsPathPrefix(), shardKey]);
     if (parentId == null || parentId.isEmpty) {
       throw 'Blob shard folder not ready for $shardKey';
     }
@@ -512,6 +526,22 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return current;
   }
 
+  String? _cachedFolderByPath(List<String> parts) {
+    final rootId = _resolvedDriveRootId;
+    if (rootId == null || rootId.isEmpty) {
+      return null;
+    }
+    var current = rootId;
+    for (final part in parts) {
+      final cachedId = _folderCache['$current/$part'];
+      if (cachedId == null || cachedId.isEmpty) {
+        return null;
+      }
+      current = cachedId;
+    }
+    return current;
+  }
+
   Future<String> _ensureDriveRoot() async {
     final cachedRoot = _resolvedDriveRootId;
     if (cachedRoot != null && cachedRoot.isNotEmpty) {
@@ -616,12 +646,10 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         send: () => _client.post(uri, headers: _authHeaders(token)..['Content-Type'] = 'application/json', body: body),
       );
       if (response.statusCode >= 300) {
-        throw 'Drive folder create failed: ${response.statusCode} ${response.body}';
+        throw _driveApiException(action: 'folder create', response: response);
       }
       final decoded = jsonDecode(response.body);
-      final created = _DriveFileRef(id: decoded['id'].toString(), name: name, parentId: parentId);
-      final reconciled = await _findChildFolder(parentId, name);
-      return reconciled ?? created;
+      return _DriveFileRef(id: decoded['id'].toString(), name: name, parentId: parentId);
     });
   }
 
@@ -656,7 +684,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
           send: () => _client.get(uri, headers: _authHeaders(token)),
         );
         if (response.statusCode >= 300) {
-          throw 'Drive list failed: ${response.statusCode} ${response.body}';
+          throw _driveApiException(action: 'list', response: response);
         }
         return response;
       });
@@ -726,12 +754,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       stopwatch.stop();
       _logInfo('gdrive: uploadSimple durationMs=${stopwatch.elapsedMilliseconds} error=$error');
       _logInfo('gdrive: uploadSimple failed name=$name parent=$parentId bytes=${bytes.length} error=$error');
-      final traceText = stackTrace.toString();
-      if (traceText.trim().isEmpty) {
-        _logInfo(StackTrace.current.toString());
-      } else {
-        _logInfo(traceText);
-      }
+      await _logGdriveError('gdrive: uploadSimple failed name=$name parent=$parentId bytes=${bytes.length} durationMs=${stopwatch.elapsedMilliseconds} error=$error', stackTrace: stackTrace);
       rethrow;
     } finally {
       _inFlightUploads = max(0, _inFlightUploads - 1);
@@ -1084,32 +1107,87 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     var delaySeconds = 2;
     var attempt = 0;
     const maxRetries = 5;
+    const maxTransientRetries = 10;
     while (true) {
       try {
         return await action();
       } catch (error, stackTrace) {
         if (error is _PermanentGdriveConfigError) {
           _logInfo('gdrive: $label failed: $error');
+          await _logGdriveError('gdrive: $label failed: $error', stackTrace: stackTrace);
           rethrow;
         }
-        if (attempt >= maxRetries) {
+        final transient = error is _DriveApiException && error.isTransient;
+        final retryLimit = transient ? maxTransientRetries : maxRetries;
+        if (attempt >= retryLimit) {
           _logInfo('gdrive: $label failed after retry: $error');
           _logInfo(stackTrace.toString());
+          await _logGdriveError('gdrive: $label failed after retry: $error', stackTrace: stackTrace);
           throw 'gdrive $label failed after retry: $error';
         }
         attempt += 1;
         _logInfo('gdrive: $label failed: $error');
         _logInfo(stackTrace.toString());
         _logInfo('gdrive: $label retrying after error: $error');
+        await _logGdriveError('gdrive: $label failed: $error', stackTrace: stackTrace);
+        await _logGdriveWarning('gdrive: $label retrying after error: $error');
         if (onRetry != null) {
           onRetry();
         } else {
           _resetHttpClient();
         }
-        await Future.delayed(Duration(seconds: delaySeconds));
-        delaySeconds *= 2;
+        final retryAfter = error is _DriveApiException ? error.retryAfter : null;
+        final delay = retryAfter ?? Duration(seconds: delaySeconds);
+        await Future.delayed(delay);
+        if (retryAfter == null) {
+          delaySeconds = min(delaySeconds * 2, 300);
+        }
       }
     }
+  }
+
+  Future<void> _logGdriveError(String message, {StackTrace? stackTrace}) async {
+    await _logGdriveWithLogWriter(level: 'error', message: message, stackTrace: stackTrace);
+  }
+
+  Future<void> _logGdriveWarning(String message) async {
+    await _logGdriveWithLogWriter(level: 'warn', message: message);
+  }
+
+  Future<void> _logGdriveWithLogWriter({required String level, required String message, StackTrace? stackTrace}) async {
+    try {
+      await _configureAgentLogPath();
+      LogWriter.logAgentSync(level: level, message: 'driver=gdrive $message');
+      final traceText = stackTrace?.toString().trim() ?? '';
+      if (traceText.isNotEmpty) {
+        LogWriter.logAgentSync(level: level, message: 'driver=gdrive $traceText');
+      }
+    } catch (_) {}
+  }
+
+  _DriveApiException _driveApiException({required String action, required http.Response response}) {
+    return _DriveApiException(action: action, statusCode: response.statusCode, body: response.body, retryAfter: _parseRetryAfter(response.headers['retry-after']));
+  }
+
+  Duration? _parseRetryAfter(String? value) {
+    if (value == null || value.trim().isEmpty) {
+      return null;
+    }
+    final seconds = int.tryParse(value.trim());
+    if (seconds != null && seconds > 0) {
+      return Duration(seconds: seconds);
+    }
+    late final DateTime date;
+    try {
+      date = HttpDate.parse(value);
+    } on FormatException {
+      return null;
+    }
+    final delay = date.difference(DateTime.now().toUtc());
+    if (delay.isNegative || delay == Duration.zero) {
+      return null;
+    }
+    return delay;
   }
 
   Future<http.Response> _requestWithApiLog({required String action, required String method, required Uri uri, required Future<http.Response> Function() send, String? target, String? detail}) async {
@@ -1121,9 +1199,13 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       stopwatch.stop();
       await _appendApiLogLine('action=$action status=${response.statusCode} durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()}');
       return response;
-    } catch (error) {
+    } catch (error, stackTrace) {
       stopwatch.stop();
       await _appendApiLogLine('action=$action status=error durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()} error=$error');
+      await _logGdriveError(
+        'gdrive: api request failed action=$action durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()} error=$error',
+        stackTrace: stackTrace,
+      );
       rethrow;
     }
   }
