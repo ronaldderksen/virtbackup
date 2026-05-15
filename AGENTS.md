@@ -8,7 +8,7 @@
 - Gebruik nooit environment variabelen voor defaults.
 - Gebruik geen `if (driverId == ...)` checks; driver-specifieke opties lopen via `BackupDriverCapabilities` params.
 - Maak NOOIT fallbacks (defaults, alternatieve paden/waarden of stilzwijgende terugval) zonder expliciete toestemming van de gebruiker.
-- Commit-messages hebben een korte subjectregel; extra context alleen in losse body-regels wanneer nuttig.
+- Commit-messages hebben altijd een korte subjectregel, gevolgd door één lege regel en aaneengesloten `- ...` body-regels voor de concrete wijzigingen. Zet geen lege regels tussen bulletregels.
 - Draai na iedere change `dart analyze`.
 - Los alle `dart analyze` infos/warnings/errors op.
 - Houd de `doc/` directory actueel wanneer functionaliteit wijzigt of toegevoegd wordt.
