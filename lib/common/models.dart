@@ -328,6 +328,8 @@ class AgentJobStatus {
     this.writerQueuedBytes = 0,
     this.writerInFlightBytes = 0,
     this.driverBufferedBytes = 0,
+    this.presentUnits = 0,
+    this.missingUnits = 0,
     this.scheduleId = '',
     this.vmName = '',
     this.storageId = '',
@@ -355,6 +357,8 @@ class AgentJobStatus {
   final int writerQueuedBytes;
   final int writerInFlightBytes;
   final int driverBufferedBytes;
+  final int presentUnits;
+  final int missingUnits;
   final String scheduleId;
   final String vmName;
   final String storageId;
@@ -383,6 +387,8 @@ class AgentJobStatus {
       'writerQueuedBytes': writerQueuedBytes,
       'writerInFlightBytes': writerInFlightBytes,
       'driverBufferedBytes': driverBufferedBytes,
+      'presentUnits': presentUnits,
+      'missingUnits': missingUnits,
       'scheduleId': scheduleId,
       'vmName': vmName,
       'storageId': storageId,
@@ -415,6 +421,8 @@ class AgentJobStatus {
       writerQueuedBytes: (json['writerQueuedBytes'] as num?)?.toInt() ?? 0,
       writerInFlightBytes: (json['writerInFlightBytes'] as num?)?.toInt() ?? 0,
       driverBufferedBytes: (json['driverBufferedBytes'] as num?)?.toInt() ?? 0,
+      presentUnits: (json['presentUnits'] as num?)?.toInt() ?? 0,
+      missingUnits: (json['missingUnits'] as num?)?.toInt() ?? 0,
       scheduleId: (json['scheduleId'] ?? '').toString(),
       vmName: (json['vmName'] ?? '').toString(),
       storageId: (json['storageId'] ?? '').toString(),
@@ -442,6 +450,8 @@ class AgentJobStatus {
     int? writerQueuedBytes,
     int? writerInFlightBytes,
     int? driverBufferedBytes,
+    int? presentUnits,
+    int? missingUnits,
     String? scheduleId,
     String? vmName,
     String? storageId,
@@ -469,6 +479,8 @@ class AgentJobStatus {
       writerQueuedBytes: writerQueuedBytes ?? this.writerQueuedBytes,
       writerInFlightBytes: writerInFlightBytes ?? this.writerInFlightBytes,
       driverBufferedBytes: driverBufferedBytes ?? this.driverBufferedBytes,
+      presentUnits: presentUnits ?? this.presentUnits,
+      missingUnits: missingUnits ?? this.missingUnits,
       scheduleId: scheduleId ?? this.scheduleId,
       vmName: vmName ?? this.vmName,
       storageId: storageId ?? this.storageId,

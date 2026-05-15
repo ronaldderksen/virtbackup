@@ -32,6 +32,13 @@ void restoreWorkerMain(Map<String, dynamic> init) {
   mainPort.send({'type': _typeReady, 'sendPort': commandPort.sendPort});
 
   var canceled = false;
+  final activeDrivers = <BackupDriver>{};
+
+  void closeActiveDrivers() {
+    for (final driver in activeDrivers) {
+      unawaited(driver.closeConnections());
+    }
+  }
 
   void sendStatus(AgentJobStatus status) {
     mainPort.send({'type': _typeStatus, 'jobId': status.id, 'status': status.toMap()});
@@ -163,9 +170,11 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     LogWriter.configureSourceLevel(source: 'agent', level: settings.logLevel);
 
     final host = BackupAgentHost();
-    final missingTools = await host.missingRequiredRemoteTools(server);
-    if (missingTools.isNotEmpty) {
-      throw 'server is missing required tools: ${missingTools.join(', ')}';
+    if (!fullCheckOnly) {
+      final missingTools = await host.missingRequiredRemoteTools(server);
+      if (missingTools.isNotEmpty) {
+        throw 'server is missing required tools: ${missingTools.join(', ')}';
+      }
     }
 
     BackupDriver buildDriverForSettings(AppSettings driverSettings) {
@@ -186,7 +195,12 @@ void restoreWorkerMain(Map<String, dynamic> init) {
       return factory();
     }
 
-    final metadataDriver = buildDriverForSettings(settings.copyWith(blockSizeMB: 1));
+    BackupDriver trackDriver(BackupDriver driver) {
+      activeDrivers.add(driver);
+      return driver;
+    }
+
+    final metadataDriver = trackDriver(buildDriverForSettings(settings.copyWith(blockSizeMB: 1)));
     final blobDriversByBlockSizeMB = <int, BackupDriver>{};
     final localBlobDriversByBlockSizeMB = <int, BackupDriver>{};
     final filesystemPath = (useStoredBlobs || storeDownloadedBlobs) ? _resolveFilesystemStoragePath(settings) : '';
@@ -388,7 +402,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         final blobStream = _blobStream(
           blobDriversByBlockSizeMB.putIfAbsent(target.blockSizeMB, () {
             final driverSettings = settings.copyWith(blockSizeMB: target.blockSizeMB);
-            return buildDriverForSettings(driverSettings);
+            return trackDriver(buildDriverForSettings(driverSettings));
           }),
           target.blocks,
           target.blockSize,
@@ -396,7 +410,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           () => canceled,
           localBlobDriver: !(useStoredBlobs || storeDownloadedBlobs)
               ? null
-              : localBlobDriversByBlockSizeMB.putIfAbsent(target.blockSizeMB, () => FilesystemBackupDriver(filesystemPath, blockSizeMB: target.blockSizeMB)),
+              : localBlobDriversByBlockSizeMB.putIfAbsent(target.blockSizeMB, () => trackDriver(FilesystemBackupDriver(filesystemPath, blockSizeMB: target.blockSizeMB))),
           useStoredBlobs: useStoredBlobs,
           storeDownloadedBlobs: storeDownloadedBlobs,
           maxConcurrentDownloads: downloadConcurrency,
@@ -634,6 +648,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
       try {
         await metadataDriver.closeConnections();
       } catch (_) {}
+      activeDrivers.clear();
       if (largeTransferSessionStarted) {
         await host.endLargeTransferSession(server);
       }
@@ -644,10 +659,37 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     final payload = Map<String, dynamic>.from(message as Map);
     final type = payload['type']?.toString();
     if (type == _typeStart) {
-      await runRestore(payload);
+      await runZonedGuarded(
+        () async {
+          await runRestore(payload);
+        },
+        (error, _) {
+          final jobId = payload['jobId']?.toString() ?? '';
+          mainPort.send({
+            'type': _typeResult,
+            'jobId': jobId,
+            'status': AgentJobStatus(
+              id: jobId,
+              type: AgentJobType.restore,
+              state: AgentJobState.failure,
+              message: error.toString(),
+              totalUnits: 0,
+              completedUnits: 0,
+              bytesTransferred: 0,
+              speedBytesPerSec: 0,
+              physicalBytesTransferred: 0,
+              physicalSpeedBytesPerSec: 0,
+              totalBytes: 0,
+              sanityBytesTransferred: 0,
+              sanitySpeedBytesPerSec: 0,
+            ).toMap(),
+          });
+        },
+      );
       Isolate.exit();
     } else if (type == _typeCancel) {
       canceled = true;
+      closeActiveDrivers();
     }
   });
 }
@@ -1309,32 +1351,42 @@ Stream<List<int>> _blobStream(
       while (inFlight.length < maxConcurrent && nextIndex < blocks.length) {
         final index = nextIndex;
         debug.markScheduled(index);
-        inFlight[index] = startFetch(index).then((data) {
+        final future = startFetch(index).then((data) {
           debug.markReady(index);
           return data;
         });
+        unawaited(future.catchError((_) => const _BlockData.empty()));
+        inFlight[index] = future;
         nextIndex += 1;
       }
     }
 
-    schedule();
-    while (nextEmit < blocks.length) {
+    try {
       schedule();
-      debug.maybeLog(nextIndex: nextIndex, nextEmit: nextEmit, inFlight: inFlight.length);
-      final future = inFlight[nextEmit];
-      if (future == null) {
-        await Future<void>.delayed(const Duration(milliseconds: 1));
-        continue;
+      while (nextEmit < blocks.length) {
+        schedule();
+        debug.maybeLog(nextIndex: nextIndex, nextEmit: nextEmit, inFlight: inFlight.length);
+        final future = inFlight[nextEmit];
+        if (future == null) {
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+          continue;
+        }
+        final data = await future;
+        inFlight.remove(nextEmit);
+        debug.markInFlightDone(nextEmit);
+        debug.markEmitted(index: data.index, bytes: data.bytes.length);
+        if (data.bytes.isNotEmpty) {
+          yield data.bytes;
+          totalEmitted += data.bytes.length;
+        }
+        nextEmit += 1;
       }
-      final data = await future;
-      inFlight.remove(nextEmit);
-      debug.markInFlightDone(nextEmit);
-      debug.markEmitted(index: data.index, bytes: data.bytes.length);
-      if (data.bytes.isNotEmpty) {
-        yield data.bytes;
-        totalEmitted += data.bytes.length;
+    } finally {
+      for (final future in inFlight.values) {
+        try {
+          await future;
+        } catch (_) {}
       }
-      nextEmit += 1;
     }
     debug.maybeLog(nextIndex: nextIndex, nextEmit: nextEmit, inFlight: inFlight.length, force: true);
   } else {
@@ -1378,32 +1430,42 @@ Stream<List<int>> _blobStream(
       while (inFlight.length < maxConcurrent && nextIndex < blocks.length) {
         final index = nextIndex;
         debug.markScheduled(index);
-        inFlight[index] = startFetchLocal(index).then((data) {
+        final future = startFetchLocal(index).then((data) {
           debug.markReady(index);
           return data;
         });
+        unawaited(future.catchError((_) => const _BlockData.empty()));
+        inFlight[index] = future;
         nextIndex += 1;
       }
     }
 
-    schedule();
-    while (nextEmit < blocks.length) {
+    try {
       schedule();
-      debug.maybeLog(nextIndex: nextIndex, nextEmit: nextEmit, inFlight: inFlight.length);
-      final future = inFlight[nextEmit];
-      if (future == null) {
-        await Future<void>.delayed(const Duration(milliseconds: 1));
-        continue;
+      while (nextEmit < blocks.length) {
+        schedule();
+        debug.maybeLog(nextIndex: nextIndex, nextEmit: nextEmit, inFlight: inFlight.length);
+        final future = inFlight[nextEmit];
+        if (future == null) {
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+          continue;
+        }
+        final data = await future;
+        inFlight.remove(nextEmit);
+        debug.markInFlightDone(nextEmit);
+        debug.markEmitted(index: data.index, bytes: data.bytes.length);
+        if (data.bytes.isNotEmpty) {
+          yield data.bytes;
+          totalEmitted += data.bytes.length;
+        }
+        nextEmit += 1;
       }
-      final data = await future;
-      inFlight.remove(nextEmit);
-      debug.markInFlightDone(nextEmit);
-      debug.markEmitted(index: data.index, bytes: data.bytes.length);
-      if (data.bytes.isNotEmpty) {
-        yield data.bytes;
-        totalEmitted += data.bytes.length;
+    } finally {
+      for (final future in inFlight.values) {
+        try {
+          await future;
+        } catch (_) {}
       }
-      nextEmit += 1;
     }
     debug.maybeLog(nextIndex: nextIndex, nextEmit: nextEmit, inFlight: inFlight.length, force: true);
   }

@@ -133,24 +133,26 @@ class _WriterWorker {
             }
           }
         } catch (error, stackTrace) {
-          if (error is BackupWriteConflictMismatch) {
-            LogWriter.logAgentSync(level: 'error', message: 'worker=writer write conflict mismatch hash=${doneWrite.block.hash} error=$error');
-            Error.throwWithStackTrace(error, stackTrace);
+          if (!_canceled) {
+            if (error is BackupWriteConflictMismatch) {
+              LogWriter.logAgentSync(level: 'error', message: 'worker=writer write conflict mismatch hash=${doneWrite.block.hash} error=$error');
+              Error.throwWithStackTrace(error, stackTrace);
+            }
+            final retryAttempt = doneWrite.block.attempt + 1;
+            if (retryAttempt > maxRetryAttempts) {
+              LogWriter.logAgentSync(level: 'error', message: 'worker=writer write failed after retries hash=${doneWrite.block.hash} attempts=$retryAttempt error=$error');
+              Error.throwWithStackTrace(error, stackTrace);
+            }
+            doneWrite.block.attempt = retryAttempt;
+            doneWrite.block.retryAt = DateTime.now().add(_retryDelayForAttempt(doneWrite.block.attempt));
+            _requeue(doneWrite.block);
+            _registerRetryFailure();
+            LogWriter.logAgentSync(
+              level: 'warn',
+              message:
+                  'worker=writer write retry scheduled hash=${doneWrite.block.hash} attempt=${doneWrite.block.attempt}/$maxRetryAttempts retryAt=${doneWrite.block.retryAt.toIso8601String()} error=$error',
+            );
           }
-          final retryAttempt = doneWrite.block.attempt + 1;
-          if (retryAttempt > maxRetryAttempts) {
-            LogWriter.logAgentSync(level: 'error', message: 'worker=writer write failed after retries hash=${doneWrite.block.hash} attempts=$retryAttempt error=$error');
-            Error.throwWithStackTrace(error, stackTrace);
-          }
-          doneWrite.block.attempt = retryAttempt;
-          doneWrite.block.retryAt = DateTime.now().add(_retryDelayForAttempt(doneWrite.block.attempt));
-          _requeue(doneWrite.block);
-          _registerRetryFailure();
-          LogWriter.logAgentSync(
-            level: 'warn',
-            message:
-                'worker=writer write retry scheduled hash=${doneWrite.block.hash} attempt=${doneWrite.block.attempt}/$maxRetryAttempts retryAt=${doneWrite.block.retryAt.toIso8601String()} error=$error',
-          );
         }
         _inFlightBytes -= size;
         _reportMetrics();
@@ -192,6 +194,9 @@ class _WriterWorker {
         final passSize = _shardQueue.length;
         for (var i = 0; i < passSize; i += 1) {
           await _maybeYieldEventLoop();
+          if (_shardQueue.isEmpty) {
+            break;
+          }
           final shardKey = _shardQueue.removeAt(0);
           final bucket = _writeQueues[shardKey];
           if (bucket == null || bucket.isEmpty) {
@@ -232,6 +237,12 @@ class _WriterWorker {
           continue;
         }
         if (_queuedBlocks > 0) {
+          if (_shardQueue.isEmpty) {
+            _recountQueuedWrites();
+            if (_queuedBlocks <= 0) {
+              continue;
+            }
+          }
           _maybeLogLoopDebug('wait-shard-ready', writeFutures.length);
           final waitDuration = _nextRetryWait();
           if (waitDuration == null) {
@@ -280,6 +291,30 @@ class _WriterWorker {
     _shardQueue.clear();
     _queuedBlocks = 0;
     _queuedBytes = 0;
+    _reportMetrics();
+  }
+
+  void _recountQueuedWrites() {
+    var blocks = 0;
+    var bytes = 0;
+    _shardQueue.clear();
+    final emptyShards = <String>[];
+    for (final entry in _writeQueues.entries) {
+      if (entry.value.isEmpty) {
+        emptyShards.add(entry.key);
+        continue;
+      }
+      _shardQueue.add(entry.key);
+      blocks += entry.value.length;
+      for (final block in entry.value) {
+        bytes += block.bytes.length;
+      }
+    }
+    for (final shardKey in emptyShards) {
+      _writeQueues.remove(shardKey);
+    }
+    _queuedBlocks = blocks;
+    _queuedBytes = bytes;
     _reportMetrics();
   }
 

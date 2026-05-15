@@ -679,6 +679,8 @@ Additional fields may be present (physical throughput, ETA, and writer backlog m
 
 When the job belongs to a multi-VM schedule run, canceling it cancels the current schedule run. Any other running jobs from that run receive a cancel request, and the agent does not start the remaining VMs from that run. Future runs of the schedule are not disabled.
 
+Checks and restore jobs that have not reached finalization are stopped immediately. Backup cancellation always lets the backup worker check whether VM cleanup is needed and leave a running VM clean by committing any active backup snapshot. Restore cancellation keeps the worker alive only after the protected finalization phase has started, so the target VM is not left undefined or partially finalized. Cancel is rejected while backup is committing a snapshot or restore is in its final define/rebase/upload phase.
+
 Response:
 ```json
 {"success":true}

@@ -3017,16 +3017,26 @@ class AgentHttpServer {
 
   void _updateJob(String jobId, AgentJobStatus status) {
     final previous = _jobs[jobId];
+    final control = _jobControls[jobId];
+    final isCancelingStatus = status.message.toLowerCase().startsWith('canceling');
+    if (control?.canceled == true && previous != null && previous.state != AgentJobState.running) {
+      return;
+    }
+    if (control?.canceled == true && previous?.state == AgentJobState.running && status.state == AgentJobState.running && !isCancelingStatus) {
+      return;
+    }
+    final effectiveStatus = control?.protectedCancelRequested == true && previous?.state == AgentJobState.running && status.state == AgentJobState.running && !isCancelingStatus
+        ? status.copyWith(message: previous?.message)
+        : status;
     final next = previous == null
-        ? status
-        : status.copyWith(
-            scheduleId: status.scheduleId.isEmpty ? previous.scheduleId : status.scheduleId,
-            vmName: status.vmName.isEmpty ? previous.vmName : status.vmName,
-            storageId: status.storageId.isEmpty ? previous.storageId : status.storageId,
+        ? effectiveStatus
+        : effectiveStatus.copyWith(
+            scheduleId: effectiveStatus.scheduleId.isEmpty ? previous.scheduleId : effectiveStatus.scheduleId,
+            vmName: effectiveStatus.vmName.isEmpty ? previous.vmName : effectiveStatus.vmName,
+            storageId: effectiveStatus.storageId.isEmpty ? previous.storageId : effectiveStatus.storageId,
           );
     _jobs[jobId] = next;
     if (next.state != AgentJobState.running) {
-      final control = _jobControls[jobId];
       if (control != null && !control.completed.isCompleted) {
         control.completed.complete(next);
       }
@@ -3044,8 +3054,11 @@ class AgentHttpServer {
     if (job.state != AgentJobState.running) {
       return false;
     }
+    if (_jobCancelDisabled(job)) {
+      return false;
+    }
     final control = _jobControls[jobId];
-    if (control?.canceled == true) {
+    if (control?.canceled == true || control?.protectedCancelRequested == true) {
       return false;
     }
     final scheduleRunId = control?.scheduleRunId ?? '';
@@ -3068,31 +3081,53 @@ class AgentHttpServer {
     }
   }
 
+  bool _jobCancelDisabled(AgentJobStatus job) {
+    final message = job.message.toLowerCase();
+    if (job.type == AgentJobType.backup) {
+      return message.contains('committing snapshot');
+    }
+    if (job.type == AgentJobType.restore) {
+      return message.contains('finalizing disk files') || message.contains('rebasing restored overlays') || message.contains('uploading domain xml') || message.contains('defining vm');
+    }
+    return false;
+  }
+
   void _requestJobCancel(String jobId, AgentJobStatus job, _JobControl? control) {
+    if (job.type == AgentJobType.backup) {
+      control?.canceled = true;
+      control?.backupAgent?.cancel();
+      control?.workerSendPort?.send({'type': 'cancel'});
+      final message = control?.backupVmCleanupRequired == true ? 'Canceling. Finishing VM snapshot cleanup...' : 'Canceling. Checking VM cleanup...';
+      _updateJob(jobId, job.copyWith(message: message, speedBytesPerSec: 0, physicalSpeedBytesPerSec: 0, sanitySpeedBytesPerSec: 0));
+      return;
+    }
+    if (job.type == AgentJobType.restore && control?.restoreFinalizing == true) {
+      control?.protectedCancelRequested = true;
+      _updateJob(jobId, job.copyWith(message: 'Canceling. Finishing restore safely...', speedBytesPerSec: 0, physicalSpeedBytesPerSec: 0, sanitySpeedBytesPerSec: 0));
+      return;
+    }
     control?.canceled = true;
     control?.backupAgent?.cancel();
     control?.workerSendPort?.send({'type': 'cancel'});
-    _updateJob(jobId, job.copyWith(message: 'Canceling. Waiting for active storage operation to stop...', speedBytesPerSec: 0, physicalSpeedBytesPerSec: 0, sanitySpeedBytesPerSec: 0));
-    if (job.type == AgentJobType.restore) {
-      unawaited(_forceStopRestoreWorkerAfterCancel(jobId));
+    for (final driver in control?.checkDrivers ?? const <drv.BackupDriver>[]) {
+      unawaited(driver.closeConnections());
     }
-  }
-
-  Future<void> _forceStopRestoreWorkerAfterCancel(String jobId) async {
-    await Future<void>.delayed(const Duration(seconds: 10));
-    final control = _jobControls[jobId];
-    final job = _jobs[jobId];
-    if (control == null || job == null || !control.canceled || job.state != AgentJobState.running) {
-      return;
+    if (job.type == AgentJobType.backup || job.type == AgentJobType.restore || job.type == AgentJobType.sanity) {
+      control?.workerReceivePort?.close();
+      control?.workerReceivePort = null;
+      control?.workerSendPort = null;
+      control?.workerIsolate?.kill(priority: Isolate.immediate);
+      control?.workerIsolate = null;
+      control?.resultHandled = true;
+      control?.checkDrivers.clear();
     }
-    _hostLog('Restore job $jobId did not stop after cancel request; killing worker isolate.');
-    control.workerReceivePort?.close();
-    control.workerReceivePort = null;
-    control.workerSendPort = null;
-    control.workerIsolate?.kill(priority: Isolate.immediate);
-    control.workerIsolate = null;
     _updateJob(jobId, job.copyWith(state: AgentJobState.canceled, message: 'Canceled', speedBytesPerSec: 0, physicalSpeedBytesPerSec: 0, sanitySpeedBytesPerSec: 0));
-    _notifyJobCompletion(jobId, type: AgentJobType.restore, state: AgentJobState.canceled, message: 'Canceled', sizeBytes: job.totalBytes > 0 ? job.totalBytes : null);
+    final sizeBytes = job.totalBytes > 0 ? job.totalBytes : null;
+    if (job.type == AgentJobType.backup || job.type == AgentJobType.restore) {
+      _notifyJobCompletion(jobId, type: job.type, state: AgentJobState.canceled, message: 'Canceled', sizeBytes: sizeBytes);
+    } else if (job.type == AgentJobType.sanity) {
+      _notifyJobCompletion(jobId, type: AgentJobType.sanity, state: AgentJobState.canceled, message: 'Canceled');
+    }
   }
 
   bool _isJobCanceled(String jobId) {
@@ -3134,6 +3169,10 @@ class AgentHttpServer {
     control.workerReceivePort = workerReceive;
     unawaited(
       Isolate.spawn(backupWorkerMain, {'sendPort': workerReceive.sendPort}).then((isolate) {
+        if (control.resultHandled) {
+          isolate.kill(priority: Isolate.immediate);
+          return;
+        }
         control.workerIsolate = isolate;
       }),
     );
@@ -3142,6 +3181,17 @@ class AgentHttpServer {
       final type = payload['type']?.toString();
       if (type == 'ready') {
         control.workerSendPort = payload['sendPort'] as SendPort?;
+        if (control.canceled) {
+          control.resultHandled = true;
+          workerReceive.close();
+          control.workerReceivePort = null;
+          control.workerSendPort = null;
+          control.workerIsolate?.kill(priority: Isolate.immediate);
+          control.workerIsolate = null;
+          _updateJob(jobId, _jobs[jobId]!.copyWith(state: AgentJobState.canceled, message: 'Canceled', speedBytesPerSec: 0, physicalSpeedBytesPerSec: 0, sanitySpeedBytesPerSec: 0));
+          _notifyJobCompletion(jobId, type: AgentJobType.backup, state: AgentJobState.canceled, message: 'Canceled');
+          return;
+        }
         control.workerSendPort?.send({
           'type': 'start',
           'jobId': jobId,
@@ -3159,6 +3209,7 @@ class AgentHttpServer {
       }
       if (type == 'progress') {
         final progress = BackupAgentProgress.fromMap(Map<String, dynamic>.from(payload['progress'] as Map));
+        control.backupVmCleanupRequired = progress.vmCleanupRequired;
         final current = _jobs[jobId];
         if (current == null) {
           return;
@@ -3369,6 +3420,8 @@ class AgentHttpServer {
       writerQueuedBytes: status.writerQueuedBytes,
       writerInFlightBytes: status.writerInFlightBytes,
       driverBufferedBytes: status.driverBufferedBytes,
+      presentUnits: status.presentUnits,
+      missingUnits: status.missingUnits,
     );
   }
 
@@ -3377,6 +3430,7 @@ class AgentHttpServer {
       final checkDriversByBlockSizeMB = <int, drv.BackupDriver>{};
       final quickCachesByBlockSizeMB = <int, _BlobDirectoryLookupCache>{};
       final checkLabel = mode == _RestoreCheckMode.quick ? 'Quick check' : 'Sanity check';
+      final control = _jobControls[jobId];
       try {
         final driverInfo = _driverCatalog[storage.driverId];
         if (driverInfo == null) {
@@ -3475,6 +3529,8 @@ class AgentHttpServer {
         var lastProgressUpdate = DateTime.now();
         var mismatches = 0;
         var checked = 0;
+        var presentBlocks = 0;
+        var missingBlocks = 0;
         final maxConcurrentDownloads = storage.driverId == 'filesystem' ? 1 : storage.storage.downloadConcurrency;
         if (maxConcurrentDownloads == null) {
           throw '$checkLabel requires downloadConcurrency for storage ${storage.storage.id}.';
@@ -3485,6 +3541,7 @@ class AgentHttpServer {
           if (bytes <= 0) {
             return;
           }
+          _ensureJobNotCanceled(jobId);
           bytesChecked += bytes;
           if (speedTrackingStarted) {
             bytesSinceTick += bytes;
@@ -3503,9 +3560,26 @@ class AgentHttpServer {
             lastProgressUpdate = now;
             _updateJob(
               jobId,
-              _jobs[jobId]!.copyWith(totalUnits: totalBlocks, completedUnits: checked, bytesTransferred: bytesChecked, speedBytesPerSec: smoothedSpeed, message: message ?? _jobs[jobId]!.message),
+              _jobs[jobId]!.copyWith(
+                totalUnits: totalBlocks,
+                completedUnits: checked,
+                bytesTransferred: bytesChecked,
+                speedBytesPerSec: smoothedSpeed,
+                message: message ?? _jobs[jobId]!.message,
+                presentUnits: presentBlocks,
+                missingUnits: missingBlocks,
+              ),
             );
           }
+        }
+
+        drv.BackupDriver checkDriverForBlockSize(int blockSizeMB) {
+          return checkDriversByBlockSizeMB.putIfAbsent(blockSizeMB, () {
+            final settingsForBlockSize = storage.settings.copyWith(blockSizeMB: blockSizeMB);
+            final driver = _driverForSettings(driverInfo.id, backupPath, settings: settingsForBlockSize);
+            control?.checkDrivers.add(driver);
+            return driver;
+          });
         }
 
         for (final manifest in manifests) {
@@ -3567,10 +3641,7 @@ class AgentHttpServer {
             }
             final expectedLength = _blockLengthForIndex(index, fileSize, blockSize);
             if (mode == _RestoreCheckMode.quick) {
-              final driverForBlockSize = checkDriversByBlockSizeMB.putIfAbsent(blockSizeMB, () {
-                final settingsForBlockSize = storage.settings.copyWith(blockSizeMB: blockSizeMB);
-                return _driverForSettings(driverInfo.id, backupPath, settings: settingsForBlockSize);
-              });
+              final driverForBlockSize = checkDriverForBlockSize(blockSizeMB);
               final cache = quickCachesByBlockSizeMB.putIfAbsent(blockSizeMB, () {
                 final lister = driverForBlockSize is drv.BlobDirectoryLister ? driverForBlockSize as drv.BlobDirectoryLister : null;
                 if (lister == null) {
@@ -3582,7 +3653,9 @@ class AgentHttpServer {
               checked += 1;
               if (!exists) {
                 mismatches += 1;
-                _hostLog('$checkLabel missing blob index=$index hash=$hash');
+                missingBlocks += 1;
+              } else {
+                presentBlocks += 1;
               }
               handleBytes(expectedLength, message: message);
               continue;
@@ -3600,10 +3673,7 @@ class AgentHttpServer {
             if (blocks.isEmpty) {
               continue;
             }
-            final driverForBlockSize = checkDriversByBlockSizeMB.putIfAbsent(blockSizeMB, () {
-              final settingsForBlockSize = storage.settings.copyWith(blockSizeMB: blockSizeMB);
-              return _driverForSettings(driverInfo.id, backupPath, settings: settingsForBlockSize);
-            });
+            final driverForBlockSize = checkDriverForBlockSize(blockSizeMB);
             final remote = driverForBlockSize is drv.RemoteBlobDriver ? driverForBlockSize as drv.RemoteBlobDriver : null;
             if (driverInfo.id != 'filesystem' && remote == null) {
               throw '$checkLabel requires remote blob reads for driver ${driverInfo.id}.';
@@ -3668,6 +3738,7 @@ class AgentHttpServer {
                   continue;
                 }
                 final fetched = await future;
+                _ensureJobNotCanceled(jobId);
                 inFlight.remove(nextConsume);
                 nextConsume += 1;
                 if (fetched.canceled) {
@@ -3727,10 +3798,19 @@ class AgentHttpServer {
         final resultMessage = mismatches == 0 ? '$checkLabel OK ($checked blocks checked)' : '$checkLabel: $mismatches mismatch(es) out of $checked blocks';
         _updateJob(
           jobId,
-          _jobs[jobId]!.copyWith(state: AgentJobState.success, message: resultMessage, totalUnits: totalBlocks, completedUnits: checked, bytesTransferred: bytesChecked, speedBytesPerSec: 0),
+          _jobs[jobId]!.copyWith(
+            state: AgentJobState.success,
+            message: resultMessage,
+            totalUnits: totalBlocks,
+            completedUnits: checked,
+            bytesTransferred: bytesChecked,
+            speedBytesPerSec: 0,
+            presentUnits: presentBlocks,
+            missingUnits: missingBlocks,
+          ),
         );
       } catch (error, stackTrace) {
-        final isCanceled = error is _JobCanceled;
+        final isCanceled = error is _JobCanceled || _isJobCanceled(jobId);
         if (isCanceled) {
           _hostLog('$checkLabel canceled.');
         } else {
@@ -3743,6 +3823,7 @@ class AgentHttpServer {
             await driver.closeConnections();
           } catch (_) {}
         }
+        control?.checkDrivers.clear();
       }
     }());
   }
@@ -3818,6 +3899,11 @@ class AgentHttpServer {
       return;
     }
     final files = await driver.listRelativeFiles(normalizedDir);
+    final remoteFiles = files
+        .map((relativePath) => relativePath.replaceAll('\\', '/').split('/').where((part) => part.trim().isNotEmpty && part != '.').join('/'))
+        .where((relativePath) => relativePath.isNotEmpty)
+        .toSet();
+    await _pruneCachedRelativeDir(driver: driver, normalizedDir: normalizedDir, remoteFiles: remoteFiles);
     for (final relativePath in files) {
       final bytes = await driver.readFileBytes(relativePath);
       if (bytes == null) {
@@ -3836,6 +3922,27 @@ class AgentHttpServer {
         await localFile.delete();
       }
       await tempFile.rename(localFile.path);
+    }
+  }
+
+  Future<void> _pruneCachedRelativeDir({required drv.BackupDriver driver, required String normalizedDir, required Set<String> remoteFiles}) async {
+    final localRoot = Directory('${driver.storage}${Platform.pathSeparator}${normalizedDir.replaceAll('/', Platform.pathSeparator)}');
+    if (!await localRoot.exists()) {
+      return;
+    }
+    await for (final entity in localRoot.list(recursive: true, followLinks: false)) {
+      if (entity is! File) {
+        continue;
+      }
+      final name = _baseName(entity.path);
+      if (name.contains('.inprogress.')) {
+        continue;
+      }
+      final relative = _relativePath(fromDir: Directory(driver.storage), toPath: entity.path).replaceAll('\\', '/');
+      if (relative.isEmpty || remoteFiles.contains(relative)) {
+        continue;
+      }
+      await entity.delete();
     }
   }
 
@@ -3875,6 +3982,7 @@ class AgentHttpServer {
     if (control == null) {
       return;
     }
+    control.restoreDecision = decision.trim();
     final workerReceive = ReceivePort();
     control.workerReceivePort = workerReceive;
     unawaited(
@@ -3902,6 +4010,9 @@ class AgentHttpServer {
       }
       if (type == 'status') {
         final status = AgentJobStatus.fromMap(Map<String, dynamic>.from(payload['status'] as Map));
+        if (_isRestoreFinalizingStatus(status)) {
+          control.restoreFinalizing = true;
+        }
         if (control.canceled) {
           return;
         }
@@ -3920,7 +4031,7 @@ class AgentHttpServer {
       if (type == 'result') {
         final status = AgentJobStatus.fromMap(Map<String, dynamic>.from(payload['status'] as Map));
         final current = _jobs[jobId];
-        final next = control.canceled ? status.copyWith(state: AgentJobState.canceled, message: 'Canceled', speedBytesPerSec: 0) : status;
+        final next = control.canceled || control.protectedCancelRequested ? status.copyWith(state: AgentJobState.canceled, message: 'Canceled', speedBytesPerSec: 0) : status;
         _updateJob(jobId, next);
         final sizeBytes = next.totalBytes > 0 ? next.totalBytes : (current != null && current.totalBytes > 0 ? current.totalBytes : null);
         _notifyJobCompletion(jobId, type: AgentJobType.restore, state: next.state, message: next.message, sizeBytes: sizeBytes);
@@ -3931,6 +4042,14 @@ class AgentHttpServer {
         control.workerIsolate = null;
       }
     });
+  }
+
+  bool _isRestoreFinalizingStatus(AgentJobStatus status) {
+    if (status.type != AgentJobType.restore || status.state != AgentJobState.running) {
+      return false;
+    }
+    final message = status.message.toLowerCase();
+    return message.contains('finalizing disk files') || message.contains('rebasing restored overlays') || message.contains('uploading domain xml') || message.contains('defining vm');
   }
 
   String _extractTimestampFromManifestXmlPath(String xmlPath) {
@@ -4120,7 +4239,7 @@ class AgentHttpServer {
         final request = await client.postUrl(endpoint);
         request.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${account.accessToken}');
         request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
-        request.add(utf8.encode(jsonEncode(<String, String>{'to': to, 'subject': subject, 'textBody': textBody, 'htmlBody': htmlBody})));
+        request.add(utf8.encode(jsonEncode(<String, String>{'to': to, 'subject': _emailSubjectWithPrefix(subject), 'textBody': textBody, 'htmlBody': htmlBody})));
         final response = await request.close();
         final responseBody = await response.transform(utf8.decoder).join();
         if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -4134,6 +4253,14 @@ class AgentHttpServer {
       _hostLogError('Email notification failed.', error, stackTrace);
       return _NotificationEmailResult.failure(error.toString());
     }
+  }
+
+  String _emailSubjectWithPrefix(String subject) {
+    final trimmed = subject.trim();
+    if (trimmed.startsWith('[VirtBackup]')) {
+      return trimmed;
+    }
+    return trimmed.isEmpty ? '[VirtBackup]' : '[VirtBackup] $trimmed';
   }
 
   String _notificationStatusForJob({required AgentJobType type, required AgentJobState state, required String message}) {
@@ -4584,7 +4711,12 @@ class _JobControl {
   String? target;
   String? storageLabel;
   bool resultHandled = false;
+  String restoreDecision = '';
+  bool protectedCancelRequested = false;
+  bool restoreFinalizing = false;
+  bool backupVmCleanupRequired = false;
   String? lastNtfyCompletionKey;
+  final List<drv.BackupDriver> checkDrivers = <drv.BackupDriver>[];
 }
 
 class _JobGuardRejected implements Exception {

@@ -54,6 +54,7 @@ class BackupAgentProgress {
     this.writerQueuedBytes = 0,
     this.writerInFlightBytes = 0,
     this.driverBufferedBytes = 0,
+    this.vmCleanupRequired = false,
   });
 
   final bool isRunning;
@@ -76,6 +77,7 @@ class BackupAgentProgress {
   final int writerQueuedBytes;
   final int writerInFlightBytes;
   final int driverBufferedBytes;
+  final bool vmCleanupRequired;
 
   BackupAgentProgress copyWith({
     bool? isRunning,
@@ -98,6 +100,7 @@ class BackupAgentProgress {
     int? writerQueuedBytes,
     int? writerInFlightBytes,
     int? driverBufferedBytes,
+    bool? vmCleanupRequired,
   }) {
     return BackupAgentProgress(
       isRunning: isRunning ?? this.isRunning,
@@ -120,6 +123,7 @@ class BackupAgentProgress {
       writerQueuedBytes: writerQueuedBytes ?? this.writerQueuedBytes,
       writerInFlightBytes: writerInFlightBytes ?? this.writerInFlightBytes,
       driverBufferedBytes: driverBufferedBytes ?? this.driverBufferedBytes,
+      vmCleanupRequired: vmCleanupRequired ?? this.vmCleanupRequired,
     );
   }
 
@@ -145,6 +149,7 @@ class BackupAgentProgress {
       'writerQueuedBytes': writerQueuedBytes,
       'writerInFlightBytes': writerInFlightBytes,
       'driverBufferedBytes': driverBufferedBytes,
+      'vmCleanupRequired': vmCleanupRequired,
     };
   }
 
@@ -170,6 +175,7 @@ class BackupAgentProgress {
       writerQueuedBytes: (json['writerQueuedBytes'] as num?)?.toInt() ?? 0,
       writerInFlightBytes: (json['writerInFlightBytes'] as num?)?.toInt() ?? 0,
       driverBufferedBytes: (json['driverBufferedBytes'] as num?)?.toInt() ?? 0,
+      vmCleanupRequired: json['vmCleanupRequired'] == true,
     );
   }
 
@@ -194,6 +200,7 @@ class BackupAgentProgress {
     writerQueuedBytes: 0,
     writerInFlightBytes: 0,
     driverBufferedBytes: 0,
+    vmCleanupRequired: false,
   );
 }
 

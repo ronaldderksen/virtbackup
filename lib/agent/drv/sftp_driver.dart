@@ -378,8 +378,11 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     }
     final remotePath = _remoteBlobPath(hash);
     try {
-      yield* _openBlobStreamNative(remotePath, length: length);
-    } on _NativeBlobMissing {
+      await for (final chunk in _openBlobStreamNative(remotePath, length: length)) {
+        yield chunk;
+      }
+    } on _NativeBlobMissing catch (error) {
+      _logDebug(error.toString());
       return;
     }
   }
@@ -546,7 +549,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       if (file == nullptr) {
         final exists = await _withSftp('native read open stat', (sftp) async => _remoteExists(sftp, remotePath));
         if (!exists) {
-          throw _NativeBlobMissing();
+          throw _NativeBlobMissing(remotePath);
         }
         throw 'Native SFTP openRead failed: $remotePath';
       }
@@ -1159,7 +1162,14 @@ class _SftpLeaseMetrics {
   final bool queued;
 }
 
-class _NativeBlobMissing implements Exception {}
+class _NativeBlobMissing implements Exception {
+  const _NativeBlobMissing(this.remotePath);
+
+  final String remotePath;
+
+  @override
+  String toString() => 'Native SFTP blob missing: $remotePath';
+}
 
 class _NativeSftpBindings {
   _NativeSftpBindings(DynamicLibrary lib)

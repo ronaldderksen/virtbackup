@@ -22,6 +22,7 @@ class _ExistsWorker {
   final List<_MissingEntry> _queue = <_MissingEntry>[];
   Completer<void>? _wakeWorker;
   bool _done = false;
+  bool _canceled = false;
   Object? _error;
   StackTrace? _errorStack;
 
@@ -29,6 +30,9 @@ class _ExistsWorker {
   final List<String> _pendingMissingHashes = <String>[];
 
   void enqueue(int index, String hash, int blockLength) {
+    if (_canceled) {
+      return;
+    }
     _queue.add(_MissingEntry(index, hash, blockLength));
     if (_wakeWorker != null && !_wakeWorker!.isCompleted) {
       _wakeWorker!.complete();
@@ -44,7 +48,22 @@ class _ExistsWorker {
     }
   }
 
+  void cancel() {
+    _canceled = true;
+    _done = true;
+    _queue.clear();
+    _pendingMissingHashes.clear();
+    _pendingMissingStart = -1;
+    if (_wakeWorker != null && !_wakeWorker!.isCompleted) {
+      _wakeWorker!.complete();
+      _wakeWorker = null;
+    }
+  }
+
   void throwIfError() {
+    if (_canceled) {
+      return;
+    }
     if (_error != null) {
       LogWriter.logAgentSync(level: 'error', message: 'worker=exists abort: $_error');
       Error.throwWithStackTrace(_error!, _errorStack ?? StackTrace.current);
@@ -86,9 +105,11 @@ class _ExistsWorker {
       }
       await _flushPendingMissing();
     } catch (error, stackTrace) {
-      _error = error;
-      _errorStack = stackTrace;
-      LogWriter.logAgentSync(level: 'error', message: 'worker=exists failed: $error');
+      if (!_canceled) {
+        _error = error;
+        _errorStack = stackTrace;
+        LogWriter.logAgentSync(level: 'error', message: 'worker=exists failed: $error');
+      }
     }
   }
 

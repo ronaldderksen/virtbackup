@@ -9,11 +9,15 @@ class _BlobCacheWorker {
   final List<String> _queue = [];
   Completer<void>? _wakeWorker;
   bool _done = false;
+  bool _canceled = false;
   Object? _error;
   StackTrace? _errorStack;
   var _inFlightTasks = 0;
 
   void enqueue(String hash) {
+    if (_done || _canceled) {
+      return;
+    }
     if (hash.length < 2) {
       return;
     }
@@ -32,7 +36,20 @@ class _BlobCacheWorker {
     }
   }
 
+  void cancel() {
+    _canceled = true;
+    _done = true;
+    _queue.clear();
+    if (_wakeWorker != null && !_wakeWorker!.isCompleted) {
+      _wakeWorker!.complete();
+      _wakeWorker = null;
+    }
+  }
+
   void throwIfError() {
+    if (_canceled) {
+      return;
+    }
     if (_error != null) {
       LogWriter.logAgentSync(level: 'error', message: 'worker=blob_cache abort: $_error');
       Error.throwWithStackTrace(_error!, _errorStack ?? StackTrace.current);
@@ -47,15 +64,21 @@ class _BlobCacheWorker {
 
       while (!_done || _queue.isNotEmpty || _inFlightTasks > 0) {
         while (_queue.isNotEmpty) {
+          if (_canceled) {
+            _queue.clear();
+            break;
+          }
           final hash = _queue.removeAt(0);
           _inFlightTasks += 1;
           unawaited(() async {
             try {
               await processHash(hash);
             } catch (error, stackTrace) {
-              _error = error;
-              _errorStack = stackTrace;
-              LogWriter.logAgentSync(level: 'error', message: 'worker=blob_cache error: $error');
+              if (!_canceled) {
+                _error = error;
+                _errorStack = stackTrace;
+                LogWriter.logAgentSync(level: 'error', message: 'worker=blob_cache error: $error');
+              }
             } finally {
               _inFlightTasks -= 1;
             }
@@ -67,9 +90,11 @@ class _BlobCacheWorker {
         }
       }
     } catch (error, stackTrace) {
-      _error = error;
-      _errorStack = stackTrace;
-      LogWriter.logAgentSync(level: 'error', message: 'worker=blob_cache failed: $error');
+      if (!_canceled) {
+        _error = error;
+        _errorStack = stackTrace;
+        LogWriter.logAgentSync(level: 'error', message: 'worker=blob_cache failed: $error');
+      }
     }
   }
 }

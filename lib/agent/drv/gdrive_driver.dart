@@ -67,6 +67,8 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   final Set<String> _folderChildrenLoaded = {};
   final _NamedAsyncLock _folderLocks = _NamedAsyncLock();
   bool _agentLogConfigured = false;
+  bool _closingConnections = false;
+  final Completer<void> _connectionsClosed = Completer<void>();
   Future<String>? _tokenRefreshInFlight;
   http.Client _client = IOClient(_createHttpClient());
   final _HttpClientPool _uploadClientPool = _HttpClientPool(maxClients: _uploadConcurrency);
@@ -408,6 +410,10 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   @override
   Future<void> closeConnections() async {
+    _closingConnections = true;
+    if (!_connectionsClosed.isCompleted) {
+      _connectionsClosed.complete();
+    }
     try {
       _client.close();
     } catch (_) {}
@@ -752,6 +758,10 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       return await _uploadSimpleWithClient(lease: lease, uri: uri, bytes: bytes, name: name, parentId: parentId, stopwatch: stopwatch);
     } catch (error, stackTrace) {
       stopwatch.stop();
+      if (_closingConnections) {
+        _logInfo('gdrive: uploadSimple stopped because the storage connection was closed name=$name parent=$parentId bytes=${bytes.length} durationMs=${stopwatch.elapsedMilliseconds}');
+        throw 'gdrive upload stopped because the storage connection was closed';
+      }
       _logInfo('gdrive: uploadSimple durationMs=${stopwatch.elapsedMilliseconds} error=$error');
       _logInfo('gdrive: uploadSimple failed name=$name parent=$parentId bytes=${bytes.length} error=$error');
       await _logGdriveError('gdrive: uploadSimple failed name=$name parent=$parentId bytes=${bytes.length} durationMs=${stopwatch.elapsedMilliseconds} error=$error', stackTrace: stackTrace);
@@ -1112,6 +1122,9 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       try {
         return await action();
       } catch (error, stackTrace) {
+        if (_closingConnections) {
+          throw 'gdrive $label stopped because the storage connection was closed';
+        }
         if (error is _PermanentGdriveConfigError) {
           _logInfo('gdrive: $label failed: $error');
           await _logGdriveError('gdrive: $label failed: $error', stackTrace: stackTrace);
@@ -1138,7 +1151,10 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         }
         final retryAfter = error is _DriveApiException ? error.retryAfter : null;
         final delay = retryAfter ?? Duration(seconds: delaySeconds);
-        await Future.delayed(delay);
+        await Future.any(<Future<void>>[Future.delayed(delay), _connectionsClosed.future]);
+        if (_closingConnections) {
+          throw 'gdrive $label stopped because the storage connection was closed';
+        }
         if (retryAfter == null) {
           delaySeconds = min(delaySeconds * 2, 300);
         }
@@ -1195,12 +1211,19 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     final targetText = target == null || target.isEmpty ? '' : ' target=$target';
     final detailText = detail == null || detail.isEmpty ? '' : ' detail=$detail';
     try {
+      if (_closingConnections) {
+        throw 'gdrive $action stopped because the storage connection was closed';
+      }
       final response = await send();
       stopwatch.stop();
       await _appendApiLogLine('action=$action status=${response.statusCode} durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()}');
       return response;
     } catch (error, stackTrace) {
       stopwatch.stop();
+      if (_closingConnections) {
+        await _appendApiLogLine('action=$action status=closed durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()}');
+        throw 'gdrive $action stopped because the storage connection was closed';
+      }
       await _appendApiLogLine('action=$action status=error durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()} error=$error');
       await _logGdriveError(
         'gdrive: api request failed action=$action durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()} error=$error',
@@ -1236,6 +1259,9 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }
 
   void _resetHttpClient() {
+    if (_closingConnections) {
+      return;
+    }
     _client.close();
     _client = IOClient(_createHttpClient());
   }

@@ -268,7 +268,8 @@ The agent supports optional native SFTP via FFI:
 
 ## Error Handling and Cancellation
 
-- Jobs can be canceled via API; cancellation propagates to backup logic.
+- Jobs can be canceled via API. Checks and restore jobs before finalization stop immediately; backup jobs let the worker check and finish VM snapshot cleanup before closing; restores that have entered finalization finish that protected phase before closing.
+- Cancel is disabled during backup snapshot commit and restore final define/rebase/upload phases.
 - Most operations are wrapped with try/catch; failures update job status.
 - Snapshot cleanup is attempted on failure to avoid dangling overlays.
 - Overlay file deletion is guarded by VM disk reference checks and `lsof`; if usage cannot be verified, cleanup fails visibly instead of deleting blindly.

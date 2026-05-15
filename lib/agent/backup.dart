@@ -102,6 +102,9 @@ class BackupAgent {
   static const Duration _writerRetryConcurrencyCooldown = Duration(minutes: 2);
   final Set<Future<void>> _inFlightWrites = {};
   final int? _writerConcurrencyOverride;
+  BackupDriver? _activeDriver;
+  final Set<_ExistsWorker> _activeExistsWorkers = <_ExistsWorker>{};
+  final Set<_WriterWorker> _activeWriterWorkers = <_WriterWorker>{};
   _BlobDirectoryCache? _blobDirectoryCache;
   _BlobCacheWorker? _blobCacheWorker;
   Future<void>? _blobCacheWorkerFuture;
@@ -117,6 +120,17 @@ class BackupAgent {
   void cancel() {
     _cancelRequested = true;
     _activeHashblocksController?.stop();
+    _blobCacheWorker?.cancel();
+    for (final worker in List<_ExistsWorker>.from(_activeExistsWorkers)) {
+      worker.cancel();
+    }
+    for (final worker in List<_WriterWorker>.from(_activeWriterWorkers)) {
+      worker.cancel();
+    }
+    final activeDriver = _activeDriver;
+    if (activeDriver != null) {
+      unawaited(activeDriver.closeConnections());
+    }
     _stopProgressLogTimer();
     _setProgress(_progress.copyWith(statusMessage: 'Canceling...'));
   }
@@ -167,6 +181,7 @@ class BackupAgent {
     Object? runError;
     _LocalManifestWrite? vmManifestWrite;
     try {
+      _activeDriver = driver;
       await _dependencies.beginLargeTransfer?.call(server);
       if (server.connectionType != ConnectionType.ssh) {
         throw 'Backup via API is not configured.';
@@ -175,8 +190,21 @@ class BackupAgent {
       final serverFolderName = _dependencies.sanitizeFileName(server.id);
       await driver.ensureReady();
       final BlobDirectoryLister? blobLister = driver is BlobDirectoryLister ? driver as BlobDirectoryLister : null;
-      _blobDirectoryCache = blobLister == null ? null : _BlobDirectoryCache(driver: blobLister, createShard: (hash) => driver.ensureBlobDir(hash));
+      _blobDirectoryCache = blobLister == null
+          ? null
+          : _BlobDirectoryCache(
+              driver: blobLister,
+              createShard: (hash) => driver.ensureBlobDir(hash),
+              ensureNotCanceled: _ensureNotCanceled,
+              onShardCreateProgress: (created, total) {
+                if (_cancelRequested || total <= 0) {
+                  return;
+                }
+                _setProgress(_progress.copyWith(completedDisks: created, totalDisks: total, statusMessage: 'Preparing storage folders $created/$total...'));
+              },
+            );
       await driver.prepareBackup(serverFolderName, vmFolderName);
+      await _blobDirectoryCache?.initialize();
       _startBlobCacheWorker();
       final manifestsBase = Directory('${driver.storage}${Platform.pathSeparator}manifests${Platform.pathSeparator}$serverFolderName${Platform.pathSeparator}$vmFolderName');
       final timestampSeconds = DateTime.now().toIso8601String().split('.').first;
@@ -213,7 +241,7 @@ class BackupAgent {
 
       if (state == 'running') {
         _logInfo('Creating snapshot for ${vm.name}.');
-        _setProgress(_progress.copyWith(statusMessage: 'Creating snapshot...'));
+        _setProgress(_progress.copyWith(statusMessage: 'Creating snapshot...', vmCleanupRequired: true));
         final snapshotName = _dependencies.sanitizeFileName('virtbackup-$backupTimestamp');
         await _dependencies.createVmSnapshot(server, vm, snapshotName);
         snapshotCreated = true;
@@ -288,10 +316,11 @@ class BackupAgent {
 
       _logInfo('Committing snapshot for ${vm.name}.');
       _ensureNotCanceled();
-      _setProgress(_progress.copyWith(statusMessage: 'Committing snapshot...'));
+      _setProgress(_progress.copyWith(statusMessage: 'Committing snapshot...', vmCleanupRequired: snapshotCreated));
       if (snapshotCreated) {
         await _dependencies.commitVmSnapshot(server, vm, disks);
       }
+      _setProgress(_progress.copyWith(vmCleanupRequired: false));
       await _closeManifestSinkIfOpen(vmManifestSink, manifestWrite: vmManifestWrite);
       await _finalizeManifestWrite(driver: driver, manifestWrite: vmManifestWrite);
       vmManifestWrite = null;
@@ -316,8 +345,9 @@ class BackupAgent {
       }
       if (snapshotCreated) {
         try {
-          _setProgress(_progress.copyWith(statusMessage: isCanceled ? 'Committing snapshot after cancel...' : 'Committing snapshot after failure...'));
+          _setProgress(_progress.copyWith(statusMessage: isCanceled ? 'Committing snapshot after cancel...' : 'Committing snapshot after failure...', vmCleanupRequired: true));
           await _dependencies.commitVmSnapshot(server, vm, disks);
+          _setProgress(_progress.copyWith(vmCleanupRequired: false));
         } catch (commitError, commitStack) {
           _onError?.call('Snapshot commit failed.', commitError, commitStack);
         }
@@ -349,6 +379,7 @@ class BackupAgent {
       await _dependencies.endLargeTransfer?.call(server);
       _stopSpeedTimer();
       _stopProgressLogTimer();
+      _activeDriver = null;
       _blobDirectoryCache = null;
       _setProgress(_progress.copyWith(isRunning: false, statusMessage: '', speedBytesPerSec: 0, physicalSpeedBytesPerSec: 0, sanitySpeedBytesPerSec: 0));
       _isRunning = false;
@@ -389,7 +420,11 @@ class BackupAgent {
     if (worker == null) {
       return;
     }
-    worker.signalDone();
+    if (_cancelRequested) {
+      worker.cancel();
+    } else {
+      worker.signalDone();
+    }
     final future = _blobCacheWorkerFuture;
     _blobCacheWorker = null;
     _blobCacheWorkerFuture = null;
@@ -822,6 +857,7 @@ class BackupAgent {
       isWriteReady: () => cache?.isWriteReady() ?? true,
       waitForWriteReady: cache?.waitForWriteReady,
     );
+    _activeWriterWorkers.add(writerWorker);
 
     sftpWorker = _SftpWorker(
       server: server,
@@ -874,6 +910,7 @@ class BackupAgent {
         hashblocksWorker.markMissing();
       },
     );
+    _activeExistsWorkers.add(existsWorker);
 
     hashblocksWorker = _HashblocksWorker(
       sink: sink,
@@ -995,6 +1032,8 @@ class BackupAgent {
       await sink.flush();
       manifestFlushed = true;
     } finally {
+      _activeExistsWorkers.remove(existsWorker);
+      _activeWriterWorkers.remove(writerWorker);
       if (hashblocksTotalSha256 == null) {
         try {
           controller?.stop();
@@ -1008,13 +1047,14 @@ class BackupAgent {
         wakeSftpReadResume!.complete();
         wakeSftpReadResume = null;
       }
-      existsWorker.signalDone();
       if (_cancelRequested) {
+        existsWorker.cancel();
         writerWorker.cancel();
         try {
           await driver.closeConnections();
         } catch (_) {}
       } else {
+        existsWorker.signalDone();
         writerWorker.signalDone();
       }
       if (!_cancelRequested && writerFutureRef != null && !writerAwaited) {
@@ -1368,10 +1408,12 @@ class _LocalManifestWrite {
 }
 
 class _BlobDirectoryCache {
-  _BlobDirectoryCache({required BlobDirectoryLister driver, required this.createShard}) : _driver = driver;
+  _BlobDirectoryCache({required BlobDirectoryLister driver, required this.createShard, required this.ensureNotCanceled, this.onShardCreateProgress}) : _driver = driver;
 
   final BlobDirectoryLister _driver;
   final Future<void> Function(String hash) createShard;
+  final void Function() ensureNotCanceled;
+  final void Function(int created, int total)? onShardCreateProgress;
 
   Set<String>? _shardNames;
   Future<Set<String>>? _shardsInFlight;
@@ -1468,8 +1510,16 @@ class _BlobDirectoryCache {
         missingShards.add(shardKey);
       }
     }
+    if (missingShards.isNotEmpty) {
+      onShardCreateProgress?.call(0, missingShards.length);
+    }
+    var createdShards = 0;
     for (final shardKey in missingShards) {
+      ensureNotCanceled();
       await _ensureShardCreated(shardKey: shardKey);
+      ensureNotCanceled();
+      createdShards += 1;
+      onShardCreateProgress?.call(createdShards, missingShards.length);
     }
     _writeReady = true;
     LogWriter.logAgentSync(level: 'info', message: 'blob-cache writeReady=true (missingShardsCreated=${missingShards.length})');
