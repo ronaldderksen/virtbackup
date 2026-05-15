@@ -657,6 +657,16 @@ class AgentHttpServer {
     _hostLog('Settings updated (reason: $reason).');
   }
 
+  AppSettings _settingsFromApiConfig(AppSettings agentSettings) {
+    return agentSettings.copyWith(virtBackupAccount: _agentSettings.virtBackupAccount);
+  }
+
+  AppSettings _settingsFromWorkerUpdate(AppSettings workerSettings) {
+    final workerStorageById = {for (final storage in workerSettings.storage) storage.id: storage};
+    final mergedStorage = _agentSettings.storage.map((storage) => workerStorageById[storage.id] ?? storage).toList();
+    return _agentSettings.copyWith(storage: mergedStorage);
+  }
+
   Future<void> _safeStartEventListener(ServerConfig server) async {
     if ((_missingToolsByServerId[server.id] ?? const <String>[]).contains('virsh')) {
       _hostLog('Skipping VM event listener for ${server.name}: missing required tool virsh.');
@@ -1010,7 +1020,7 @@ class AgentHttpServer {
       }
       if (request.method == 'POST' && path == '/config') {
         final body = await _readJson(request);
-        final agentSettings = AppSettings.fromMap(body);
+        final agentSettings = _settingsFromApiConfig(AppSettings.fromMap(body));
         await _applyAgentSettings(agentSettings, reason: 'api', forceRestartSshListeners: true, runServerRefreshInBackground: true);
         _json(request, 200, {'success': true});
         return;
@@ -2860,7 +2870,7 @@ class AgentHttpServer {
       }
       if (type == 'settings') {
         final updated = AppSettings.fromMap(Map<String, dynamic>.from(payload['settings'] as Map));
-        unawaited(_applyAgentSettings(updated, reason: 'worker', forceRestartSshListeners: false));
+        unawaited(_applyAgentSettings(_settingsFromWorkerUpdate(updated), reason: 'worker', forceRestartSshListeners: false));
         return;
       }
       if (type == 'result') {
@@ -2987,7 +2997,7 @@ class AgentHttpServer {
       }
       if (type == 'settings') {
         final updated = AppSettings.fromMap(Map<String, dynamic>.from(payload['settings'] as Map));
-        unawaited(_applyAgentSettings(updated, reason: 'worker', forceRestartSshListeners: false));
+        unawaited(_applyAgentSettings(_settingsFromWorkerUpdate(updated), reason: 'worker', forceRestartSshListeners: false));
         return;
       }
       if (type == 'result') {
@@ -3574,7 +3584,7 @@ class AgentHttpServer {
       }
       if (type == 'settings') {
         final updated = AppSettings.fromMap(Map<String, dynamic>.from(payload['settings'] as Map));
-        unawaited(_applyAgentSettings(updated, reason: 'worker', forceRestartSshListeners: false));
+        unawaited(_applyAgentSettings(_settingsFromWorkerUpdate(updated), reason: 'worker', forceRestartSshListeners: false));
         return;
       }
       if (type == 'result') {
@@ -3674,6 +3684,7 @@ class AgentHttpServer {
 
   _JobCompletionNotification _buildJobCompletionNotification(String jobId, {required AgentJobType type, required AgentJobState state, required String message, int? sizeBytes}) {
     final control = _jobControls[jobId];
+    final jobStatus = _jobs[jobId];
     final notificationStatus = _notificationStatusForJob(type: type, state: state, message: message);
     final duration = control?.startedAt == null ? null : DateTime.now().difference(control!.startedAt).inSeconds;
     final storageLabel = _resolveStorageLabel(storageLabel: control?.storageLabel);
@@ -3681,6 +3692,8 @@ class AgentHttpServer {
     final targetLabel = type == AgentJobType.backup ? storageLabel : control?.target;
     final title = _buildNotificationTitle(type, notificationStatus);
     final detailMessage = message.trim();
+    final error = state == AgentJobState.failure ? (detailMessage.isEmpty ? title : detailMessage) : null;
+    final warning = notificationStatus == 'warning' ? (detailMessage.isEmpty ? title : detailMessage) : null;
     return _JobCompletionNotification(
       jobId: jobId,
       type: type,
@@ -3692,8 +3705,21 @@ class AgentHttpServer {
       storage: storageLabel,
       durationSeconds: duration,
       sizeBytes: sizeBytes,
-      error: state == AgentJobState.failure ? (detailMessage.isEmpty ? title : detailMessage) : null,
-      warning: notificationStatus == 'warning' ? (detailMessage.isEmpty ? title : detailMessage) : null,
+      error: error,
+      warning: warning,
+      details: _buildJobNotificationDetails(
+        jobId: jobId,
+        status: notificationStatus,
+        jobStatus: jobStatus,
+        message: detailMessage,
+        error: error,
+        warning: warning,
+        source: sourceLabel,
+        target: targetLabel,
+        storage: storageLabel,
+        durationSeconds: duration,
+        sizeBytes: sizeBytes,
+      ),
     );
   }
 
@@ -3804,49 +3830,101 @@ class AgentHttpServer {
 
   String _buildEmailSubject(_JobCompletionNotification notification) {
     final source = notification.source?.trim() ?? '';
+    final target = notification.target?.trim() ?? '';
+    if (source.isNotEmpty && target.isNotEmpty) {
+      return '${notification.title}: $source -> $target';
+    }
     return source.isEmpty ? notification.title : '${notification.title}: $source';
   }
 
+  List<_JobNotificationDetail> _buildJobNotificationDetails({
+    required String jobId,
+    required String status,
+    required AgentJobStatus? jobStatus,
+    required String message,
+    required String? error,
+    required String? warning,
+    required String? source,
+    required String? target,
+    required String storage,
+    required int? durationSeconds,
+    required int? sizeBytes,
+  }) {
+    final details = <_JobNotificationDetail>[_JobNotificationDetail('Job ID', jobId), _JobNotificationDetail('Type', jobStatus?.type.name ?? ''), _JobNotificationDetail('Status', status)];
+    final state = jobStatus?.state.name ?? '';
+    if (state.isNotEmpty) {
+      details.add(_JobNotificationDetail('State', state));
+    }
+    if (error != null && error.trim().isNotEmpty) {
+      details.add(_JobNotificationDetail('Error', error.trim()));
+    }
+    if (warning != null && warning.trim().isNotEmpty) {
+      details.add(_JobNotificationDetail('Warning', warning.trim()));
+    }
+    if (message.isNotEmpty && message != error && message != warning) {
+      details.add(_JobNotificationDetail('Message', message));
+    }
+    final jobMessage = jobStatus?.message.trim() ?? '';
+    if (jobMessage.isNotEmpty && jobMessage != message && jobMessage != error && jobMessage != warning) {
+      details.add(_JobNotificationDetail('Job message', jobMessage));
+    }
+    details.add(_JobNotificationDetail('Storage', storage));
+    final sourceValue = source?.trim() ?? '';
+    if (sourceValue.isNotEmpty) {
+      details.add(_JobNotificationDetail('Source', sourceValue));
+    }
+    final targetValue = target?.trim() ?? '';
+    if (targetValue.isNotEmpty) {
+      details.add(_JobNotificationDetail('Target', targetValue));
+    }
+    if (durationSeconds != null) {
+      details.add(_JobNotificationDetail('Duration', '${durationSeconds}s'));
+    }
+    if (sizeBytes != null) {
+      details.add(_JobNotificationDetail('Size', _formatBytes(sizeBytes)));
+      details.add(_JobNotificationDetail('Size bytes', sizeBytes.toString()));
+    }
+    if (jobStatus == null) {
+      return details.where((detail) => detail.value.trim().isNotEmpty).toList();
+    }
+    if (jobStatus.scheduleId.trim().isNotEmpty) {
+      details.add(_JobNotificationDetail('Schedule ID', jobStatus.scheduleId.trim()));
+    }
+    details.addAll(<_JobNotificationDetail>[
+      _JobNotificationDetail('Total units', jobStatus.totalUnits.toString()),
+      _JobNotificationDetail('Completed units', jobStatus.completedUnits.toString()),
+      _JobNotificationDetail('Bytes transferred', '${_formatBytes(jobStatus.bytesTransferred)} (${jobStatus.bytesTransferred})'),
+      _JobNotificationDetail('Speed', _formatSpeed(jobStatus.speedBytesPerSec)),
+      _JobNotificationDetail('Average speed', _formatSpeed(jobStatus.averageSpeedBytesPerSec)),
+      _JobNotificationDetail('Physical bytes transferred', '${_formatBytes(jobStatus.physicalBytesTransferred)} (${jobStatus.physicalBytesTransferred})'),
+      _JobNotificationDetail('Physical speed', _formatSpeed(jobStatus.physicalSpeedBytesPerSec)),
+      _JobNotificationDetail('Average physical speed', _formatSpeed(jobStatus.averagePhysicalSpeedBytesPerSec)),
+      _JobNotificationDetail('Total bytes', '${_formatBytes(jobStatus.totalBytes)} (${jobStatus.totalBytes})'),
+      _JobNotificationDetail('Sanity bytes transferred', '${_formatBytes(jobStatus.sanityBytesTransferred)} (${jobStatus.sanityBytesTransferred})'),
+      _JobNotificationDetail('Sanity speed', _formatSpeed(jobStatus.sanitySpeedBytesPerSec)),
+      _JobNotificationDetail('Physical remaining bytes', '${_formatBytes(jobStatus.physicalRemainingBytes)} (${jobStatus.physicalRemainingBytes})'),
+      _JobNotificationDetail('Physical total bytes', '${_formatBytes(jobStatus.physicalTotalBytes)} (${jobStatus.physicalTotalBytes})'),
+      _JobNotificationDetail('Physical progress', '${jobStatus.physicalProgressPercent.toStringAsFixed(1)}%'),
+      _JobNotificationDetail('Writer queued bytes', '${_formatBytes(jobStatus.writerQueuedBytes)} (${jobStatus.writerQueuedBytes})'),
+      _JobNotificationDetail('Writer in-flight bytes', '${_formatBytes(jobStatus.writerInFlightBytes)} (${jobStatus.writerInFlightBytes})'),
+      _JobNotificationDetail('Driver buffered bytes', '${_formatBytes(jobStatus.driverBufferedBytes)} (${jobStatus.driverBufferedBytes})'),
+    ]);
+    if (jobStatus.etaSeconds != null) {
+      details.add(_JobNotificationDetail('ETA', '${jobStatus.etaSeconds}s'));
+    }
+    return details.where((detail) => detail.value.trim().isNotEmpty).toList();
+  }
+
   String _buildEmailTextBody(_JobCompletionNotification notification) {
-    final lines = <String>[notification.title, '', 'Job ID: ${notification.jobId}', 'Type: ${notification.type.name}', 'Status: ${notification.status}', 'Storage: ${notification.storage}'];
-    final source = notification.source?.trim() ?? '';
-    if (source.isNotEmpty) {
-      lines.add('Source: $source');
-    }
-    final target = notification.target?.trim() ?? '';
-    if (target.isNotEmpty) {
-      lines.add('Target: $target');
-    }
-    if (notification.durationSeconds != null) {
-      lines.add('Duration: ${notification.durationSeconds}s');
-    }
-    if (notification.sizeBytes != null) {
-      lines.add('Size: ${_formatBytes(notification.sizeBytes!)}');
+    final lines = <String>[notification.title, ''];
+    for (final detail in notification.details) {
+      lines.add('${detail.label}: ${detail.value}');
     }
     return lines.join('\n');
   }
 
   String _buildEmailHtmlBody(_JobCompletionNotification notification) {
-    final rows = <String>[
-      _buildEmailMetaRow('Job ID', notification.jobId),
-      _buildEmailMetaRow('Type', notification.type.name),
-      _buildEmailMetaRow('Status', notification.status),
-      _buildEmailMetaRow('Storage', notification.storage),
-    ];
-    final source = notification.source?.trim() ?? '';
-    if (source.isNotEmpty) {
-      rows.add(_buildEmailMetaRow('Source', source));
-    }
-    final target = notification.target?.trim() ?? '';
-    if (target.isNotEmpty) {
-      rows.add(_buildEmailMetaRow('Target', target));
-    }
-    if (notification.durationSeconds != null) {
-      rows.add(_buildEmailMetaRow('Duration', '${notification.durationSeconds}s'));
-    }
-    if (notification.sizeBytes != null) {
-      rows.add(_buildEmailMetaRow('Size', _formatBytes(notification.sizeBytes!)));
-    }
+    final rows = notification.details.map((detail) => _buildEmailMetaRow(detail.label, detail.value)).toList();
     return '''
 <!doctype html>
 <html>
@@ -3972,6 +4050,13 @@ class AgentHttpServer {
     final precision = value >= 100 ? 0 : (value >= 10 ? 1 : 2);
     final formatted = value.toStringAsFixed(precision);
     return '$formatted ${units[unitIndex]}';
+  }
+
+  String _formatSpeed(double bytesPerSec) {
+    if (bytesPerSec <= 0) {
+      return '0 B/s';
+    }
+    return '${_formatBytes(bytesPerSec.round())}/s';
   }
 
   Future<_NtfymeResult> _postNtfymeNotification(String token, Map<String, dynamic> payload) async {
@@ -4300,6 +4385,7 @@ class _JobCompletionNotification {
     required this.sizeBytes,
     required this.error,
     required this.warning,
+    required this.details,
   });
 
   final String jobId;
@@ -4314,6 +4400,14 @@ class _JobCompletionNotification {
   final int? sizeBytes;
   final String? error;
   final String? warning;
+  final List<_JobNotificationDetail> details;
+}
+
+class _JobNotificationDetail {
+  const _JobNotificationDetail(this.label, this.value);
+
+  final String label;
+  final String value;
 }
 
 class _NotificationEmailResult {

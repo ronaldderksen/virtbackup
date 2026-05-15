@@ -300,6 +300,7 @@ The agent supports optional native SFTP via FFI:
 - The GUI reads the token from disk and attaches it to all agent requests.
 - SSH passwords are encrypted at rest in `agent.yaml` using AES-GCM with a key derived from the token.
 - Virt Backup account access and refresh tokens are stored in `agent.yaml` under the local agent hostname with the same AES-GCM encryption. Access tokens are valid for 7 days, or 15 minutes when login was started from a debug GUI; refresh tokens are valid for 30 days and rotate when the agent refreshes them.
+- Virt Backup account tokens are managed only through the account endpoints. General `POST /config` saves preserve the current account tokens so a stale GUI or worker settings snapshot cannot roll tokens back.
 - Settings writes are staged to `agent.yaml.tmp`, read back with the normal settings loader, and only then promoted to `agent.yaml`.
 - Encrypted values are stored as `sshPasswordEnc` and decrypted into memory on load.
 - Job result notifications are sent by the agent when backup/restore jobs finish (success or failure).
@@ -308,6 +309,7 @@ The agent supports optional native SFTP via FFI:
 - The agent sends only `to`, `subject`, `textBody`, and `htmlBody` to the backend email endpoint; Mailgun is used only by the backend.
 - `POST /notifications/email/test` sends a test email through the same agent-to-backend path.
 - A restore that completes with warnings sends `status: "warning"` and includes a `warning` field instead of reporting plain success.
+- Job result emails include the job error or warning plus the available job status fields, including identifiers, source/target/storage context, duration, transfer counters, speed counters, queue/backlog counters, and schedule ID when present.
 - `storage` is always included and contains the storage label.
 - `source` is the source VM for backup and the restore point (`<vm> / <timestamp>`) for restore.
 - `target` is included only for restore and contains the restore destination.

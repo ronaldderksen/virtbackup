@@ -440,7 +440,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
 
   Future<ScheduledJob?> _showScheduleDialog({ScheduledJob? existing, required ScheduledJobType type}) async {
     var enabled = existing?.enabled ?? true;
-    var waitForRunningJobs = existing?.waitForRunningJobs ?? false;
+    var waitForRunningJobs = existing?.waitForRunningJobs ?? true;
     var backupAllVms = existing?.backupAllVms ?? false;
     var frequency = existing?.frequency ?? ScheduleFrequency.daily;
     final timeController = TextEditingController(

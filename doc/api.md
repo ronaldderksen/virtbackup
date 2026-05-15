@@ -393,7 +393,7 @@ Email test response (success):
 {"success":true,"message":"Test email delivered.","statusCode":200}
 ```
 
-Job result notifications are built by the agent. Ntfy me messages are sent directly to Ntfy me when `ntfymeToken` is configured. Email notifications are sent only when `notificationEmail` is configured and the agent is signed in to a Virt Backup account. The agent posts `to`, `subject`, `textBody`, and `htmlBody` to the Virt Backup backend; the backend performs only Mailgun delivery. Notification failures are logged and do not change the job state.
+Job result notifications are built by the agent. Ntfy me messages are sent directly to Ntfy me when `ntfymeToken` is configured. Email notifications are sent only when `notificationEmail` is configured and the agent is signed in to a Virt Backup account. Job result emails include the job error or warning plus the available job status fields, including identifiers, source/target/storage context, duration, transfer counters, speed counters, queue/backlog counters, and schedule ID when present. Virt Backup account tokens are managed only through the account endpoints; `POST /config` preserves the agent's current account tokens. The agent posts `to`, `subject`, `textBody`, and `htmlBody` to the Virt Backup backend; the backend performs only Mailgun delivery. Notification failures are logged and do not change the job state.
 
 Backend email transport endpoint:
 
