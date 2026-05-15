@@ -356,7 +356,11 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
   Future<void> _runScheduleNow(ScheduledJob schedule) async {
     try {
       final start = await _agentApiClient.runSchedule(schedule.id);
-      _showSnackBarInfo('Schedule started: ${start.jobId}');
+      if (start.queued) {
+        _showSnackBarInfo('Schedule queued until running jobs finish.');
+      } else {
+        _showSnackBarInfo('Schedule started: ${start.jobId}');
+      }
       await _syncRunningJobs();
     } catch (error, stackTrace) {
       _logError('Schedule run failed.', error, stackTrace);

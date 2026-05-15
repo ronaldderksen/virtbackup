@@ -465,16 +465,17 @@ class AgentJobStatus {
 }
 
 class AgentJobStart {
-  AgentJobStart({required this.jobId});
+  AgentJobStart({required this.jobId, this.queued = false});
 
   final String jobId;
+  final bool queued;
 
   Map<String, dynamic> toMap() {
-    return {'jobId': jobId};
+    return {'jobId': jobId, 'queued': queued};
   }
 
   factory AgentJobStart.fromMap(Map<String, dynamic> json) {
-    return AgentJobStart(jobId: (json['jobId'] ?? '').toString());
+    return AgentJobStart(jobId: (json['jobId'] ?? '').toString(), queued: json['queued'] == true);
   }
 }
 

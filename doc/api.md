@@ -296,7 +296,7 @@ After a successful snapshot commit, the agent scans VM disk directories for `.vi
 
 Fields:
 - `name`: generated from schedule type, server, storage, and VM. Clients should not expose this as an editable field.
-- `waitForRunningJobs`: when `true`, an automatic schedule run that is blocked by a concurrency guard remains pending and starts when the guard allows it. When `false`, the blocked run is recorded as a failed job and sends the configured job result notifications.
+- `waitForRunningJobs`: when `true`, a schedule run that is blocked by a concurrency guard remains pending and starts when the guard allows it. This applies to automatic runs and manual `POST /schedules/{id}/run` starts. When `false`, the blocked run is recorded as a failed job and sends the configured job result notifications.
 - `type`: `backup` or `restore`.
 - `frequency`: `every5Minutes`, `hourly`, `daily`, or `weekly`.
 - `time`: local agent time in `HH:mm` format. Hourly schedules use the minute portion and run every hour on that minute. `every5Minutes` schedules also use the minute portion as an offset, for example `00:02` runs at `:02`, `:07`, `:12`, and so on.
@@ -314,7 +314,12 @@ Starts the schedule immediately, even when `enabled` is `false`.
 
 Response:
 ```json
-{"jobId":"1739440000000-backup"}
+{"jobId":"1739440000000-backup","queued":false}
+```
+
+When the schedule has `waitForRunningJobs: true` and another job is running, the manual run is queued:
+```json
+{"jobId":"","queued":true}
 ```
 
 The GUI schedules list includes quick filters for server, backup/restore type, server-VM combination, and storage. These filters are local UI state and are not stored in `agent.yaml`.

@@ -109,7 +109,7 @@ class AgentHttpServer {
   void _restartScheduleTimer() {
     _scheduleTimer?.cancel();
     _scheduleTimer = null;
-    if (_agentSettings.schedules.where((schedule) => schedule.enabled).isEmpty) {
+    if (_agentSettings.schedules.where((schedule) => schedule.enabled).isEmpty && _waitingScheduleRuns.isEmpty) {
       return;
     }
     unawaited(_runDueSchedules());
@@ -138,11 +138,12 @@ class AgentHttpServer {
     final now = DateTime.now();
     for (final entry in Map<String, String>.from(_waitingScheduleRuns).entries) {
       final schedule = _scheduleById(entry.key);
-      if (schedule == null || !schedule.enabled || !schedule.waitForRunningJobs || !_scheduleRunKeyIsRecent(entry.value, now)) {
+      final manualRun = _scheduleRunKeyIsManual(entry.value);
+      if (schedule == null || (!manualRun && !schedule.enabled) || !schedule.waitForRunningJobs || !_scheduleRunKeyIsRecent(entry.value, now)) {
         _waitingScheduleRuns.remove(entry.key);
         continue;
       }
-      await _tryStartScheduledRun(schedule, entry.value, fromWaitingQueue: true);
+      await _tryStartScheduledRun(schedule, entry.value, fromWaitingQueue: true, allowDisabled: manualRun);
     }
     for (final schedule in _agentSettings.schedules) {
       if (!schedule.enabled || !_scheduleIsDue(schedule, now)) {
@@ -152,14 +153,14 @@ class AgentHttpServer {
       if (_completedScheduleRuns.contains(runKey) || _waitingScheduleRuns[schedule.id] == runKey) {
         continue;
       }
-      await _tryStartScheduledRun(schedule, runKey, fromWaitingQueue: false);
+      await _tryStartScheduledRun(schedule, runKey, fromWaitingQueue: false, allowDisabled: false);
     }
     _completedScheduleRuns.removeWhere((key) => !_scheduleRunKeyIsRecent(key, now));
   }
 
-  Future<void> _tryStartScheduledRun(ScheduledJob schedule, String runKey, {required bool fromWaitingQueue}) async {
+  Future<void> _tryStartScheduledRun(ScheduledJob schedule, String runKey, {required bool fromWaitingQueue, required bool allowDisabled}) async {
     try {
-      await _startScheduledJob(schedule);
+      await _startScheduledJob(schedule, allowDisabled: allowDisabled);
       _completedScheduleRuns.add(runKey);
       _waitingScheduleRuns.remove(schedule.id);
     } on _JobGuardRejected catch (error, stackTrace) {
@@ -224,8 +225,25 @@ class AgentHttpServer {
     return '${schedule.id}:${now.year}-$month-$day $hour:$minute';
   }
 
+  String _manualScheduleRunKey(ScheduledJob schedule) {
+    return '${schedule.id}:manual:${DateTime.now().microsecondsSinceEpoch}';
+  }
+
+  bool _scheduleRunKeyIsManual(String key) {
+    final parts = key.split(':');
+    return parts.length == 3 && parts[1] == 'manual';
+  }
+
   bool _scheduleRunKeyIsRecent(String key, DateTime now) {
     final parts = key.split(':');
+    if (parts.length == 3 && parts[1] == 'manual') {
+      final micros = int.tryParse(parts[2]);
+      if (micros == null) {
+        return false;
+      }
+      final parsed = DateTime.fromMicrosecondsSinceEpoch(micros);
+      return now.difference(parsed).inDays < 2;
+    }
     if (parts.length < 2) {
       return false;
     }
@@ -1516,6 +1534,14 @@ class AgentHttpServer {
           final jobId = await _startScheduledJob(schedule, allowDisabled: true);
           _json(request, 200, AgentJobStart(jobId: jobId).toMap());
         } on _JobGuardRejected catch (error) {
+          if (schedule.waitForRunningJobs) {
+            final runKey = _manualScheduleRunKey(schedule);
+            _waitingScheduleRuns[schedule.id] = runKey;
+            _hostLog('Schedule "${schedule.name}" is queued waiting for running jobs. ${error.message}');
+            _restartScheduleTimer();
+            _json(request, 200, AgentJobStart(jobId: '', queued: true).toMap());
+            return;
+          }
           _json(request, 409, {'error': error.message});
         } catch (error) {
           _json(request, 400, {'error': error.toString()});
@@ -4011,10 +4037,6 @@ class AgentHttpServer {
     required int? sizeBytes,
   }) {
     final details = <_JobNotificationDetail>[_JobNotificationDetail('Job ID', jobId), _JobNotificationDetail('Type', jobStatus?.type.name ?? ''), _JobNotificationDetail('Status', status)];
-    final state = jobStatus?.state.name ?? '';
-    if (state.isNotEmpty) {
-      details.add(_JobNotificationDetail('State', state));
-    }
     if (error != null && error.trim().isNotEmpty) {
       details.add(_JobNotificationDetail('Error', error.trim()));
     }
@@ -4051,27 +4073,13 @@ class AgentHttpServer {
       details.add(_JobNotificationDetail('Schedule ID', jobStatus.scheduleId.trim()));
     }
     details.addAll(<_JobNotificationDetail>[
-      _JobNotificationDetail('Total units', jobStatus.totalUnits.toString()),
-      _JobNotificationDetail('Completed units', jobStatus.completedUnits.toString()),
       _JobNotificationDetail('Bytes transferred', '${_formatBytes(jobStatus.bytesTransferred)} (${jobStatus.bytesTransferred})'),
-      _JobNotificationDetail('Speed', _formatSpeed(jobStatus.speedBytesPerSec)),
       _JobNotificationDetail('Average speed', _formatSpeed(jobStatus.averageSpeedBytesPerSec)),
       _JobNotificationDetail('Physical bytes transferred', '${_formatBytes(jobStatus.physicalBytesTransferred)} (${jobStatus.physicalBytesTransferred})'),
-      _JobNotificationDetail('Physical speed', _formatSpeed(jobStatus.physicalSpeedBytesPerSec)),
       _JobNotificationDetail('Average physical speed', _formatSpeed(jobStatus.averagePhysicalSpeedBytesPerSec)),
       _JobNotificationDetail('Total bytes', '${_formatBytes(jobStatus.totalBytes)} (${jobStatus.totalBytes})'),
-      _JobNotificationDetail('Sanity bytes transferred', '${_formatBytes(jobStatus.sanityBytesTransferred)} (${jobStatus.sanityBytesTransferred})'),
-      _JobNotificationDetail('Sanity speed', _formatSpeed(jobStatus.sanitySpeedBytesPerSec)),
-      _JobNotificationDetail('Physical remaining bytes', '${_formatBytes(jobStatus.physicalRemainingBytes)} (${jobStatus.physicalRemainingBytes})'),
       _JobNotificationDetail('Physical total bytes', '${_formatBytes(jobStatus.physicalTotalBytes)} (${jobStatus.physicalTotalBytes})'),
-      _JobNotificationDetail('Physical progress', '${jobStatus.physicalProgressPercent.toStringAsFixed(1)}%'),
-      _JobNotificationDetail('Writer queued bytes', '${_formatBytes(jobStatus.writerQueuedBytes)} (${jobStatus.writerQueuedBytes})'),
-      _JobNotificationDetail('Writer in-flight bytes', '${_formatBytes(jobStatus.writerInFlightBytes)} (${jobStatus.writerInFlightBytes})'),
-      _JobNotificationDetail('Driver buffered bytes', '${_formatBytes(jobStatus.driverBufferedBytes)} (${jobStatus.driverBufferedBytes})'),
     ]);
-    if (jobStatus.etaSeconds != null) {
-      details.add(_JobNotificationDetail('ETA', '${jobStatus.etaSeconds}s'));
-    }
     return details.where((detail) => detail.value.trim().isNotEmpty).toList();
   }
 
