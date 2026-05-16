@@ -39,6 +39,8 @@ class _DriveApiException implements Exception {
 
   bool get isTransient => statusCode == 429 || statusCode >= 500 || body.contains('userRateLimitExceeded') || body.contains('rateLimitExceeded');
 
+  bool get isPermanent => body.contains('cannotDownloadAbusiveFile');
+
   @override
   String toString() => 'Drive $action failed: $statusCode $body';
 }
@@ -863,7 +865,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   Future<List<int>> _downloadFile(String fileId) async {
     return _withRetry('download file', () async {
       final token = await _ensureAccessToken();
-      final uri = Uri.parse('https://www.googleapis.com/drive/v3/files/$fileId?alt=media');
+      final uri = Uri.parse('https://www.googleapis.com/drive/v3/files/$fileId?alt=media&acknowledgeAbuse=true');
       final headers = _authHeaders(token);
       final response = await _requestWithApiLog(
         action: 'download',
@@ -876,7 +878,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         _logInfo('gdrive: downloadFile request headers=${_redactHeaders(headers)}');
         _logInfo('gdrive: downloadFile response headers=${response.headers}');
         _logInfo('gdrive: downloadFile response body=${response.body}');
-        throw 'Drive download failed: ${response.statusCode} ${response.body}';
+        throw _driveApiException(action: 'download', response: response);
       }
       return response.bodyBytes;
     });
@@ -1128,6 +1130,11 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         if (error is _PermanentGdriveConfigError) {
           _logInfo('gdrive: $label failed: $error');
           await _logGdriveError('gdrive: $label failed: $error', stackTrace: stackTrace);
+          rethrow;
+        }
+        if (error is _DriveApiException && error.isPermanent) {
+          _logInfo('gdrive: $label failed permanently: $error');
+          await _logGdriveError('gdrive: $label failed permanently: $error', stackTrace: stackTrace);
           rethrow;
         }
         final transient = error is _DriveApiException && error.isTransient;

@@ -108,6 +108,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _isSavingAll = false;
   bool _isVmActionRunning = false;
   String _vmActionStatusMessage = '';
+  String _vmActionVmName = '';
   bool _isBackupRunning = false;
   bool _isRefreshingServer = false;
   bool _isLoadingRestoreEntries = false;
@@ -3068,6 +3069,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     setState(() {
       _isVmActionRunning = true;
       _vmActionStatusMessage = 'Sending ${_vmActionLabel(action)} for ${vm.name}...';
+      _vmActionVmName = vm.name;
     });
     try {
       if (server.connectionType == ConnectionType.ssh) {
@@ -3091,6 +3093,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         setState(() {
           _isVmActionRunning = false;
           _vmActionStatusMessage = '';
+          _vmActionVmName = '';
         });
       }
     }

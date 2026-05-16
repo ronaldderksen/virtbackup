@@ -1478,7 +1478,11 @@ class AgentHttpServer {
           final preview = await _previewVmRename(server, vmName);
           _json(request, 200, preview);
         } catch (error, stackTrace) {
-          _hostLogError('VM rename preview failed for ${server.name}/$vmName.', error, stackTrace);
+          if (_isExpectedVmRenamePreviewError(error)) {
+            _hostLog('VM rename preview failed for ${server.name}/$vmName. $error');
+          } else {
+            _hostLogError('VM rename preview failed for ${server.name}/$vmName.', error, stackTrace);
+          }
           _json(request, 400, {'error': error.toString()});
         }
         return;
@@ -2614,6 +2618,16 @@ class AgentHttpServer {
       'vmName': vmName,
       'disks': disks.map((disk) => {'target': disk.key, 'path': disk.value, 'directory': _remoteDirName(disk.value), 'fileName': _remoteBaseName(disk.value)}).toList(),
     };
+  }
+
+  bool _isExpectedVmRenamePreviewError(Object error) {
+    final message = error.toString();
+    return message == 'VM must be stopped before rename.' ||
+        message == 'VM has no file disks to rename.' ||
+        message.startsWith('Rename is blocked:') ||
+        message.startsWith('Invalid VM name:') ||
+        message.startsWith('Cannot inspect VM snapshots.') ||
+        message.startsWith('Cannot inspect VM checkpoints.');
   }
 
   Future<void> _applyVmRename({required ServerConfig server, required String vmName, required String newVmName, required Map<String, String> diskFileNamesByTarget}) async {
@@ -4362,9 +4376,12 @@ class AgentHttpServer {
     if (durationSeconds != null) {
       details.add(_JobNotificationDetail('Duration', '${durationSeconds}s'));
     }
+    final isRestore = jobStatus?.type == AgentJobType.restore;
     if (sizeBytes != null) {
-      details.add(_JobNotificationDetail('Size', _formatBytes(sizeBytes)));
-      details.add(_JobNotificationDetail('Size bytes', sizeBytes.toString()));
+      details.add(_JobNotificationDetail('Size', isRestore ? '${_formatBytes(sizeBytes)} ($sizeBytes bytes)' : _formatBytes(sizeBytes)));
+      if (!isRestore) {
+        details.add(_JobNotificationDetail('Size bytes', sizeBytes.toString()));
+      }
     }
     if (jobStatus == null) {
       return details.where((detail) => detail.value.trim().isNotEmpty).toList();
@@ -4372,14 +4389,21 @@ class AgentHttpServer {
     if (jobStatus.scheduleId.trim().isNotEmpty) {
       details.add(_JobNotificationDetail('Schedule ID', jobStatus.scheduleId.trim()));
     }
-    details.addAll(<_JobNotificationDetail>[
-      _JobNotificationDetail('Bytes transferred', '${_formatBytes(jobStatus.bytesTransferred)} (${jobStatus.bytesTransferred})'),
-      _JobNotificationDetail('Average speed', _formatSpeed(jobStatus.averageSpeedBytesPerSec)),
-      _JobNotificationDetail('Physical bytes transferred', '${_formatBytes(jobStatus.physicalBytesTransferred)} (${jobStatus.physicalBytesTransferred})'),
-      _JobNotificationDetail('Average physical speed', _formatSpeed(jobStatus.averagePhysicalSpeedBytesPerSec)),
-      _JobNotificationDetail('Total bytes', '${_formatBytes(jobStatus.totalBytes)} (${jobStatus.totalBytes})'),
-      _JobNotificationDetail('Physical total bytes', '${_formatBytes(jobStatus.physicalTotalBytes)} (${jobStatus.physicalTotalBytes})'),
-    ]);
+    if (isRestore) {
+      details.addAll(<_JobNotificationDetail>[
+        _JobNotificationDetail('Bytes transferred', _formatBytes(jobStatus.bytesTransferred)),
+        _JobNotificationDetail('Average speed', _formatSpeed(jobStatus.averageSpeedBytesPerSec)),
+      ]);
+    } else {
+      details.addAll(<_JobNotificationDetail>[
+        _JobNotificationDetail('Bytes transferred', '${_formatBytes(jobStatus.bytesTransferred)} (${jobStatus.bytesTransferred})'),
+        _JobNotificationDetail('Average speed', _formatSpeed(jobStatus.averageSpeedBytesPerSec)),
+        _JobNotificationDetail('Physical bytes transferred', '${_formatBytes(jobStatus.physicalBytesTransferred)} (${jobStatus.physicalBytesTransferred})'),
+        _JobNotificationDetail('Average physical speed', _formatSpeed(jobStatus.averagePhysicalSpeedBytesPerSec)),
+        _JobNotificationDetail('Total bytes', '${_formatBytes(jobStatus.totalBytes)} (${jobStatus.totalBytes})'),
+        _JobNotificationDetail('Physical total bytes', '${_formatBytes(jobStatus.physicalTotalBytes)} (${jobStatus.physicalTotalBytes})'),
+      ]);
+    }
     return details.where((detail) => detail.value.trim().isNotEmpty).toList();
   }
 

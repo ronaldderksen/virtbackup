@@ -58,16 +58,6 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
                     },
                   ),
                   const SizedBox(height: 12),
-                  if (_vmActionStatusMessage.isNotEmpty) ...[
-                    Row(
-                      children: [
-                        const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
-                        const SizedBox(width: 12),
-                        Expanded(child: Text(_vmActionStatusMessage, style: Theme.of(context).textTheme.bodyMedium)),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                  ],
                   Builder(
                     builder: (context) {
                       final server = _getSelectedServer();
@@ -87,6 +77,7 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
                         itemBuilder: (context, index) {
                           final vm = vms[index];
                           final isRunning = vm.powerState == VmPowerState.running;
+                          final isActiveVmAction = _isVmActionRunning && _vmActionVmName == vm.name;
                           return Padding(
                             padding: const EdgeInsets.symmetric(vertical: 8),
                             child: Row(
@@ -109,6 +100,11 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
                                   runSpacing: 4,
                                   alignment: WrapAlignment.end,
                                   children: [
+                                    if (isActiveVmAction)
+                                      Tooltip(
+                                        message: _vmActionStatusMessage,
+                                        child: const Padding(padding: EdgeInsets.symmetric(horizontal: 8, vertical: 8), child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))),
+                                      ),
                                     if (!isRunning) TextButton(onPressed: _isVmActionRunning || server == null ? null : () => _renameVm(server, vm), child: const Text('Rename')),
                                     if (!isRunning) TextButton(onPressed: _isVmActionRunning || server == null ? null : () => _runVmAction(server, vm, VmAction.start), child: const Text('Run')),
                                     if (isRunning) ...[
@@ -143,6 +139,7 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
     _updateUi(() {
       _isVmActionRunning = true;
       _vmActionStatusMessage = 'Preparing rename for ${vm.name}...';
+      _vmActionVmName = vm.name;
     });
     late final Map<String, dynamic> preview;
     try {
@@ -161,6 +158,7 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
         _updateUi(() {
           _isVmActionRunning = false;
           _vmActionStatusMessage = '';
+          _vmActionVmName = '';
         });
       }
     }
@@ -174,6 +172,7 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
     _updateUi(() {
       _isVmActionRunning = true;
       _vmActionStatusMessage = 'Checking rename targets for ${vm.name}...';
+      _vmActionVmName = vm.name;
     });
     try {
       _updateUi(() {
@@ -197,6 +196,7 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
         _updateUi(() {
           _isVmActionRunning = false;
           _vmActionStatusMessage = '';
+          _vmActionVmName = '';
         });
       }
     }
