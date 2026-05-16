@@ -26,6 +26,14 @@ bool _isExpectedRestoreFailure(Object error) {
   return error.toString().startsWith('server is missing required tools:');
 }
 
+double _averageBytesPerSecond(DateTime startedAt, int bytes) {
+  final elapsedSeconds = DateTime.now().difference(startedAt).inMilliseconds / 1000;
+  if (elapsedSeconds <= 0 || bytes <= 0) {
+    return 0;
+  }
+  return bytes / elapsedSeconds;
+}
+
 void restoreWorkerMain(Map<String, dynamic> init) {
   final mainPort = init['sendPort'] as SendPort;
   final commandPort = ReceivePort();
@@ -125,6 +133,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
   }
 
   Future<void> runRestore(Map<String, dynamic> payload) async {
+    final restoreStartedAt = DateTime.now();
     final jobId = payload['jobId']?.toString() ?? '';
     final driverId = payload['driverId']?.toString().trim() ?? '';
     final backupPath = payload['backupPath']?.toString() ?? '';
@@ -546,9 +555,12 @@ void restoreWorkerMain(Map<String, dynamic> init) {
             completedUnits: checkedBlocks,
             bytesTransferred: bytesTransferred,
             speedBytesPerSec: 0,
-            physicalBytesTransferred: 0,
+            averageSpeedBytesPerSec: _averageBytesPerSecond(restoreStartedAt, bytesTransferred),
+            physicalBytesTransferred: bytesTransferred,
             physicalSpeedBytesPerSec: 0,
+            averagePhysicalSpeedBytesPerSec: _averageBytesPerSecond(restoreStartedAt, bytesTransferred),
             totalBytes: totalBytes,
+            physicalTotalBytes: totalBytes,
             sanityBytesTransferred: 0,
             sanitySpeedBytesPerSec: 0,
           ),
@@ -603,9 +615,12 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           completedUnits: 0,
           bytesTransferred: bytesTransferred,
           speedBytesPerSec: 0,
-          physicalBytesTransferred: 0,
+          averageSpeedBytesPerSec: _averageBytesPerSecond(restoreStartedAt, bytesTransferred),
+          physicalBytesTransferred: bytesTransferred,
           physicalSpeedBytesPerSec: 0,
+          averagePhysicalSpeedBytesPerSec: _averageBytesPerSecond(restoreStartedAt, bytesTransferred),
           totalBytes: totalBytes,
+          physicalTotalBytes: totalBytes,
           sanityBytesTransferred: 0,
           sanitySpeedBytesPerSec: 0,
         ),
