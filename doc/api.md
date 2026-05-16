@@ -521,7 +521,7 @@ Response:
 }
 ```
 
-During server inventory the agent checks for required remote tools: `chmod`, `echo`, `find`, `lsof`, `mkdir`, `mv`, `qemu-img`, `rm`, `stat`, `test`, `tr`, and `virsh`. `hashblocks` is uploaded by the agent and is not part of this check. Backups and restores fail before starting when any required remote tool is missing.
+During explicit server refreshes the agent checks for required remote tools: `chmod`, `echo`, `find`, `lsof`, `mkdir`, `mv`, `qemu-img`, `rm`, `stat`, `test`, `tr`, and `virsh`. `hashblocks` is uploaded by the agent and is not part of this check. Periodic VM inventory updates reuse the latest known missing-tool state instead of running the tool check again. Backups and restores fail before starting when any required remote tool is missing.
 Keep this list current whenever future SSH commands introduce additional remote executables.
 
 ### Refresh server inventory (manual)
@@ -740,6 +740,7 @@ Body:
 Notes:
 - `storageId` selects one configured storage for restore reads.
 - `auto_rename` restores with the original VM name and disk paths unless the target VM or one of the target disk paths already exists; on conflict it rewrites the VM XML and every restored disk/chain path to new file-based paths. If a generated candidate also exists, the agent tries `-1`, `-2`, and so on until the VM name and all disk paths are free. Unsupported or ambiguous paths fail restore.
+- Restore definitions remove libvirt `backingStore` metadata from the embedded domain XML so restored standalone qcow2 files are not defined with stale backing references.
 - For backward compatibility, `driverId` is still accepted.
 
 Response:

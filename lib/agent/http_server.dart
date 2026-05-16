@@ -875,7 +875,7 @@ class AgentHttpServer {
         for (final server in nextById.values) {
           if (server.connectionType == ConnectionType.ssh) {
             await _safeStopEventListener(server.id);
-            await _refreshServer(server, reason: 'settings/changed');
+            await _refreshServer(server, reason: 'settings/changed', refreshRequiredTools: true);
             await _safeStartEventListener(server);
           } else {
             _vmStatusByServerId.remove(server.id);
@@ -891,7 +891,7 @@ class AgentHttpServer {
           continue;
         }
         if (server.connectionType == ConnectionType.ssh) {
-          await _refreshServer(server, reason: 'settings/added');
+          await _refreshServer(server, reason: 'settings/added', refreshRequiredTools: true);
           await _safeStartEventListener(server);
         } else {
           _vmStatusByServerId.remove(id);
@@ -906,7 +906,7 @@ class AgentHttpServer {
         }
         await _safeStopEventListener(id);
         if (server.connectionType == ConnectionType.ssh) {
-          await _refreshServer(server, reason: 'settings/changed');
+          await _refreshServer(server, reason: 'settings/changed', refreshRequiredTools: true);
           await _safeStartEventListener(server);
         } else {
           _vmStatusByServerId.remove(id);
@@ -1059,18 +1059,20 @@ class AgentHttpServer {
   Future<void> _refreshAllServers() async {
     final servers = _agentSettings.servers.where((server) => server.connectionType == ConnectionType.ssh).toList();
     for (final server in servers) {
-      await _refreshServer(server, reason: 'startup/settings');
+      await _refreshServer(server, reason: 'startup/settings', refreshRequiredTools: true);
       await _safeStartEventListener(server);
     }
   }
 
-  Future<void> _refreshServer(ServerConfig server, {required String reason}) async {
+  Future<void> _refreshServer(ServerConfig server, {required String reason, required bool refreshRequiredTools}) async {
     try {
       _hostLog('Refreshing server ${server.name} (reason: $reason).');
-      final missingTools = await _host.missingRequiredRemoteTools(server);
-      _missingToolsByServerId[server.id] = missingTools;
-      if (missingTools.isNotEmpty) {
-        _hostLog('Server ${server.name} missing required tools: ${missingTools.join(', ')}');
+      final missingTools = refreshRequiredTools ? await _host.missingRequiredRemoteTools(server) : _missingToolsByServerId[server.id] ?? const <String>[];
+      if (refreshRequiredTools) {
+        _missingToolsByServerId[server.id] = missingTools;
+        if (missingTools.isNotEmpty) {
+          _hostLog('Server ${server.name} missing required tools: ${missingTools.join(', ')}');
+        }
       }
       if (missingTools.contains('tr') || missingTools.contains('virsh')) {
         _vmStatusByServerId[server.id] = [];
@@ -1184,7 +1186,7 @@ class AgentHttpServer {
     _refreshDebounceTimers[server.id]?.cancel();
     _refreshDebounceTimers[server.id] = Timer(const Duration(seconds: 2), () async {
       _refreshDebounceTimers.remove(server.id);
-      await _refreshServer(server, reason: 'event-sync');
+      await _refreshServer(server, reason: 'event-sync', refreshRequiredTools: false);
     });
   }
 
@@ -1413,7 +1415,7 @@ class AgentHttpServer {
           _json(request, 400, {'success': false});
           return;
         }
-        await _refreshServer(server, reason: 'manual');
+        await _refreshServer(server, reason: 'manual', refreshRequiredTools: true);
         _json(request, 200, {'success': true});
         return;
       }
@@ -1509,7 +1511,7 @@ class AgentHttpServer {
         }
         try {
           await _applyVmRename(server: server, vmName: vmName, newVmName: newVmName, diskFileNamesByTarget: diskFileNames);
-          await _refreshServer(server, reason: 'rename');
+          await _refreshServer(server, reason: 'rename', refreshRequiredTools: false);
           _json(request, 200, {'success': true});
         } catch (error, stackTrace) {
           _hostLogError('VM rename apply failed for ${server.name}/$vmName -> $newVmName.', error, stackTrace);
@@ -1532,7 +1534,7 @@ class AgentHttpServer {
         }
         try {
           await _host.cleanupVmOverlays(server, VmEntry(id: vmName, name: vmName, powerState: VmPowerState.stopped));
-          await _refreshServer(server, reason: 'cleanup');
+          await _refreshServer(server, reason: 'cleanup', refreshRequiredTools: false);
           _json(request, 200, {'success': true});
         } catch (_) {
           _json(request, 200, {'success': false});
@@ -2606,7 +2608,8 @@ class AgentHttpServer {
     if (disks.isEmpty) {
       throw 'VM has no file disks to rename.';
     }
-    await _ensureVmRenameHasNoSnapshotsCheckpointsOrBackingChains(server, vmName: vmName, inactiveDisks: disks);
+    final xml = await _remoteVmInactiveXml(server, vmName);
+    await _ensureVmRenameHasNoSnapshotsCheckpointsOrBackingChains(server, vmName: vmName, inactiveDisks: disks, inactiveXml: xml);
     return {
       'vmName': vmName,
       'disks': disks.map((disk) => {'target': disk.key, 'path': disk.value, 'directory': _remoteDirName(disk.value), 'fileName': _remoteBaseName(disk.value)}).toList(),
@@ -2627,7 +2630,8 @@ class AgentHttpServer {
     if (disks.isEmpty) {
       throw 'VM has no file disks to rename.';
     }
-    await _ensureVmRenameHasNoSnapshotsCheckpointsOrBackingChains(server, vmName: vmName, inactiveDisks: disks);
+    final oldXml = await _remoteVmInactiveXml(server, vmName);
+    await _ensureVmRenameHasNoSnapshotsCheckpointsOrBackingChains(server, vmName: vmName, inactiveDisks: disks, inactiveXml: oldXml);
     final pathByTarget = <String, String>{};
     final targetPaths = <String>{};
     var hasChanges = newVmName != vmName;
@@ -2658,11 +2662,6 @@ class AgentHttpServer {
     if (!hasChanges) {
       throw 'No rename changes requested.';
     }
-    final xmlResult = await _host.runSshCommand(server, 'virsh dumpxml --inactive ${_shellQuote(vmName)}');
-    if ((xmlResult.exitCode ?? 1) != 0) {
-      throw xmlResult.stderr.trim().isEmpty ? 'Cannot dump VM XML.' : xmlResult.stderr.trim();
-    }
-    final oldXml = xmlResult.stdout;
     var xml = oldXml;
     xml = _replaceVmRenameDomainName(xml, oldName: vmName, newName: newVmName);
     for (final disk in disks) {
@@ -2742,6 +2741,16 @@ class AgentHttpServer {
     return result.stdout.trim().toLowerCase();
   }
 
+  Future<String> _remoteVmInactiveXml(ServerConfig server, String vmName) async {
+    final command = 'virsh dumpxml --inactive ${_shellQuote(vmName)}';
+    final result = await _host.runSshCommand(server, command);
+    if ((result.exitCode ?? 1) != 0) {
+      _logFailedRemoteCommand(command: command, result: result);
+      throw result.stderr.trim().isEmpty ? 'Cannot dump VM XML.' : result.stderr.trim();
+    }
+    return result.stdout;
+  }
+
   Future<bool> _remoteVmExists(ServerConfig server, String vmName) async {
     final result = await _host.runSshCommand(server, 'virsh dominfo ${_shellQuote(vmName)}');
     return (result.exitCode ?? 1) == 0;
@@ -2752,7 +2761,15 @@ class AgentHttpServer {
     return (result.exitCode ?? 1) == 0;
   }
 
-  Future<void> _ensureVmRenameHasNoSnapshotsCheckpointsOrBackingChains(ServerConfig server, {required String vmName, required List<MapEntry<String, String>> inactiveDisks}) async {
+  Future<void> _ensureVmRenameHasNoSnapshotsCheckpointsOrBackingChains(
+    ServerConfig server, {
+    required String vmName,
+    required List<MapEntry<String, String>> inactiveDisks,
+    required String inactiveXml,
+  }) async {
+    if (_xmlHasNonEmptyBackingStore(inactiveXml)) {
+      throw 'Rename is blocked: VM XML contains backingStore metadata.';
+    }
     final snapshotCommand = 'virsh snapshot-list --name ${_shellQuote(vmName)}';
     final snapshotResult = await _host.runSshCommand(server, snapshotCommand);
     if ((snapshotResult.exitCode ?? 1) != 0) {
@@ -2789,6 +2806,16 @@ class AgentHttpServer {
         throw 'Rename is blocked: disk ${disk.key} has a backing chain.';
       }
     }
+  }
+
+  bool _xmlHasNonEmptyBackingStore(String xml) {
+    for (final match in RegExp(r'<backingStore\b[^>]*>').allMatches(xml)) {
+      final tag = match.group(0)?.trim() ?? '';
+      if (!tag.endsWith('/>')) {
+        return true;
+      }
+    }
+    return false;
   }
 
   Future<List<String>> _remoteVmRenameBackingChain(ServerConfig server, String sourcePath) async {
@@ -3263,7 +3290,7 @@ class AgentHttpServer {
         final sizeBytes = current != null && current.totalBytes > 0 ? current.totalBytes : null;
         if (state == AgentJobState.failure && control.canceled != true) {
           try {
-            await _refreshServer(server, reason: 'backup-failed');
+            await _refreshServer(server, reason: 'backup-failed', refreshRequiredTools: false);
           } catch (_) {}
         }
         _updateJob(

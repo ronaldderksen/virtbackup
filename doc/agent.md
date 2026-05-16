@@ -55,7 +55,7 @@ Key modules under `lib/agent`:
 7. During restore upload, the native SFTP writer computes the complete disk SHA-256 while writing. A mismatch with manifest `disk_sha256` is logged as a warning and the restore continues.
 8. Restore requires an explicit known `driverId` and `decision`; unknown restore drivers fail instead of falling back to filesystem.
 9. Restore fails when manifest blocks emit fewer bytes than `file_size`; missing trailing data is never padded with zeroes. A final partial block is truncated to `file_size`.
-10. Restore decision `auto_rename` keeps original names when there is no conflict. If the target VM or any restored disk path already exists, restore rewrites the VM name, removes the XML UUID, rewrites file-based disk paths for every restored disk/chain item, and searches the first free restore-date suffix. If that candidate exists it tries `-1`, `-2`, and so on. Unsupported or ambiguous XML/path input still fails hard.
+10. Restore decision `auto_rename` keeps original names when there is no conflict. If the target VM or any restored disk path already exists, restore rewrites the VM name, removes the XML UUID, rewrites file-based disk paths for every restored disk/chain item, and searches the first free restore-date suffix. Restore definitions remove libvirt `backingStore` metadata from the embedded domain XML so restored standalone qcow2 files are not defined with stale backing references. If that candidate exists it tries `-1`, `-2`, and so on. Unsupported or ambiguous XML/path input still fails hard.
 11. Restore writes disks to `<target>.inprogress` paths first. After upload, hash/size checks, and any chain rebase, the worker renames all restored disks to their final XML paths immediately before `virsh define`.
 
 ### Events
@@ -232,10 +232,11 @@ Endpoints include:
 - `GET /config`, `POST /config`: settings.
 - `POST /config` persists settings immediately and performs server refresh/listener restart in the background.
 - `POST /ntfyme/test`: send a test Ntfy me notification using the configured token.
-- `GET /servers/{id}/vms`: VM inventory and missing required remote tools.
+- `GET /servers/{id}/vms`: VM inventory and the latest known missing required remote tools.
+- Explicit server refreshes check required remote tools. Periodic VM inventory updates reuse the latest known missing-tool state.
 - Keep the required remote tools list in sync when future SSH commands add new executables. `hashblocks` is uploaded by the agent and is intentionally excluded.
 - `POST /servers/{id}/rename/preview`: inspect a stopped VM and return its file-backed disks for rename.
-- `POST /servers/{id}/rename/apply`: rename a stopped VM and optionally rename disk file names in-place. The storage directory cannot change; the agent rechecks VM state, snapshots, backing chains, existing VM/path conflicts, source paths, target paths, and XML references before applying.
+- `POST /servers/{id}/rename/apply`: rename a stopped VM and optionally rename disk file names in-place. The storage directory cannot change; the agent rechecks VM state, snapshots, backing chains, stale XML `backingStore` metadata, existing VM/path conflicts, source paths, target paths, and XML references before applying.
 - The GUI rename dialog has an optional auto disk name checkbox that fills disk file names as `<vm-name>-<disk-target><original-extension>` while keeping the storage directory fixed.
 - `POST /servers/{id}/backup`: start backup job (supports `storageId`; legacy `driverId` is still accepted).
 - `POST /servers/{id}/restore/start`: start restore job (supports `storageId`; legacy `driverId` is still accepted).

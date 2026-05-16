@@ -58,7 +58,8 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     final remoteXmlPath = '/var/tmp/virtbackup/restore-${_sanitizeFileName(timestamp)}-${_sanitizeFileName(vmName)}.xml';
     await host.runSshCommand(server, 'mkdir -p "/var/tmp/virtbackup"');
     final xmlTempFile = File('${xmlFile.path}.restore_tmp');
-    await xmlTempFile.writeAsString(xmlContent);
+    final defineXmlContent = _removeLibvirtBackingStores(xmlContent);
+    await xmlTempFile.writeAsString(defineXmlContent);
     try {
       sendStatus(
         AgentJobStatus(
@@ -1209,6 +1210,73 @@ String _removeDomainUuidForAutoRename(String xml) {
     return xml;
   }
   return xml.replaceFirst(pattern, '');
+}
+
+String _removeLibvirtBackingStores(String xml) {
+  var updated = xml;
+  while (true) {
+    final range = _findFirstXmlElementRange(updated, 'backingStore');
+    if (range == null) {
+      return updated;
+    }
+    updated = updated.replaceRange(range.start, range.end, '');
+  }
+}
+
+({int start, int end})? _findFirstXmlElementRange(String xml, String elementName) {
+  final openPattern = RegExp('<$elementName\\b[^>]*>');
+  final closePattern = RegExp('</$elementName\\s*>');
+  final firstOpen = openPattern.firstMatch(xml);
+  if (firstOpen == null) {
+    return null;
+  }
+  var removeStart = firstOpen.start;
+  final previousNewline = xml.lastIndexOf('\n', firstOpen.start);
+  if (previousNewline >= 0 && xml.substring(previousNewline + 1, firstOpen.start).trim().isEmpty) {
+    removeStart = previousNewline;
+  }
+  if (xml.substring(firstOpen.start, firstOpen.end).endsWith('/>')) {
+    var removeEnd = firstOpen.end;
+    if (removeEnd < xml.length && xml.codeUnitAt(removeEnd) == 10) {
+      removeEnd += 1;
+    }
+    return (start: removeStart, end: removeEnd);
+  }
+
+  var depth = 1;
+  var cursor = firstOpen.end;
+  while (depth > 0) {
+    final nextOpen = _firstXmlMatchAfter(openPattern, xml, cursor);
+    final nextClose = _firstXmlMatchAfter(closePattern, xml, cursor);
+    final nextOpenStart = nextOpen?.start ?? -1;
+    final nextCloseStart = nextClose?.start ?? -1;
+    if (nextCloseStart < 0) {
+      throw 'restore failed: invalid domain XML backingStore element.';
+    }
+    if (nextOpenStart >= 0 && nextOpenStart < nextCloseStart) {
+      final openEnd = nextOpen!.end;
+      if (!xml.substring(nextOpenStart, openEnd).endsWith('/>')) {
+        depth += 1;
+      }
+      cursor = openEnd;
+      continue;
+    }
+    depth -= 1;
+    cursor = nextClose!.end;
+  }
+  if (cursor < xml.length && xml.codeUnitAt(cursor) == 10) {
+    cursor += 1;
+  }
+  return (start: removeStart, end: cursor);
+}
+
+({int start, int end})? _firstXmlMatchAfter(RegExp pattern, String xml, int cursor) {
+  final tail = xml.substring(cursor);
+  final match = pattern.firstMatch(tail);
+  if (match == null) {
+    return null;
+  }
+  return (start: cursor + match.start, end: cursor + match.end);
 }
 
 String _replaceXmlDiskPathsForAutoRename(String xml, Map<String, String> pathMap) {
