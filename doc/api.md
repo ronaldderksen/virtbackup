@@ -39,6 +39,8 @@ If the browser is not signed in, the website sends the user through the normal w
 
 - `http://127.0.0.1:<port>/auth/callback?code=<one-time-code>&state=<same-state>`
 
+The local callback page shows a styled completion message and automatically redirects successful logins to the configured Virt Backup website.
+
 The app verifies `state` before exchanging the code. The app also keeps the PKCE `code_verifier` that produced `code_challenge`; the backend requires that verifier during code exchange.
 
 Browser-login codes and their PKCE challenges are stored in `public.app_login_codes` so `/app-login` and `/api/auth/exchange` can run on different backend pods. Codes expire after 2 minutes and are removed when exchanged.
@@ -439,6 +441,8 @@ Email test response (success):
 ```json
 {"success":true,"message":"Test email delivered.","statusCode":200}
 ```
+
+Email test failures include the backend HTTP status and response body when available, and the GUI shows that backend error content in a dialog that the user must close.
 
 Job result notifications are built by the agent. Ntfy me messages are sent directly to Ntfy me when `ntfymeToken` is configured. Email notifications are sent only when `notificationEmail` is configured and the agent is signed in to a Virt Backup account. Job result emails include the job error or warning plus the available job status fields, including identifiers, source/target/storage context, duration, transfer counters, speed counters, queue/backlog counters, and schedule ID when present. Virt Backup account tokens are managed only through the account endpoints; `POST /config` preserves the agent's current account tokens. The agent posts `to`, `subject`, `textBody`, and `htmlBody` to the Virt Backup backend; the backend performs only Mailgun delivery. Notification failures are logged and do not change the job state.
 

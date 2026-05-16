@@ -208,11 +208,51 @@ class AgentApiClient {
     try {
       final decoded = jsonDecode(response.body);
       if (decoded is Map) {
-        final message = decoded['error']?.toString() ?? 'Agent responded ${response.statusCode}';
+        final message = _emailTestErrorMessage(response.statusCode, decoded);
         return EmailTestResult(success: false, message: message);
       }
     } catch (_) {}
     return EmailTestResult(success: false, message: 'Agent responded ${response.statusCode}');
+  }
+
+  String _emailTestErrorMessage(int agentStatusCode, Map<dynamic, dynamic> decoded) {
+    final parts = <String>[];
+    final error = decoded['error']?.toString().trim();
+    if (error != null && error.isNotEmpty) {
+      parts.add(error);
+    }
+    final statusCode = decoded['statusCode']?.toString().trim();
+    if (statusCode != null && statusCode.isNotEmpty && !parts.any((part) => part.contains(statusCode))) {
+      parts.add('status $statusCode');
+    }
+    final backendBody = _emailTestBackendBodyMessage(decoded['body']);
+    if (backendBody != null && backendBody.isNotEmpty && !parts.contains(backendBody)) {
+      parts.add(backendBody);
+    }
+    if (parts.isEmpty) {
+      return 'Agent responded $agentStatusCode';
+    }
+    return parts.join(': ');
+  }
+
+  String? _emailTestBackendBodyMessage(Object? body) {
+    final rawBody = body?.toString().trim();
+    if (rawBody == null || rawBody.isEmpty) {
+      return null;
+    }
+    try {
+      final decodedBody = jsonDecode(rawBody);
+      if (decodedBody is Map) {
+        final fields = ['error', 'message', 'detail', 'details'];
+        for (final field in fields) {
+          final value = decodedBody[field]?.toString().trim();
+          if (value != null && value.isNotEmpty) {
+            return value;
+          }
+        }
+      }
+    } catch (_) {}
+    return rawBody;
   }
 
   Future<SftpTestResult> testSftpConnection({required String host, required int port, required String username, required String password, required String basePath}) async {

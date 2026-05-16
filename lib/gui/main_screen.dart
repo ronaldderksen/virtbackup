@@ -290,11 +290,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         }
         final error = request.uri.queryParameters['error'] ?? '';
         request.response.headers.contentType = ContentType.html;
-        request.response.write(
-          error.isEmpty
-              ? '<!doctype html><html><body><h1>Signed in</h1><p>You can return to Virt Backup.</p></body></html>'
-              : '<!doctype html><html><body><h1>Sign in failed</h1><p>You can return to Virt Backup.</p></body></html>',
-        );
+        request.response.write(_buildVirtBackupAccountCallbackHtml(success: error.isEmpty, siteUri: _accountBaseUri));
         unawaited(request.response.close());
         if (!callbackCompleter.isCompleted) {
           callbackCompleter.complete(request.uri);
@@ -376,6 +372,47 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     final random = Random.secure();
     final bytes = List<int>.generate(24, (_) => random.nextInt(256));
     return base64UrlEncode(bytes).replaceAll('=', '');
+  }
+
+  String _buildVirtBackupAccountCallbackHtml({required bool success, required Uri siteUri}) {
+    final escapedSiteUri = const HtmlEscape(HtmlEscapeMode(escapeSlash: false)).convert(siteUri.toString());
+    final encodedSiteUri = jsonEncode(siteUri.toString());
+    final title = success ? 'Signed in' : 'Sign in failed';
+    final message = success
+        ? 'You can return to Virt Backup. This browser tab will continue to the Virt Backup website.'
+        : 'The browser sign-in did not complete. You can return to Virt Backup and try again.';
+    final metaRefresh = success ? '<meta http-equiv="refresh" content="2;url=$escapedSiteUri">' : '';
+    final redirectScript = success ? '<script>window.setTimeout(function(){window.location.replace($encodedSiteUri);},1200);</script>' : '';
+    final action = success ? '<a class="button" href="$escapedSiteUri">Open Virt Backup</a>' : '';
+    return '''
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  $metaRefresh
+  <title>$title - Virt Backup</title>
+  <style>
+    :root { color-scheme: light; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f8fafc; color: #111827; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { width: min(520px, calc(100vw - 40px)); padding: 32px; border: 1px solid #e5e7eb; border-radius: 12px; background: #ffffff; box-shadow: 0 18px 45px rgba(15, 23, 42, 0.12); }
+    .mark { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 999px; background: ${success ? '#dcfce7' : '#fee2e2'}; color: ${success ? '#166534' : '#991b1b'}; font-size: 24px; font-weight: 700; }
+    h1 { margin: 18px 0 8px; font-size: 26px; line-height: 1.2; }
+    p { margin: 0 0 22px; color: #475569; font-size: 16px; line-height: 1.55; }
+    .button { display: inline-flex; align-items: center; min-height: 42px; padding: 0 16px; border-radius: 8px; background: #111827; color: #ffffff; font-weight: 700; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark">${success ? '&#10003;' : '!'}</div>
+    <h1>$title</h1>
+    <p>$message</p>
+    $action
+  </main>
+  $redirectScript
+</body>
+</html>
+''';
   }
 
   Future<void> _signOutVirtBackupAccount() async {
@@ -2196,10 +2233,10 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       if (result.success) {
         _showSnackBarInfo(result.message);
       } else {
-        _showSnackBarError('Email test failed: ${result.message}');
+        await _showResultDialog(title: 'Email test failed', message: result.message);
       }
     } catch (error) {
-      _showSnackBarError('Email test failed: $error');
+      await _showResultDialog(title: 'Email test failed', message: error.toString());
     } finally {
       if (mounted) {
         setState(() {
