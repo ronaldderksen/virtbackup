@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.0 - 2026-05-17
+
+- Improved the Settings storage list with a direct New storage action plus edit and delete actions on each storage entry.
+- Made disabled backup and restore actions clearer by showing the reason in the affected VM or restore workflow.
+- Clarified schedule creation and schedule editor labels, including waiting behavior, time fields, and existing VM handling.
+- Simplified Google Drive storage setup by hiding technical token fields and keeping browser sign-in as the main connection flow.
+- Documented the updated storage management and Google Drive editor behavior.
+
 ## 0.9.4 - 2026-05-16
 
 - Added restore schedules that can restore the latest complete XML for every VM in the selected storage.
