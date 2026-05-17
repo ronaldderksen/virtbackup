@@ -227,7 +227,7 @@ Note: the agent serves HTTPS and requires authentication. See `doc/api.md` for t
 
 Endpoints include:
 
-- `GET /health`: liveness and native SFTP availability.
+- `GET /health`: liveness, native SFTP availability, and backup base path write status.
 - `GET /drivers`: driver capabilities.
 - `GET /config`, `POST /config`: settings.
 - `POST /config` persists settings immediately and performs server refresh/listener restart in the background.
@@ -321,6 +321,9 @@ The agent supports optional native SFTP via FFI:
 - Backup notifications omit `target`; the storage destination is represented by `storage`.
 - Set `ntfymeToken` in agent settings to enable Ntfy me messages; set `notificationEmail` and sign in to a Virt Backup account to enable email notifications. Notification failures are logged and do not change job state.
 - The GUI can store multiple agent addresses and switch between them.
+- Adding or editing an agent always shows the same dialog fields for endpoint, backup base path, and notification settings. Editing an existing agent first selects and loads that agent when reachable. Saving config creates `<backup base path>/VirtBackup` on the agent and verifies write access before persisting the settings.
+- On startup the agent checks write access to `<backup base path>/VirtBackup` and exposes the result in `/health`. When the selected agent reports storage as not writable or has no configured servers, the GUI keeps only Settings enabled and shows the health state in the agent list.
+- Storage management is available from Settings and is enabled only when the selected agent is healthy.
 - For `127.0.0.1`, the GUI always uses the local `agent.token` file; other agents require a token entered in the GUI (token is mandatory).
 - Google Drive OAuth refresh/access tokens are stored encrypted in storage params (`storage[*].params.accessTokenEnc`, `storage[*].params.refreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.
 - Saving settings does not mutate in-memory storage token fields; token encryption only applies to the persisted YAML payload.
@@ -342,6 +345,7 @@ The agent supports optional native SFTP via FFI:
 - GUI snackbar messages are logged at `info` level (prefixed with `snackbar:`) so user-visible notifications are traceable in `gui.log`.
 - The writer timestamps records when they are enqueued; on slow storage the queue can lag while preserving record order.
 - On each process startup, `agent.log` and `gui.log` are rotated to `<name>.log.1` and a fresh log file is started.
+- If a log file cannot be opened, written, truncated, or rotated, the writer prints a warning to `stderr` and keeps the process running.
 - `level=info` records are also echoed to stdout by the writer so terminal output and persisted logs stay aligned.
 - Google Drive HTTP calls are logged as operation records with timestamp, action (`mkdir`, `list`, `upload`, `download`, `move`, `trash`, `auth.refresh`), status, duration, and request details.
 - Google Drive upload HTTP clients are leased from a bounded pool so upload retries/concurrency cannot fan out into unbounded concurrent connections.

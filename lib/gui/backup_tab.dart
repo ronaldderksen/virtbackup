@@ -28,23 +28,15 @@ extension _BackupServerSetupBackupSection on _BackupServerSetupScreenState {
                         },
                 ),
                 const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Expanded(
-                      child: DropdownButtonFormField<String>(
-                        initialValue: _selectedBackupStorageId,
-                        decoration: const InputDecoration(labelText: 'Storage', prefixIcon: Icon(Icons.cloud_queue_outlined), border: OutlineInputBorder()),
-                        items: _enabledStorages().map((storage) => DropdownMenuItem<String>(value: storage.id, child: Text('${storage.name} (${storage.driverId})'))).toList(),
-                        onChanged: _isBackupRunning
-                            ? null
-                            : (value) {
-                                unawaited(_setSelectedBackupStorage(value, refreshRestoreEntries: false));
-                              },
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    OutlinedButton(onPressed: _isBackupRunning ? null : _openStorageEditor, child: const Text('Manage')),
-                  ],
+                DropdownButtonFormField<String>(
+                  initialValue: _selectedBackupStorageId,
+                  decoration: const InputDecoration(labelText: 'Storage', prefixIcon: Icon(Icons.cloud_queue_outlined), border: OutlineInputBorder()),
+                  items: _enabledStorages().map((storage) => DropdownMenuItem<String>(value: storage.id, child: Text('${storage.name} (${storage.driverId})'))).toList(),
+                  onChanged: _isBackupRunning
+                      ? null
+                      : (value) {
+                          unawaited(_setSelectedBackupStorage(value, refreshRestoreEntries: false));
+                        },
                 ),
                 const SizedBox(height: 16),
                 if (_servers.isEmpty)

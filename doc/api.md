@@ -144,7 +144,7 @@ The session identified by the bearer token is marked as revoked in the database.
 
 Response:
 ```json
-{"ok":true,"nativeSftpAvailable":true}
+{"ok":true,"hostname":"nuc02","nativeSftpAvailable":true,"storageWritable":true,"storageWriteError":""}
 ```
 
 ## Drivers

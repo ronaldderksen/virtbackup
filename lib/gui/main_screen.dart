@@ -55,6 +55,21 @@ class _AgentEndpoint {
   }
 }
 
+class _AgentEditorResult {
+  _AgentEditorResult({required this.endpoint, required this.localSettings});
+
+  final _AgentEndpoint endpoint;
+  final _AgentLocalSettingsDraft? localSettings;
+}
+
+class _AgentLocalSettingsDraft {
+  _AgentLocalSettingsDraft({required this.backupPath, required this.notificationEmail, required this.ntfymeToken});
+
+  final String backupPath;
+  final String notificationEmail;
+  final String ntfymeToken;
+}
+
 class _OAuthCallbackResult {
   _OAuthCallbackResult({required this.code, required this.state, required this.error});
 
@@ -90,7 +105,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   final TextEditingController _sshPasswordController = TextEditingController();
   final TextEditingController _apiBaseUrlController = TextEditingController();
   final TextEditingController _apiTokenController = TextEditingController();
-  final TextEditingController _agentTokenController = TextEditingController();
 
   final List<ServerConfig> _servers = [];
   final List<BackupDriverInfo> _backupDrivers = [];
@@ -98,8 +112,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String? _selectedAgentId;
   String? _editingServerId;
   String _savedBackupPath = '';
-  String _savedNtfymeToken = '';
-  String _savedNotificationEmail = '';
   String _preferredBackupServerId = '';
   String _preferredRestoreServerId = '';
   String _savedPreferredBackupServerId = '';
@@ -183,6 +195,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _agentTokenMissing = false;
   String? _currentAgentToken;
   bool? _nativeSftpAvailable;
+  bool _storageWritable = true;
+  String _storageWriteError = '';
   String? _trustedAgentCertFingerprint;
   bool _certDialogOpen = false;
   StreamSubscription<AgentEvent>? _eventSubscription;
@@ -231,7 +245,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _sshPasswordController.dispose();
     _apiBaseUrlController.dispose();
     _apiTokenController.dispose();
-    _agentTokenController.dispose();
     super.dispose();
   }
 
@@ -623,13 +636,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _agentApiClient.setBaseUri(uri);
     if (_isLocalAgentHost(selected.host) || selected.useLocalToken) {
       await _loadAgentAuthToken();
-      _agentTokenController.text = '';
       _agentTokenMissing = _currentAgentToken == null || _currentAgentToken!.isEmpty;
     } else {
       final token = selected.token.trim();
       _agentApiClient.setAuthToken(token.isEmpty ? null : token);
       _currentAgentToken = token.isEmpty ? null : token;
-      _agentTokenController.text = selected.token;
       _agentTokenMissing = token.isEmpty;
     }
     if (mounted) {
@@ -667,8 +678,24 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       }
       _setAgentReachable(false);
       _nativeSftpAvailable = null;
+      _storageWritable = false;
+      _storageWriteError = 'Unable to load agent settings.';
+      _servers.clear();
+      _editingServerId = null;
+      _restoreServerId = null;
+      _preferredBackupServerId = '';
+      _preferredRestoreServerId = '';
+      _savedPreferredBackupServerId = '';
+      _savedPreferredRestoreServerId = '';
+      _resetServerForm();
+      if (mounted) {
+        setState(() {
+          _selectedMenuIndex = 0;
+        });
+      }
       _notifyAgentErrorOnce('Unable to load settings from agent: $error');
       _scheduleAgentReconnect();
+      return;
     } finally {
       _isLoadingAgentSettings = false;
     }
@@ -679,12 +706,13 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _savedBackupPath = _backupPathController.text.trim();
     unawaited(_configureGuiLogWriter(backupPath: _savedBackupPath, rotateOnStartup: true));
     _ntfymeTokenController.text = _agentSettings.ntfymeToken;
-    _savedNtfymeToken = _ntfymeTokenController.text.trim();
     _notificationEmailController.text = _agentSettings.notificationEmail;
-    _savedNotificationEmail = _notificationEmailController.text.trim();
     _servers
       ..clear()
       ..addAll(_agentSettings.servers);
+    if (_servers.isEmpty) {
+      _selectedMenuIndex = 0;
+    }
 
     _preferredBackupServerId = _resolveExistingServerId(_agentSettings.preferredBackupServerId) ?? '';
     _preferredRestoreServerId = _resolveExistingServerId(_agentSettings.preferredRestoreServerId) ?? '';
@@ -746,121 +774,200 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     await _loadAgentSettings();
   }
 
-  Future<void> _updateSelectedAgentToken(String value) async {
-    final selected = _currentAgent();
-    if (selected == null || _isLocalAgentHost(selected.host)) {
+  Future<void> _removeAgent(_AgentEndpoint agent) async {
+    if (_agentEndpoints.length <= 1) {
       return;
     }
-    final index = _agentEndpoints.indexWhere((item) => item.id == selected.id);
-    if (index < 0) {
-      return;
+    final wasSelected = agent.id == _selectedAgentId;
+    _agentEndpoints.removeWhere((item) => item.id == agent.id);
+    if (wasSelected) {
+      _selectedAgentId = _agentEndpoints.first.id;
     }
-    _agentTokenMissing = value.trim().isEmpty;
-    _agentEndpoints[index] = _AgentEndpoint(id: selected.id, host: selected.host, port: selected.port, token: value, useLocalToken: selected.useLocalToken);
-    _agentApiClient.setAuthToken(value.trim().isEmpty ? null : value.trim());
-    _currentAgentToken = value.trim().isEmpty ? null : value.trim();
     await _persistAgentEndpoints();
-    if (mounted) {
+    if (wasSelected) {
+      await _applySelectedAgent();
+      await _loadAgentSettings();
+    } else if (mounted) {
       setState(() {});
     }
-  }
-
-  Future<void> _toggleUseLocalToken(bool value) async {
-    final selected = _currentAgent();
-    if (selected == null || _isLocalAgentHost(selected.host)) {
-      return;
-    }
-    final index = _agentEndpoints.indexWhere((item) => item.id == selected.id);
-    if (index < 0) {
-      return;
-    }
-    _agentEndpoints[index] = _AgentEndpoint(id: selected.id, host: selected.host, port: selected.port, token: selected.token, useLocalToken: value);
-    if (value) {
-      await _loadAgentAuthToken();
-      _agentTokenController.text = '';
-      _agentTokenMissing = _currentAgentToken == null || _currentAgentToken!.isEmpty;
-    } else {
-      final token = selected.token.trim();
-      _agentApiClient.setAuthToken(token.isEmpty ? null : token);
-      _currentAgentToken = token.isEmpty ? null : token;
-      _agentTokenMissing = token.isEmpty;
-    }
-    await _persistAgentEndpoints();
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
-  Future<void> _removeSelectedAgent() async {
-    final selected = _currentAgent();
-    if (selected == null || _agentEndpoints.length <= 1) {
-      return;
-    }
-    _agentEndpoints.removeWhere((item) => item.id == selected.id);
-    _selectedAgentId = _agentEndpoints.first.id;
-    await _persistAgentEndpoints();
-    await _applySelectedAgent();
-    await _loadAgentSettings();
   }
 
   Future<void> _showAddAgentDialog() async {
-    final hostController = TextEditingController();
-    final portController = TextEditingController(text: '33551');
+    await _openAgentEditorDialog(
+      initial: _AgentEndpoint(id: DateTime.now().millisecondsSinceEpoch.toString(), host: '', port: 33551, token: '', useLocalToken: false),
+    );
+  }
+
+  Future<void> _openEditAgentDialog(_AgentEndpoint agent) async {
+    if (agent.id != _selectedAgentId) {
+      await _switchAgent(agent.id);
+    }
+    final selectedAgent = _currentAgent();
+    await _openAgentEditorDialog(initial: selectedAgent?.id == agent.id ? selectedAgent! : agent);
+  }
+
+  Future<void> _openAgentEditorDialog({required _AgentEndpoint initial}) async {
+    final isNew = !_agentEndpoints.any((agent) => agent.id == initial.id);
+    final hostController = TextEditingController(text: initial.host);
+    final portController = TextEditingController(text: initial.port.toString());
     final tokenController = TextEditingController();
+    tokenController.text = initial.token;
+    final originalBackupPath = _backupPathController.text;
+    final originalNotificationEmail = _notificationEmailController.text;
+    final originalNtfymeToken = _ntfymeTokenController.text;
+    var useLocalToken = initial.useLocalToken || _isLocalAgentHost(initial.host);
     try {
-      final created = await showDialog<_AgentEndpoint>(
+      final result = await showDialog<_AgentEditorResult>(
         context: context,
         builder: (dialogContext) {
-          var useLocalToken = false;
           return StatefulBuilder(
             builder: (context, setStateDialog) {
               final hostValue = hostController.text.trim();
               final isLocal = _isLocalAgentHost(hostValue);
               final needsToken = !isLocal && !useLocalToken;
               return AlertDialog(
-                title: const Text('Add agent'),
-                content: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: hostController,
-                      decoration: const InputDecoration(labelText: 'Host', hintText: '127.0.0.1', border: OutlineInputBorder()),
-                      textInputAction: TextInputAction.next,
-                      onChanged: (_) => setStateDialog(() {}),
+                title: Text(isNew ? 'Add agent' : 'Edit agent'),
+                content: SizedBox(
+                  width: 520,
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        TextField(
+                          controller: hostController,
+                          decoration: const InputDecoration(labelText: 'Host', hintText: '127.0.0.1', border: OutlineInputBorder()),
+                          textInputAction: TextInputAction.next,
+                          onChanged: (_) => setStateDialog(() {}),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: portController,
+                          decoration: const InputDecoration(labelText: 'Port', hintText: '33551', border: OutlineInputBorder()),
+                          keyboardType: TextInputType.number,
+                          textInputAction: TextInputAction.next,
+                        ),
+                        const SizedBox(height: 12),
+                        if (!isLocal)
+                          CheckboxListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('Use local token'),
+                            value: useLocalToken,
+                            onChanged: (value) {
+                              setStateDialog(() {
+                                useLocalToken = value ?? false;
+                              });
+                            },
+                          ),
+                        if (needsToken) ...[
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: tokenController,
+                            decoration: const InputDecoration(labelText: 'Token', border: OutlineInputBorder()),
+                            textInputAction: TextInputAction.done,
+                          ),
+                        ],
+                        const SizedBox(height: 20),
+                        Divider(color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.2), height: 24),
+                        const SizedBox(height: 8),
+                        Form(
+                          key: _localFormKey,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Backup base path', style: Theme.of(context).textTheme.titleMedium),
+                              const SizedBox(height: 16),
+                              TextFormField(
+                                controller: _backupPathController,
+                                decoration: InputDecoration(
+                                  labelText: 'Path',
+                                  hintText: '/mnt/backups',
+                                  helperText: 'The agent will create and test the "VirtBackup" folder inside this path when saving.',
+                                  prefixIcon: Icon(Icons.folder_outlined),
+                                  suffixIcon: isLocal
+                                      ? SizedBox(
+                                          width: 48,
+                                          child: Row(
+                                            children: [IconButton(tooltip: 'Browse folders', onPressed: _pickBackupFolder, icon: const Icon(Icons.folder_open_outlined))],
+                                          ),
+                                        )
+                                      : null,
+                                  border: OutlineInputBorder(),
+                                ),
+                                textInputAction: TextInputAction.done,
+                                validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a base path' : null,
+                              ),
+                              const SizedBox(height: 16),
+                              Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.45), borderRadius: BorderRadius.circular(12)),
+                                child: const Text('Backup storage is managed from Settings (Storage -> Manage storage).'),
+                              ),
+                              const SizedBox(height: 20),
+                              Divider(color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.2), height: 24),
+                              const SizedBox(height: 8),
+                              Text('Notifications', style: Theme.of(context).textTheme.titleMedium),
+                              const SizedBox(height: 12),
+                              TextFormField(
+                                controller: _notificationEmailController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Email address',
+                                  helperText: 'Used to send job result emails through your Virt Backup account.',
+                                  prefixIcon: Icon(Icons.email_outlined),
+                                  border: OutlineInputBorder(),
+                                ),
+                                keyboardType: TextInputType.emailAddress,
+                                textInputAction: TextInputAction.done,
+                                validator: _validateNotificationEmail,
+                              ),
+                              const SizedBox(height: 12),
+                              Align(
+                                alignment: Alignment.centerLeft,
+                                child: FilledButton.icon(
+                                  onPressed: isNew || _isSendingEmailTest ? null : _sendEmailTestMessage,
+                                  icon: const Icon(Icons.send_outlined),
+                                  label: Text(_isSendingEmailTest ? 'Sending...' : 'Send test email'),
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              TextFormField(
+                                controller: _ntfymeTokenController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Ntfy me token',
+                                  helperText: 'Used to send Ntfy me job result messages.',
+                                  prefixIcon: Icon(Icons.notifications_outlined),
+                                  border: OutlineInputBorder(),
+                                ),
+                                textInputAction: TextInputAction.done,
+                              ),
+                              const SizedBox(height: 12),
+                              Wrap(
+                                spacing: 12,
+                                runSpacing: 8,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  FilledButton.icon(
+                                    onPressed: isNew || _isSendingNtfymeTest ? null : _sendNtfymeTestMessage,
+                                    icon: const Icon(Icons.send_outlined),
+                                    label: Text(_isSendingNtfymeTest ? 'Sending...' : 'Send test message'),
+                                  ),
+                                  TextButton.icon(onPressed: _openNtfymeDocs, icon: const Icon(Icons.open_in_new), label: const Text('Open Ntfy me docs')),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: portController,
-                      decoration: const InputDecoration(labelText: 'Port', hintText: '33551', border: OutlineInputBorder()),
-                      keyboardType: TextInputType.number,
-                      textInputAction: TextInputAction.next,
-                    ),
-                    const SizedBox(height: 12),
-                    if (!isLocal)
-                      CheckboxListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Use local token'),
-                        value: useLocalToken,
-                        onChanged: (value) {
-                          setStateDialog(() {
-                            useLocalToken = value ?? false;
-                          });
-                        },
-                      ),
-                    if (needsToken) ...[
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: tokenController,
-                        decoration: const InputDecoration(labelText: 'Token', border: OutlineInputBorder()),
-                        textInputAction: TextInputAction.done,
-                      ),
-                    ],
-                  ],
+                  ),
                 ),
                 actions: [
                   TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Cancel')),
                   FilledButton(
                     onPressed: () {
+                      if (!(_localFormKey.currentState?.validate() ?? false)) {
+                        return;
+                      }
                       final host = hostController.text.trim();
                       final port = int.tryParse(portController.text.trim()) ?? 33551;
                       if (host.isEmpty) {
@@ -870,11 +977,19 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                       if (needsToken && token.isEmpty) {
                         return;
                       }
-                      Navigator.of(
-                        dialogContext,
-                      ).pop(_AgentEndpoint(id: DateTime.now().millisecondsSinceEpoch.toString(), host: host, port: port, token: token, useLocalToken: useLocalToken || isLocal));
+                      final localSettings = _AgentLocalSettingsDraft(
+                        backupPath: _backupPathController.text.trim(),
+                        notificationEmail: _notificationEmailController.text.trim(),
+                        ntfymeToken: _ntfymeTokenController.text.trim(),
+                      );
+                      Navigator.of(dialogContext).pop(
+                        _AgentEditorResult(
+                          endpoint: _AgentEndpoint(id: initial.id, host: host, port: port, token: token, useLocalToken: useLocalToken || isLocal),
+                          localSettings: localSettings,
+                        ),
+                      );
                     },
-                    child: const Text('Add'),
+                    child: Text(isNew ? 'Add' : 'Save'),
                   ),
                 ],
               );
@@ -882,14 +997,42 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
           );
         },
       );
-      if (created == null) {
+      if (result == null) {
+        _backupPathController.text = originalBackupPath;
+        _notificationEmailController.text = originalNotificationEmail;
+        _ntfymeTokenController.text = originalNtfymeToken;
         return;
       }
-      _agentEndpoints.add(created);
-      _selectedAgentId = created.id;
+      final edited = result.endpoint;
+      final localSettings = result.localSettings;
+      final index = _agentEndpoints.indexWhere((agent) => agent.id == edited.id);
+      if (index >= 0) {
+        _agentEndpoints[index] = edited;
+      } else {
+        _agentEndpoints.add(edited);
+      }
+      _selectedAgentId = edited.id;
       await _persistAgentEndpoints();
       await _applySelectedAgent();
       await _loadAgentSettings();
+      if (localSettings != null) {
+        if (_agentReachable && !_agentAuthFailed && !_agentTokenMissing) {
+          _backupPathController.text = localSettings.backupPath;
+          _notificationEmailController.text = localSettings.notificationEmail;
+          _ntfymeTokenController.text = localSettings.ntfymeToken;
+          try {
+            await _saveLocalAgentSettings(showSnackBar: false, validateForm: false);
+          } catch (error) {
+            if (mounted) {
+              _showSnackBarError('Backup base path save failed: $error');
+            }
+          }
+        } else {
+          if (mounted) {
+            _showSnackBarError('Agent settings were not saved because the agent is not reachable.');
+          }
+        }
+      }
       if (mounted) {
         setState(() {});
       }
@@ -915,20 +1058,30 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _agentApiClient.setAllowUntrustedCerts(true);
   }
 
-  Future<void> _loadAgentHealth() async {
+  Future<bool> _loadAgentHealth() async {
     try {
-      final available = await _agentApiClient.fetchNativeSftpAvailable();
+      final health = await _agentApiClient.fetchHealth();
       if (mounted) {
         setState(() {
-          _nativeSftpAvailable = available;
+          _nativeSftpAvailable = health.nativeSftpAvailable;
+          _storageWritable = health.storageWritable;
+          _storageWriteError = health.storageWriteError;
+          if (!_storageWritable) {
+            _selectedMenuIndex = 0;
+          }
         });
       }
+      return true;
     } catch (_) {
       if (mounted) {
         setState(() {
           _nativeSftpAvailable = null;
+          _storageWritable = false;
+          _storageWriteError = 'Unable to read agent health.';
+          _selectedMenuIndex = 0;
         });
       }
+      return false;
     }
   }
 
@@ -1239,9 +1392,14 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     try {
       await _agentApiClient.updateConfig(_agentSettings);
       _setAgentReachable(true);
+      await _loadAgentHealth();
     } catch (error, stackTrace) {
       _logError('Failed to update settings via agent.', error, stackTrace);
-      _setAgentReachable(false);
+      if (await _loadAgentHealth()) {
+        _setAgentReachable(true);
+      } else {
+        _setAgentReachable(false);
+      }
       _notifyAgentErrorOnce('Unable to update agent config: $error');
       rethrow;
     }
@@ -1332,15 +1490,19 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
-  Future<void> _clearConnectionVerified() async {
-    _agentSettings = _agentSettings.copyWith(connectionVerified: false);
-    await _pushAgentSettings();
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
   Future<void> _selectMenuIndex(int index) async {
+    if (index != 0 && !_storageWritable) {
+      setState(() {
+        _selectedMenuIndex = 0;
+      });
+      return;
+    }
+    if (index != 0 && _servers.isEmpty) {
+      setState(() {
+        _selectedMenuIndex = 0;
+      });
+      return;
+    }
     final leavingSettings = _selectedMenuIndex == 0 && index != 0;
     setState(() {
       _selectedMenuIndex = index;
@@ -1926,12 +2088,185 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
 
   Future<void> _createNewServer() async {
     final newId = DateTime.now().millisecondsSinceEpoch.toString();
-    final newServer = ServerConfig(id: newId, name: 'New server', connectionType: ConnectionType.ssh, sshHost: '', sshPort: '22', sshUser: '', sshPassword: '', apiBaseUrl: '', apiToken: '');
-    setState(() {
-      _servers.add(newServer);
-      _editingServerId = newId;
-      _resetServerForm();
-    });
+    await _openServerEditorDialog(
+      initialServer: ServerConfig(id: newId, name: '', connectionType: ConnectionType.ssh, sshHost: '', sshPort: '22', sshUser: '', sshPassword: '', apiBaseUrl: '', apiToken: ''),
+    );
+  }
+
+  Future<void> _openEditServerDialog(ServerConfig server) async {
+    await _openServerEditorDialog(initialServer: server);
+  }
+
+  Future<void> _openServerEditorDialog({required ServerConfig initialServer}) async {
+    final previousEditingServerId = _editingServerId;
+    final previousServer = _findEditingServer();
+    final isNewServer = !_servers.any((server) => server.id == initialServer.id);
+    var saved = false;
+    _editingServerId = initialServer.id;
+    _applyServerToForm(initialServer);
+    if (mounted) {
+      setState(() {});
+    }
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Text(isNewServer ? 'Add server' : 'Edit server'),
+          content: SizedBox(
+            width: 560,
+            child: SingleChildScrollView(
+              child: Form(
+                key: _connectionFormKey,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextFormField(
+                      controller: _serverNameController,
+                      decoration: const InputDecoration(labelText: 'Server name', hintText: 'Libvirt host', prefixIcon: Icon(Icons.badge_outlined), border: OutlineInputBorder()),
+                      textInputAction: TextInputAction.next,
+                      validator: (value) {
+                        if (_allowEmptyServerNameForTest) {
+                          return null;
+                        }
+                        if (value == null || value.trim().isEmpty) {
+                          return 'Enter a server name';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    InputDecorator(
+                      decoration: const InputDecoration(
+                        labelText: 'Libvirt host (derived)',
+                        helperText: 'Based on connection method',
+                        prefixIcon: Icon(Icons.storage_outlined),
+                        border: OutlineInputBorder(),
+                      ),
+                      child: SelectableText(_buildLibvirtHost().isEmpty ? 'Complete the connection details to generate the host.' : _buildLibvirtHost()),
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _sshHostController,
+                      decoration: const InputDecoration(labelText: 'SSH host', hintText: '10.0.0.15', prefixIcon: Icon(Icons.dns_outlined), border: OutlineInputBorder()),
+                      textInputAction: TextInputAction.next,
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return 'Enter an SSH host';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextFormField(
+                            controller: _sshUserController,
+                            decoration: const InputDecoration(labelText: 'SSH user', hintText: 'root', prefixIcon: Icon(Icons.person_outline), border: OutlineInputBorder()),
+                            textInputAction: TextInputAction.next,
+                            validator: (value) {
+                              if (value == null || value.trim().isEmpty) {
+                                return 'Enter an SSH user';
+                              }
+                              return null;
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        SizedBox(
+                          width: 120,
+                          child: TextFormField(
+                            controller: _sshPortController,
+                            decoration: const InputDecoration(labelText: 'Port', prefixIcon: Icon(Icons.pin_outlined), border: OutlineInputBorder()),
+                            keyboardType: TextInputType.number,
+                            textInputAction: TextInputAction.next,
+                            validator: (value) {
+                              final parsed = int.tryParse(value ?? '');
+                              if (parsed == null || parsed <= 0 || parsed > 65535) {
+                                return 'Use 1-65535';
+                              }
+                              return null;
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _sshPasswordController,
+                      decoration: const InputDecoration(labelText: 'SSH password', prefixIcon: Icon(Icons.lock_outline_rounded), border: OutlineInputBorder()),
+                      obscureText: true,
+                      textInputAction: TextInputAction.done,
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return 'Enter a password';
+                        }
+                        return null;
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Cancel')),
+            TextButton(
+              onPressed: () async {
+                _ensureServerNameFilled();
+                if (!_connectionFormKey.currentState!.validate()) {
+                  return;
+                }
+                await _saveConnectionAgentSettings(showSnackBar: false);
+                saved = true;
+                if (dialogContext.mounted) {
+                  Navigator.of(dialogContext).pop(true);
+                }
+              },
+              child: const Text('Save'),
+            ),
+            FilledButton(
+              onPressed: _isTesting
+                  ? null
+                  : () async {
+                      final ok = await _testConnection();
+                      saved = ok || saved;
+                      if (ok && dialogContext.mounted) {
+                        Navigator.of(dialogContext).pop(true);
+                      }
+                    },
+              child: const Text('Test and save'),
+            ),
+          ],
+        );
+      },
+    );
+    if (!mounted) {
+      return;
+    }
+    if (result != true && !saved) {
+      _editingServerId = previousEditingServerId;
+      if (previousServer != null) {
+        _applyServerToForm(previousServer);
+      } else {
+        _resetServerForm();
+      }
+      setState(() {});
+      return;
+    }
+    final selectedServer = _findEditingServer();
+    if (selectedServer != null) {
+      _vmHasOverlayByName
+        ..clear()
+        ..addAll(_overlayByServerId[selectedServer.id] ?? {});
+      if (_requiresVmInventory(_selectedMenuIndex)) {
+        await _loadVmInventory(selectedServer);
+      }
+      if (_selectedMenuIndex == 3) {
+        await _loadRestoreEntries();
+      }
+    }
   }
 
   Future<void> _selectServer(ServerConfig server) async {
@@ -2109,19 +2444,15 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     return !_isSameServer(current, existing);
   }
 
-  bool _localHasChanges() {
-    return _backupPathController.text.trim() != _savedBackupPath || _ntfymeTokenController.text.trim() != _savedNtfymeToken || _notificationEmailController.text.trim() != _savedNotificationEmail;
-  }
-
   bool _preferredServersHaveChanges() {
     return _preferredBackupServerId != _savedPreferredBackupServerId || _preferredRestoreServerId != _savedPreferredRestoreServerId;
   }
 
   bool _hasAnyChanges() {
-    return _connectionHasChanges() || _localHasChanges() || _preferredServersHaveChanges();
+    return _connectionHasChanges() || _preferredServersHaveChanges();
   }
 
-  Future<void> _testConnection() async {
+  Future<bool> _testConnection() async {
     var isValid = false;
     try {
       _allowEmptyServerNameForTest = true;
@@ -2130,7 +2461,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       _allowEmptyServerNameForTest = false;
     }
     if (!isValid) {
-      return;
+      return false;
     }
     setState(() {
       _isTesting = true;
@@ -2144,11 +2475,13 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       if (mounted) {
         _showSnackBarInfo('Connection test successful. Settings saved.');
       }
+      return true;
     } catch (error, stackTrace) {
       _logError('Connection test failed.', error, stackTrace);
       if (mounted) {
         _showSnackBarError('Connection test failed: $error');
       }
+      return false;
     } finally {
       if (mounted) {
         setState(() {
@@ -2231,10 +2564,12 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _savedPreferredRestoreServerId = _preferredRestoreServerId;
   }
 
-  Future<void> _saveLocalAgentSettings({bool showSnackBar = true}) async {
-    if (!_localFormKey.currentState!.validate()) {
+  Future<void> _saveLocalAgentSettings({bool showSnackBar = true, bool validateForm = true}) async {
+    if (validateForm && !(_localFormKey.currentState?.validate() ?? false)) {
       return;
     }
+    final previousSettings = _agentSettings;
+    final previousSelectedBackupStorageId = _selectedBackupStorageId;
     try {
       final trimmedPath = _backupPathController.text.trim();
       final trimmedToken = _ntfymeTokenController.text.trim();
@@ -2265,12 +2600,14 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       await _pushAgentSettings();
       _savedBackupPath = trimmedPath;
       unawaited(_configureGuiLogWriter(backupPath: trimmedPath));
-      _savedNtfymeToken = trimmedToken;
-      _savedNotificationEmail = trimmedNotificationEmail;
       if (mounted && showSnackBar) {
         _showSnackBarInfo('Local settings saved');
       }
-    } finally {}
+    } catch (_) {
+      _agentSettings = previousSettings;
+      _selectedBackupStorageId = previousSelectedBackupStorageId;
+      rethrow;
+    }
   }
 
   String? _validateNotificationEmail(String? value) {
@@ -2587,7 +2924,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     });
     try {
       final needsConnectionSave = _connectionHasChanges();
-      final needsLocalSave = _localHasChanges();
       final needsPreferredServersSave = _preferredServersHaveChanges();
       var savedSomething = false;
 
@@ -2597,14 +2933,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
           return;
         }
         await _saveConnectionAgentSettings(showSnackBar: false);
-        savedSomething = true;
-      }
-
-      if (needsLocalSave) {
-        if (!_localFormKey.currentState!.validate()) {
-          return;
-        }
-        await _saveLocalAgentSettings(showSnackBar: false);
         savedSomething = true;
       }
 
@@ -2630,6 +2958,16 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     final normalized = driverId.trim().isEmpty ? 'driver' : driverId.trim();
     final stamp = DateTime.now().microsecondsSinceEpoch;
     return 'dest_${normalized}_$stamp';
+  }
+
+  int _storageDriverSortRank(String driverId) {
+    return switch (driverId.trim()) {
+      'filesystem' => 0,
+      'sftp' => 1,
+      'gdrive' => 2,
+      'dummy' => 3,
+      _ => 4,
+    };
   }
 
   Future<void> _openStorageEditor() async {
@@ -2683,7 +3021,16 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                     builder: (context) {
                                       final items = <DropdownMenuItem<String>>[];
                                       final seenDriverIds = <String>{};
-                                      for (final driver in _backupDrivers) {
+                                      final sortedDrivers = List<BackupDriverInfo>.from(_backupDrivers)
+                                        ..sort((a, b) {
+                                          final rankA = _storageDriverSortRank(a.id);
+                                          final rankB = _storageDriverSortRank(b.id);
+                                          if (rankA != rankB) {
+                                            return rankA.compareTo(rankB);
+                                          }
+                                          return a.label.toLowerCase().compareTo(b.label.toLowerCase());
+                                        });
+                                      for (final driver in sortedDrivers) {
                                         final id = driver.id.trim();
                                         if (id.isEmpty || seenDriverIds.contains(id)) {
                                           continue;
@@ -3299,6 +3646,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     final railWidth = railTheme.minWidth ?? 92;
     final isSaveEnabled = _selectedMenuIndex == 0 && !_isSavingAll && _hasAnyChanges();
     final isSettingsEnabled = true;
+    final isStorageNavigationEnabled = _agentReachable && _storageWritable && _servers.isNotEmpty;
     return Scaffold(
       floatingActionButton: _selectedMenuIndex == 0
           ? FloatingActionButton.extended(
@@ -3323,13 +3671,37 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                   child: Column(
                     children: [
                       const SizedBox(height: 16),
-                      _buildRailItem(index: 1, icon: Icons.dns_outlined, selectedIcon: Icons.dns, label: 'Manage', colorScheme: colorScheme, railTheme: railTheme, enabled: true),
+                      _buildRailItem(index: 1, icon: Icons.dns_outlined, selectedIcon: Icons.dns, label: 'Manage', colorScheme: colorScheme, railTheme: railTheme, enabled: isStorageNavigationEnabled),
                       const SizedBox(height: 8),
-                      _buildRailItem(index: 2, icon: Icons.backup_outlined, selectedIcon: Icons.backup, label: 'Backup', colorScheme: colorScheme, railTheme: railTheme, enabled: true),
+                      _buildRailItem(
+                        index: 2,
+                        icon: Icons.backup_outlined,
+                        selectedIcon: Icons.backup,
+                        label: 'Backup',
+                        colorScheme: colorScheme,
+                        railTheme: railTheme,
+                        enabled: isStorageNavigationEnabled,
+                      ),
                       const SizedBox(height: 8),
-                      _buildRailItem(index: 3, icon: Icons.restore_outlined, selectedIcon: Icons.restore, label: 'Restore', colorScheme: colorScheme, railTheme: railTheme, enabled: true),
+                      _buildRailItem(
+                        index: 3,
+                        icon: Icons.restore_outlined,
+                        selectedIcon: Icons.restore,
+                        label: 'Restore',
+                        colorScheme: colorScheme,
+                        railTheme: railTheme,
+                        enabled: isStorageNavigationEnabled,
+                      ),
                       const SizedBox(height: 8),
-                      _buildRailItem(index: 4, icon: Icons.event_repeat_outlined, selectedIcon: Icons.event_repeat, label: 'Schedules', colorScheme: colorScheme, railTheme: railTheme, enabled: true),
+                      _buildRailItem(
+                        index: 4,
+                        icon: Icons.event_repeat_outlined,
+                        selectedIcon: Icons.event_repeat,
+                        label: 'Schedules',
+                        colorScheme: colorScheme,
+                        railTheme: railTheme,
+                        enabled: isStorageNavigationEnabled,
+                      ),
                       const SizedBox(height: 8),
                       _buildRailItem(
                         index: 5,
@@ -3338,7 +3710,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                         label: 'Queue',
                         colorScheme: colorScheme,
                         railTheme: railTheme,
-                        enabled: true,
+                        enabled: isStorageNavigationEnabled,
                       ),
                       const Spacer(),
                       _buildRailItem(
@@ -3376,6 +3748,48 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                     child: Text(
                                       'Agent unreachable. Check that the agent is running and reachable.',
                                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: colorScheme.onErrorContainer),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        if (_agentReachable && !_storageWritable)
+                          SliverToBoxAdapter(
+                            child: Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                              color: colorScheme.errorContainer,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.folder_off_outlined, color: colorScheme.onErrorContainer),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      _storageWriteError.trim().isEmpty
+                                          ? 'Storage location is not writable. Edit the agent in Settings to set the Backup base path.'
+                                          : 'Storage location is not writable. $_storageWriteError Edit the agent in Settings to set the Backup base path.',
+                                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: colorScheme.onErrorContainer),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        if (_agentReachable && _storageWritable && _servers.isEmpty)
+                          SliverToBoxAdapter(
+                            child: Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                              color: colorScheme.tertiaryContainer,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.dns_outlined, color: colorScheme.onTertiaryContainer),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      'No servers configured. Add a server in Settings to enable the other tabs.',
+                                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: colorScheme.onTertiaryContainer),
                                     ),
                                   ),
                                 ],

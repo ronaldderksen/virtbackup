@@ -18,52 +18,45 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text('Agent', style: Theme.of(context).textTheme.titleMedium),
-                  Row(
-                    children: [
-                      IconButton(tooltip: 'Remove agent', onPressed: _agentEndpoints.length > 1 ? _removeSelectedAgent : null, icon: const Icon(Icons.delete_outline)),
-                      const SizedBox(width: 4),
-                      FilledButton.icon(onPressed: _showAddAgentDialog, icon: const Icon(Icons.add), label: const Text('Add agent')),
-                    ],
-                  ),
+                  FilledButton.icon(onPressed: _showAddAgentDialog, icon: const Icon(Icons.add), label: const Text('Add agent')),
                 ],
               ),
               const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                key: ValueKey(_selectedAgentId),
-                initialValue: _selectedAgentId,
-                items: _agentEndpoints.map((agent) => DropdownMenuItem<String>(value: agent.id, child: Text(agent.label))).toList(),
-                onChanged: (value) => _switchAgent(value),
-                decoration: const InputDecoration(labelText: 'Agent address', border: OutlineInputBorder(), prefixIcon: Icon(Icons.cloud_outlined)),
-              ),
-              const SizedBox(height: 16),
-              if (_currentAgent() != null && !_isLocalAgentHost(_currentAgent()!.host)) ...[
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Use local token'),
-                  value: _currentAgent()!.useLocalToken,
-                  onChanged: (value) => _toggleUseLocalToken(value ?? false),
-                ),
-                if (_currentAgent()!.useLocalToken) ...[
-                  Text('Using local agent.token from filesystem.', style: Theme.of(context).textTheme.bodyMedium),
-                  if (_agentTokenMissing) ...[
-                    const SizedBox(height: 8),
-                    Text('Local token not available.', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.error)),
-                  ],
-                ] else ...[
-                  const SizedBox(height: 8),
-                  TextFormField(
-                    controller: _agentTokenController,
-                    decoration: InputDecoration(
-                      labelText: 'Agent token',
-                      border: const OutlineInputBorder(),
-                      prefixIcon: const Icon(Icons.key_outlined),
-                      errorText: _agentTokenMissing ? 'Token is required for remote agents' : null,
+              ListView.separated(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: _agentEndpoints.length,
+                separatorBuilder: (_, _) => const Divider(height: 1),
+                itemBuilder: (context, index) {
+                  final agent = _agentEndpoints[index];
+                  final isSelected = agent.id == _selectedAgentId;
+                  final isLocal = _isLocalAgentHost(agent.host);
+                  final tokenLabel = isLocal || agent.useLocalToken ? 'local token' : (agent.token.trim().isEmpty ? 'token missing' : 'stored token');
+                  final healthLabel = isSelected ? (!_agentReachable ? 'offline' : (_storageWritable ? 'online, storage writable' : 'online, storage not writable')) : 'not loaded';
+                  return ListTile(
+                    selected: isSelected,
+                    leading: Icon(isSelected ? (_agentReachable && _storageWritable ? Icons.cloud_done : Icons.cloud_off_outlined) : Icons.cloud_outlined),
+                    title: Text(agent.label),
+                    subtitle: Text('$tokenLabel - $healthLabel'),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(tooltip: 'Edit agent', onPressed: () => _openEditAgentDialog(agent), icon: const Icon(Icons.edit_outlined)),
+                        IconButton(tooltip: 'Remove agent', onPressed: _agentEndpoints.length > 1 ? () => _removeAgent(agent) : null, icon: const Icon(Icons.delete_outline)),
+                      ],
                     ),
-                    obscureText: true,
-                    onChanged: _updateSelectedAgentToken,
-                  ),
-                ],
-              ] else ...[
+                    onTap: () => _switchAgent(agent.id),
+                  );
+                },
+              ),
+              if (_currentAgent() != null && !_isLocalAgentHost(_currentAgent()!.host) && _agentTokenMissing) ...[
+                const SizedBox(height: 12),
+                Text(
+                  _currentAgent()!.useLocalToken ? 'Local token not available.' : 'Token is required for this remote agent.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.error),
+                ),
+              ] else if (_currentAgent() != null && _isLocalAgentHost(_currentAgent()!.host)) ...[
+                const SizedBox(height: 12),
                 Text('Local agent uses the token from the local filesystem.', style: Theme.of(context).textTheme.bodyMedium),
               ],
             ],
@@ -84,12 +77,16 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text('Servers', style: Theme.of(context).textTheme.titleMedium),
-                  FilledButton.icon(onPressed: _createNewServer, icon: const Icon(Icons.add), label: const Text('Add server')),
+                  FilledButton.icon(
+                    onPressed: _agentReachable && !_agentAuthFailed && !_agentTokenMissing && !_isLoadingAgentSettings ? _createNewServer : null,
+                    icon: const Icon(Icons.add),
+                    label: const Text('Add server'),
+                  ),
                 ],
               ),
               const SizedBox(height: 12),
               if (_servers.isEmpty)
-                Text('No servers added yet.', style: Theme.of(context).textTheme.bodyMedium)
+                Text(_agentReachable ? 'No servers added yet.' : 'No servers loaded because the agent is unreachable.', style: Theme.of(context).textTheme.bodyMedium)
               else
                 ListView.separated(
                   shrinkWrap: true,
@@ -103,8 +100,13 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                       selected: isSelected,
                       title: Text(server.name),
                       subtitle: Text('SSH ${server.sshUser}@${server.sshHost}'),
-                      trailing: IconButton(tooltip: 'Delete server', onPressed: () => _confirmDeleteServer(server), icon: const Icon(Icons.delete_outline)),
-                      onTap: () => _selectServer(server),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(tooltip: 'Edit server', onPressed: () => _openEditServerDialog(server), icon: const Icon(Icons.edit_outlined)),
+                          IconButton(tooltip: 'Delete server', onPressed: () => _confirmDeleteServer(server), icon: const Icon(Icons.delete_outline)),
+                        ],
+                      ),
                     );
                   },
                 ),
@@ -143,221 +145,46 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: Padding(
           padding: const EdgeInsets.all(20),
-          child: Form(
-            key: _connectionFormKey,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Connection', style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 16),
-                TextFormField(
-                  controller: _serverNameController,
-                  decoration: const InputDecoration(labelText: 'Server name', hintText: 'Libvirt host', prefixIcon: Icon(Icons.badge_outlined), border: OutlineInputBorder()),
-                  textInputAction: TextInputAction.next,
-                  validator: (value) {
-                    if (_allowEmptyServerNameForTest) {
-                      return null;
-                    }
-                    if (value == null || value.trim().isEmpty) {
-                      return 'Enter a server name';
-                    }
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 16),
-                InputDecorator(
-                  decoration: const InputDecoration(
-                    labelText: 'Libvirt host (derived)',
-                    helperText: 'Based on connection method',
-                    prefixIcon: Icon(Icons.storage_outlined),
-                    border: OutlineInputBorder(),
-                  ),
-                  child: SelectableText(_buildLibvirtHost().isEmpty ? 'Complete the connection details to generate the host.' : _buildLibvirtHost()),
-                ),
-                const SizedBox(height: 16),
-                ...[
-                  TextFormField(
-                    controller: _sshHostController,
-                    decoration: const InputDecoration(labelText: 'SSH host', hintText: '10.0.0.15', prefixIcon: Icon(Icons.dns_outlined), border: OutlineInputBorder()),
-                    textInputAction: TextInputAction.next,
-                    validator: (value) {
-                      if (value == null || value.trim().isEmpty) {
-                        return 'Enter an SSH host';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextFormField(
-                          controller: _sshUserController,
-                          decoration: const InputDecoration(labelText: 'SSH user', hintText: 'root', prefixIcon: Icon(Icons.person_outline), border: OutlineInputBorder()),
-                          textInputAction: TextInputAction.next,
-                          validator: (value) {
-                            if (value == null || value.trim().isEmpty) {
-                              return 'Enter an SSH user';
-                            }
-                            return null;
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      SizedBox(
-                        width: 120,
-                        child: TextFormField(
-                          controller: _sshPortController,
-                          decoration: const InputDecoration(labelText: 'Port', prefixIcon: Icon(Icons.pin_outlined), border: OutlineInputBorder()),
-                          keyboardType: TextInputType.number,
-                          textInputAction: TextInputAction.next,
-                          validator: (value) {
-                            final parsed = int.tryParse(value ?? '');
-                            if (parsed == null || parsed <= 0 || parsed > 65535) {
-                              return 'Use 1-65535';
-                            }
-                            return null;
-                          },
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: _sshPasswordController,
-                    decoration: const InputDecoration(labelText: 'SSH password', prefixIcon: Icon(Icons.lock_outline_rounded), border: OutlineInputBorder()),
-                    obscureText: true,
-                    textInputAction: TextInputAction.done,
-                    validator: (value) {
-                      if (value == null || value.trim().isEmpty) {
-                        return 'Enter a password';
-                      }
-                      return null;
-                    },
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('Storage', style: Theme.of(context).textTheme.titleMedium),
+                  FilledButton.icon(
+                    onPressed: _agentReachable && _storageWritable && !_agentAuthFailed && !_agentTokenMissing && !_isLoadingAgentSettings ? _openStorageEditor : null,
+                    icon: const Icon(Icons.cloud_queue_outlined),
+                    label: const Text('Manage storage'),
                   ),
                 ],
-                const SizedBox(height: 20),
-                FilledButton.icon(onPressed: _isTesting ? null : _testConnection, icon: const Icon(Icons.link_outlined), label: Text(_isTesting ? 'Testing...' : 'Test connection')),
-              ],
-            ),
-          ),
-        ),
-      ),
-      const SizedBox(height: 24),
-      Card(
-        elevation: 2,
-        shadowColor: colorScheme.shadow.withValues(alpha: 0.2),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Form(
-            key: _localFormKey,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Local settings', style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 16),
-                TextFormField(
-                  controller: _backupPathController,
-                  decoration: InputDecoration(
-                    labelText: 'Backup base path',
-                    hintText: '/mnt/backups',
-                    helperText: 'VirtBackup will create a "VirtBackup" folder inside this path.',
-                    prefixIcon: Icon(Icons.folder_outlined),
-                    suffixIcon: SizedBox(
-                      width: 48,
-                      child: Row(
-                        children: [IconButton(tooltip: 'Browse folders', onPressed: _pickBackupFolder, icon: const Icon(Icons.folder_open_outlined))],
-                      ),
-                    ),
-                    border: OutlineInputBorder(),
-                  ),
-                  textInputAction: TextInputAction.done,
-                  validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a base path' : null,
+              ),
+              const SizedBox(height: 12),
+              if (_agentSettings.storage.isEmpty)
+                Text('No storage configured.', style: Theme.of(context).textTheme.bodyMedium)
+              else
+                ListView.separated(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: _agentSettings.storage.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final storage = _agentSettings.storage[index];
+                    final isSelected = storage.id == _selectedBackupStorageId;
+                    return ListTile(
+                      selected: isSelected,
+                      leading: Icon(isSelected ? Icons.cloud_done_outlined : Icons.cloud_queue_outlined),
+                      title: Text(storage.name),
+                      subtitle: Text('${storage.driverId} - ${storage.enabled ? 'enabled' : 'disabled'}'),
+                      onTap: _agentReachable && _storageWritable && !_agentAuthFailed && !_agentTokenMissing && !_isLoadingAgentSettings ? _openStorageEditor : null,
+                    );
+                  },
                 ),
-                const SizedBox(height: 16),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.45), borderRadius: BorderRadius.circular(12)),
-                  child: const Text('Backup storage are managed from the Backup tab (Storage -> Manage).'),
-                ),
-                const SizedBox(height: 20),
-                Divider(color: colorScheme.outline.withValues(alpha: 0.2), height: 24),
-                const SizedBox(height: 8),
-                Text('Notifications', style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: _notificationEmailController,
-                  decoration: const InputDecoration(
-                    labelText: 'Email address',
-                    helperText: 'Used to send job result emails through your Virt Backup account.',
-                    prefixIcon: Icon(Icons.email_outlined),
-                    border: OutlineInputBorder(),
-                  ),
-                  keyboardType: TextInputType.emailAddress,
-                  textInputAction: TextInputAction.done,
-                  validator: _validateNotificationEmail,
-                ),
-                const SizedBox(height: 12),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: FilledButton.icon(
-                    onPressed: _isSendingEmailTest ? null : _sendEmailTestMessage,
-                    icon: const Icon(Icons.send_outlined),
-                    label: Text(_isSendingEmailTest ? 'Sending...' : 'Send test email'),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: _ntfymeTokenController,
-                  decoration: const InputDecoration(
-                    labelText: 'Ntfy me token',
-                    helperText: 'Used to send Ntfy me job result messages.',
-                    prefixIcon: Icon(Icons.notifications_outlined),
-                    border: OutlineInputBorder(),
-                  ),
-                  textInputAction: TextInputAction.done,
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    FilledButton.icon(
-                      onPressed: _isSendingNtfymeTest ? null : _sendNtfymeTestMessage,
-                      icon: const Icon(Icons.send_outlined),
-                      label: Text(_isSendingNtfymeTest ? 'Sending...' : 'Send test message'),
-                    ),
-                    const SizedBox(width: 12),
-                    TextButton.icon(onPressed: _openNtfymeDocs, icon: const Icon(Icons.open_in_new), label: const Text('Open Ntfy me docs')),
-                  ],
-                ),
-              ],
-            ),
+            ],
           ),
         ),
       ),
       const SizedBox(height: 48),
-      if (kDebugMode) ...[
-        Card(
-          elevation: 2,
-          shadowColor: colorScheme.shadow.withValues(alpha: 0.2),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Debug', style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 12),
-                Text('Development helpers for testing connection gating.', style: Theme.of(context).textTheme.bodyMedium),
-                const SizedBox(height: 16),
-                TextButton(onPressed: _clearConnectionVerified, child: const Text('Clear server_verified')),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 48),
-      ],
     ];
   }
 

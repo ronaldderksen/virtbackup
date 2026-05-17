@@ -101,7 +101,12 @@ class LogWriter {
     final timestamp = _formatTimestamp(DateTime.now());
     _writeConsole(timestamp: timestamp, level: normalizedLevel, message: trimmedMessage);
     final line = '$timestamp level=$normalizedLevel message=${_sanitize(trimmedMessage)}';
-    _appendSync(_resolvePath(source), line, allowParentCreate: _allowParentCreate(source));
+    final path = _resolvePath(source);
+    try {
+      _appendSync(path, line, allowParentCreate: _allowParentCreate(source));
+    } catch (error) {
+      _writeIoWarning(action: 'write log', path: path, error: error);
+    }
   }
 
   static void logAgentSync({required String level, required String message}) {
@@ -278,11 +283,17 @@ class LogWriter {
           await _appendLocked(op.path, op.line, allowParentCreate: op.allowParentCreate);
         }
         op.completer.complete();
-      } catch (error, stackTrace) {
-        op.completer.completeError(error, stackTrace);
+      } catch (error) {
+        _writeIoWarning(action: op.action, path: op.path, error: error);
+        op.completer.complete();
       }
     }
     _draining = false;
+  }
+
+  static void _writeIoWarning({required String action, required String path, required Object error}) {
+    final timestamp = _formatTimestamp(DateTime.now());
+    stderr.writeln('$timestamp LogWriter warning: cannot $action at "$path": $error');
   }
 
   static Future<void> _truncateLocked(String path, {required bool allowParentCreate}) async {
@@ -354,4 +365,14 @@ class _LogOp {
   final bool rotate;
   final bool allowParentCreate;
   final Completer<void> completer;
+
+  String get action {
+    if (truncate) {
+      return 'truncate log';
+    }
+    if (rotate) {
+      return 'rotate log';
+    }
+    return 'write log';
+  }
 }

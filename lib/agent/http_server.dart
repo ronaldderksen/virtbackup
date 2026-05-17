@@ -68,9 +68,12 @@ class AgentHttpServer {
   Timer? _scheduleTimer;
   Timer? _accountRefreshTimer;
   String _agentToken = '';
+  bool _storageWritable = false;
+  String _storageWriteError = '';
 
   Future<void> start() async {
     await _loadAgentSettings();
+    await _refreshStorageWriteStatus();
     await _ensureAgentToken();
     await _ensureTlsAssets();
     final bindAddress = InternetAddress.anyIPv4;
@@ -933,6 +936,35 @@ class AgentHttpServer {
     return agentSettings.copyWith(virtBackupAccount: _agentSettings.virtBackupAccount);
   }
 
+  Future<void> _ensureBackupBasePathWritable(String backupPath) async {
+    final trimmedPath = backupPath.trim();
+    if (trimmedPath.isEmpty) {
+      throw 'Backup base path is required.';
+    }
+    final virtBackupDir = Directory('$trimmedPath${Platform.pathSeparator}VirtBackup');
+    try {
+      await virtBackupDir.create(recursive: true);
+      final testFile = File('${virtBackupDir.path}${Platform.pathSeparator}.write-test-${DateTime.now().microsecondsSinceEpoch}-$pid');
+      await testFile.writeAsString('virtbackup write test\n', flush: true);
+      await testFile.delete();
+    } catch (error) {
+      throw 'Backup base path is not writable: ${virtBackupDir.path} ($error)';
+    }
+  }
+
+  Future<void> _refreshStorageWriteStatus() async {
+    try {
+      await _ensureBackupBasePathWritable(_agentSettings.backupPath);
+      _storageWritable = true;
+      _storageWriteError = '';
+      _hostLog('Storage write check OK: ${_agentSettings.backupPath}${Platform.pathSeparator}VirtBackup');
+    } catch (error) {
+      _storageWritable = false;
+      _storageWriteError = error.toString();
+      _hostLog('Storage write check failed. $error');
+    }
+  }
+
   AppSettings _settingsFromWorkerUpdate(AppSettings workerSettings) {
     final workerStorageById = {for (final storage in workerSettings.storage) storage.id: storage};
     final mergedStorage = _agentSettings.storage.map((storage) => workerStorageById[storage.id] ?? storage).toList();
@@ -1217,7 +1249,13 @@ class AgentHttpServer {
       }
       final path = request.uri.path;
       if (request.method == 'GET' && path == '/health') {
-        _json(request, 200, {'ok': true, 'hostname': Platform.localHostname, 'nativeSftpAvailable': _host.nativeSftpAvailable});
+        _json(request, 200, {
+          'ok': true,
+          'hostname': Platform.localHostname,
+          'nativeSftpAvailable': _host.nativeSftpAvailable,
+          'storageWritable': _storageWritable,
+          'storageWriteError': _storageWriteError,
+        });
         return;
       }
       if (request.method == 'GET' && path == '/drivers') {
@@ -1295,6 +1333,16 @@ class AgentHttpServer {
       if (request.method == 'POST' && path == '/config') {
         final body = await _readJson(request);
         final agentSettings = _settingsFromApiConfig(AppSettings.fromMap(body));
+        try {
+          await _ensureBackupBasePathWritable(agentSettings.backupPath);
+        } catch (error) {
+          _storageWritable = false;
+          _storageWriteError = error.toString();
+          _json(request, 400, {'success': false, 'error': error.toString()});
+          return;
+        }
+        _storageWritable = true;
+        _storageWriteError = '';
         await _applyAgentSettings(agentSettings, reason: 'api', forceRestartSshListeners: true, runServerRefreshInBackground: true);
         _json(request, 200, {'success': true});
         return;
@@ -2433,19 +2481,6 @@ class AgentHttpServer {
     final sourceSettings = settings;
     final filesystem = FilesystemBackupDriver(trimmedPath, blockSizeMB: sourceSettings.blockSizeMB);
     final dummy = DummyBackupDriver(trimmedPath, tmpWritesEnabled: sourceSettings.dummyDriverTmpWrites, blockSizeMB: sourceSettings.blockSizeMB);
-    final gdrive = identical(sourceSettings, _agentSettings)
-        ? (_cachedGdriveDriver ??= GdriveBackupDriver(
-            settings: sourceSettings,
-            persistSettings: (updated) => _applyAgentSettings(updated, reason: 'gdrive', forceRestartSshListeners: false),
-            settingsDir: _agentSettingsStore.file.parent,
-            logInfo: _hostLog,
-          ))
-        : GdriveBackupDriver(
-            settings: sourceSettings,
-            persistSettings: (updated) => _applyAgentSettings(updated, reason: 'gdrive', forceRestartSshListeners: false),
-            settingsDir: _agentSettingsStore.file.parent,
-            logInfo: _hostLog,
-          );
     final sftpCapabilities = _catalogSftpCapabilities(sourceSettings);
 
     return {
@@ -2469,7 +2504,7 @@ class AgentHttpServer {
         id: 'gdrive',
         label: 'Google Drive (Preview)',
         usesPath: false,
-        capabilities: gdrive.capabilities,
+        capabilities: _gdriveCapabilities(),
         validateStart: () {
           try {
             final params = _requireSelectedStorageParams(settings: sourceSettings, expectedDriverId: 'gdrive');
@@ -2544,6 +2579,18 @@ class AgentHttpServer {
       supportsVersioning: false,
       maxConcurrentWrites: maxConcurrentWrites,
       params: const <drv.DriverParamDefinition>[],
+    );
+  }
+
+  drv.BackupDriverCapabilities _gdriveCapabilities() {
+    return const drv.BackupDriverCapabilities(
+      supportsRangeRead: true,
+      supportsBatchDelete: true,
+      supportsMultipartUpload: false,
+      supportsServerSideCopy: false,
+      supportsConditionalWrite: false,
+      supportsVersioning: false,
+      maxConcurrentWrites: 4,
     );
   }
 

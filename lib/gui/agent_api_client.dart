@@ -12,6 +12,14 @@ class AgentServerInventory {
   final List<String> missingTools;
 }
 
+class AgentHealth {
+  const AgentHealth({required this.nativeSftpAvailable, required this.storageWritable, required this.storageWriteError});
+
+  final bool? nativeSftpAvailable;
+  final bool storageWritable;
+  final String storageWriteError;
+}
+
 class AgentApiClient {
   AgentApiClient({Uri? baseUri}) : _baseUri = baseUri ?? Uri.parse('https://127.0.0.1:33551');
 
@@ -47,17 +55,30 @@ class AgentApiClient {
   }
 
   Future<bool?> fetchNativeSftpAvailable() async {
+    return (await fetchHealth()).nativeSftpAvailable;
+  }
+
+  Future<AgentHealth> fetchHealth() async {
     final response = await _get('/health');
     if (response.statusCode != 200) {
-      return null;
+      throw 'Agent responded ${response.statusCode}';
     }
+    bool? nativeSftpAvailable;
+    var storageWritable = false;
+    var storageWriteError = '';
     try {
       final decoded = jsonDecode(response.body);
-      if (decoded is Map && decoded['nativeSftpAvailable'] is bool) {
-        return decoded['nativeSftpAvailable'] as bool;
+      if (decoded is Map) {
+        if (decoded['nativeSftpAvailable'] is bool) {
+          nativeSftpAvailable = decoded['nativeSftpAvailable'] as bool;
+        }
+        if (decoded['storageWritable'] is bool) {
+          storageWritable = decoded['storageWritable'] as bool;
+        }
+        storageWriteError = decoded['storageWriteError']?.toString() ?? '';
       }
     } catch (_) {}
-    return null;
+    return AgentHealth(nativeSftpAvailable: nativeSftpAvailable, storageWritable: storageWritable, storageWriteError: storageWriteError);
   }
 
   Future<String> fetchAgentHostname() async {
@@ -98,7 +119,7 @@ class AgentApiClient {
   Future<void> updateConfig(AppSettings agentSettings) async {
     final response = await _post('/config', agentSettings.toMap());
     if (response.statusCode != 200) {
-      throw 'Agent responded ${response.statusCode}';
+      throw _agentErrorMessage(response);
     }
   }
 
