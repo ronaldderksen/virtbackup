@@ -480,7 +480,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
       text: frequency == ScheduleFrequency.hourly || frequency == ScheduleFrequency.every5Minutes ? _minuteFromScheduleTime(existing?.time ?? '00:00') : existing?.time ?? '',
     );
     var weekdays = List<int>.from(existing?.weekdays ?? <int>[]);
-    var serverId = existing?.serverId ?? (_servers.isNotEmpty ? _servers.first.id : null);
+    var serverId = existing?.serverId ?? _defaultScheduleServerId(type);
     var storageId = existing?.storageId ?? (_enabledStorages().isNotEmpty ? _enabledStorages().first.id : null);
     var vmName = existing?.vmName ?? '';
     var restoreXmlPath = existing?.restoreXmlPath ?? '';
@@ -880,6 +880,18 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
       }
     }
     return null;
+  }
+
+  String? _defaultScheduleServerId(ScheduledJobType type) {
+    final preferred = switch (type) {
+      ScheduledJobType.backup => _preferredBackupServerId,
+      ScheduledJobType.restore => _preferredRestoreServerId,
+    };
+    final preferredServerId = _resolveExistingServerId(preferred);
+    if (preferredServerId != null) {
+      return preferredServerId;
+    }
+    return _servers.isNotEmpty ? _servers.first.id : null;
   }
 
   RestoreEntry? _restoreEntryByXmlPath(List<RestoreEntry> entries, String xmlPath) {

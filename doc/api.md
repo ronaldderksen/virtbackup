@@ -184,6 +184,8 @@ Response:
   "backupPath":"/var",
   "log_level":"info",
   "backupStorageId":"dest_filesystem_1739440000000000",
+  "preferredBackupServerId":"server_1739440000000003",
+  "preferredRestoreServerId":"server_1739440000000005",
   "connectionVerified":false,
   "blockSizeMB":1,
   "requireSimpleDisksForBackup":true,

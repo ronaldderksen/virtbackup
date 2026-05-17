@@ -108,6 +108,30 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                     );
                   },
                 ),
+              if (_servers.isNotEmpty) ...[
+                const SizedBox(height: 20),
+                Divider(color: colorScheme.outline.withValues(alpha: 0.2), height: 24),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  initialValue: _preferredServerDropdownValue(_preferredBackupServerId),
+                  decoration: const InputDecoration(labelText: 'Preferred backup server', prefixIcon: Icon(Icons.backup_outlined), border: OutlineInputBorder()),
+                  items: [
+                    const DropdownMenuItem(value: '', child: Text('No preference')),
+                    ..._servers.map((server) => DropdownMenuItem(value: server.id, child: Text(server.name))),
+                  ],
+                  onChanged: _setPreferredBackupServerId,
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: _preferredServerDropdownValue(_preferredRestoreServerId),
+                  decoration: const InputDecoration(labelText: 'Preferred restore server', prefixIcon: Icon(Icons.restore_outlined), border: OutlineInputBorder()),
+                  items: [
+                    const DropdownMenuItem(value: '', child: Text('No preference')),
+                    ..._servers.map((server) => DropdownMenuItem(value: server.id, child: Text(server.name))),
+                  ],
+                  onChanged: _setPreferredRestoreServerId,
+                ),
+              ],
             ],
           ),
         ),

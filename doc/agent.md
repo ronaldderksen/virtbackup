@@ -378,6 +378,7 @@ The agent supports optional native SFTP via FFI:
 - Storage `id: filesystem` is mandatory, always enabled, and cannot be removed.
 - `backup.base_path` is deprecated; `storage[id=filesystem].params.path` is the source of truth and is what gets persisted.
 - Backup uses `backupStorageId` to pick the active storage.
+- The GUI stores optional `preferredBackupServerId` and `preferredRestoreServerId` values in `agent.yaml`; when present and matching configured servers, they select the initial Backup and Restore server.
 - Restore storage selection is request-driven via `storageId` (`POST /servers/{id}/restore/start`), otherwise the active/default storage is used.
 - The GUI restore flow sends the currently selected backup storage as `storageId` for restore entry listing, precheck, and restore start so restore reads stay on the same storage.
 - Restore manifest caching is skipped for filesystem storage because the local manifest directory is already the source of truth; this avoids rewriting manifests and changing their mtimes during restore/precheck/listing.

@@ -9,6 +9,8 @@ class AppSettings {
     required this.logLevel,
     required this.storage,
     required this.backupStorageId,
+    required this.preferredBackupServerId,
+    required this.preferredRestoreServerId,
     required this.servers,
     required this.connectionVerified,
     required this.blockSizeMB,
@@ -27,6 +29,8 @@ class AppSettings {
   final String logLevel;
   final List<BackupStorage> storage;
   final String? backupStorageId;
+  final String preferredBackupServerId;
+  final String preferredRestoreServerId;
   final List<ServerConfig> servers;
   final bool connectionVerified;
   final int blockSizeMB;
@@ -45,6 +49,8 @@ class AppSettings {
     String? logLevel,
     List<BackupStorage>? storage,
     String? backupStorageId,
+    String? preferredBackupServerId,
+    String? preferredRestoreServerId,
     List<ServerConfig>? servers,
     bool? connectionVerified,
     int? blockSizeMB,
@@ -74,6 +80,8 @@ class AppSettings {
       logLevel: logLevel ?? this.logLevel,
       storage: resolvedStorage,
       backupStorageId: backupStorageId ?? this.backupStorageId,
+      preferredBackupServerId: preferredBackupServerId ?? this.preferredBackupServerId,
+      preferredRestoreServerId: preferredRestoreServerId ?? this.preferredRestoreServerId,
       servers: resolvedServers,
       connectionVerified: connectionVerified ?? this.connectionVerified,
       blockSizeMB: blockSizeMB ?? this.blockSizeMB,
@@ -94,6 +102,8 @@ class AppSettings {
       'backupPath': backupPath,
       'log_level': logLevel,
       'backupStorageId': backupStorageId,
+      'preferredBackupServerId': preferredBackupServerId,
+      'preferredRestoreServerId': preferredRestoreServerId,
       'connectionVerified': connectionVerified,
       'blockSizeMB': blockSizeMB,
       'requireSimpleDisksForBackup': requireSimpleDisksForBackup,
@@ -151,6 +161,8 @@ class AppSettings {
       logLevel: ((json['log_level'] ?? '').toString().trim().isEmpty ? 'info' : json['log_level'].toString().trim()),
       storage: storage,
       backupStorageId: backupStorageId == null || backupStorageId.isEmpty ? selectedBackupStorage?.id : backupStorageId,
+      preferredBackupServerId: (json['preferredBackupServerId'] ?? '').toString().trim(),
+      preferredRestoreServerId: (json['preferredRestoreServerId'] ?? '').toString().trim(),
       connectionVerified: json['connectionVerified'] == true,
       blockSizeMB: _parseBlockSizeMB(json['blockSizeMB']),
       requireSimpleDisksForBackup: _parseBool(json['requireSimpleDisksForBackup'], field: 'requireSimpleDisksForBackup', defaultValue: true),
@@ -171,6 +183,8 @@ class AppSettings {
     logLevel: 'info',
     storage: const <BackupStorage>[],
     backupStorageId: null,
+    preferredBackupServerId: '',
+    preferredRestoreServerId: '',
     servers: <ServerConfig>[],
     connectionVerified: false,
     blockSizeMB: 1,
@@ -193,7 +207,7 @@ class AppSettings {
         if (entry is! Map) {
           continue;
         }
-        final parsed = BackupStorage.fromMap(Map<String, dynamic>.from(entry));
+        final parsed = _normalizeStorageDefaults(BackupStorage.fromMap(Map<String, dynamic>.from(entry)));
         if (parsed.id.trim().isEmpty || parsed.driverId.trim().isEmpty) {
           continue;
         }
@@ -201,6 +215,24 @@ class AppSettings {
       }
     }
     return storage;
+  }
+
+  static BackupStorage _normalizeStorageDefaults(BackupStorage storage) {
+    if (storage.driverId.trim() == 'filesystem') {
+      return storage;
+    }
+    return BackupStorage(
+      id: storage.id,
+      name: storage.name,
+      driverId: storage.driverId,
+      enabled: storage.enabled,
+      params: storage.params,
+      disableFresh: storage.disableFresh,
+      storeBlobs: storage.storeBlobs,
+      useBlobs: storage.useBlobs,
+      uploadConcurrency: storage.uploadConcurrency ?? 8,
+      downloadConcurrency: storage.downloadConcurrency ?? 8,
+    );
   }
 
   static BackupStorage? _resolveStorage({required List<BackupStorage> storage, required String? requestedId}) {

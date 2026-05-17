@@ -428,6 +428,8 @@ class AppSettingsStore {
       'backupPath',
       'log_level',
       'backupStorageId',
+      'preferredBackupServerId',
+      'preferredRestoreServerId',
       'connectionVerified',
       'blockSizeMB',
       'requireSimpleDisksForBackup',

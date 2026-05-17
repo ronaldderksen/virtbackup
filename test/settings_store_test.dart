@@ -26,6 +26,8 @@ void main() {
           ),
         ],
         backupStorageId: 'dest-gdrive',
+        preferredBackupServerId: '',
+        preferredRestoreServerId: '',
         servers: <ServerConfig>[],
         connectionVerified: true,
         blockSizeMB: 1,
@@ -79,6 +81,8 @@ schedules:
           BackupStorage(id: AppSettings.filesystemStorageId, name: AppSettings.filesystemStorageName, driverId: 'filesystem', enabled: true, params: <String, dynamic>{'path': '/tmp/virtbackup'}),
         ],
         backupStorageId: AppSettings.filesystemStorageId,
+        preferredBackupServerId: '',
+        preferredRestoreServerId: '',
         servers: <ServerConfig>[],
         connectionVerified: true,
         blockSizeMB: 1,
@@ -178,5 +182,34 @@ schedules: {}
     } finally {
       await tempDir.delete(recursive: true);
     }
+  });
+
+  test('app settings apply storage concurrency defaults from maps', () {
+    final settings = AppSettings.fromMap({
+      'backupPath': '/tmp/virtbackup',
+      'storage': [
+        {
+          'id': 'filesystem',
+          'name': 'Filesystem',
+          'driverId': 'filesystem',
+          'enabled': true,
+          'params': {'path': '/tmp/virtbackup'},
+        },
+        {
+          'id': 'nuc02',
+          'name': 'nuc02',
+          'driverId': 'sftp',
+          'enabled': true,
+          'params': {'host': 'nuc02'},
+        },
+      ],
+      'backupStorageId': 'nuc02',
+    });
+
+    final storage = settings.storage.firstWhere((item) => item.id == 'nuc02');
+    expect(storage.uploadConcurrency, 8);
+    expect(storage.downloadConcurrency, 8);
+    expect(storage.toMap()['uploadConcurrency'], 8);
+    expect(storage.toMap()['downloadConcurrency'], 8);
   });
 }

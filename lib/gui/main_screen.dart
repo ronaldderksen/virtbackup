@@ -100,6 +100,10 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String _savedBackupPath = '';
   String _savedNtfymeToken = '';
   String _savedNotificationEmail = '';
+  String _preferredBackupServerId = '';
+  String _preferredRestoreServerId = '';
+  String _savedPreferredBackupServerId = '';
+  String _savedPreferredRestoreServerId = '';
   String? _selectedBackupStorageId;
   final Map<String, List<VmEntry>> _vmCacheByServerId = {};
   int _selectedMenuIndex = 2;
@@ -682,11 +686,12 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       ..clear()
       ..addAll(_agentSettings.servers);
 
-    if (_servers.isNotEmpty) {
-      _editingServerId = _servers.first.id;
-    } else {
-      _editingServerId = null;
-    }
+    _preferredBackupServerId = _resolveExistingServerId(_agentSettings.preferredBackupServerId) ?? '';
+    _preferredRestoreServerId = _resolveExistingServerId(_agentSettings.preferredRestoreServerId) ?? '';
+    _savedPreferredBackupServerId = _preferredBackupServerId;
+    _savedPreferredRestoreServerId = _preferredRestoreServerId;
+
+    _editingServerId = _preferredBackupServerId.isNotEmpty ? _preferredBackupServerId : (_servers.isNotEmpty ? _servers.first.id : null);
 
     if (_editingServerId != null) {
       _applyServerToForm(_servers.firstWhere((server) => server.id == _editingServerId));
@@ -694,7 +699,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       _resetServerForm();
     }
 
-    _restoreServerId = _editingServerId;
+    _restoreServerId = _preferredRestoreServerId.isEmpty ? _editingServerId : _preferredRestoreServerId;
 
     if (mounted) {
       setState(() {});
@@ -1353,7 +1358,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       }
     }
     if (index == 3) {
-      _autoSelectRestoreServerForDebug();
       await _loadRestoreEntries();
     }
     if (index == 4 && _selectedBackupStorageId != null) {
@@ -1970,22 +1974,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
-  void _autoSelectRestoreServerForDebug() {
-    if (!kDebugMode) {
-      return;
-    }
-    const preferred = 'nuc02';
-    for (final server in _servers) {
-      final id = server.id.trim().toLowerCase();
-      final name = server.name.trim().toLowerCase();
-      final host = server.sshHost.trim().toLowerCase();
-      if (id == preferred || name == preferred || host == preferred) {
-        _restoreServerId = server.id;
-        return;
-      }
-    }
-  }
-
   Future<void> _deleteServer(ServerConfig server) async {
     _servers.removeWhere((item) => item.id == server.id);
     if (_editingServerId == server.id) {
@@ -2000,6 +1988,18 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     if (_restoreServerId == server.id) {
       _restoreServerId = _editingServerId;
     }
+    if (_preferredBackupServerId == server.id) {
+      _preferredBackupServerId = '';
+      _savedPreferredBackupServerId = '';
+    }
+    if (_preferredRestoreServerId == server.id) {
+      _preferredRestoreServerId = '';
+      _savedPreferredRestoreServerId = '';
+    }
+    _agentSettings = _agentSettings.copyWith(
+      preferredBackupServerId: _agentSettings.preferredBackupServerId == server.id ? '' : _agentSettings.preferredBackupServerId,
+      preferredRestoreServerId: _agentSettings.preferredRestoreServerId == server.id ? '' : _agentSettings.preferredRestoreServerId,
+    );
     await _persistServers();
     if (mounted) {
       setState(() {});
@@ -2075,6 +2075,27 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
+  String? _resolveExistingServerId(String serverId) {
+    final normalized = serverId.trim();
+    if (normalized.isEmpty) {
+      return null;
+    }
+    for (final server in _servers) {
+      if (server.id == normalized) {
+        return server.id;
+      }
+    }
+    return null;
+  }
+
+  bool _serverIdExists(String serverId) {
+    return _resolveExistingServerId(serverId) != null;
+  }
+
+  String _preferredServerDropdownValue(String serverId) {
+    return _resolveExistingServerId(serverId) ?? '';
+  }
+
   bool _hasConnectionData() {
     return _serverNameController.text.trim().isNotEmpty || _sshHostController.text.trim().isNotEmpty || _sshUserController.text.trim().isNotEmpty || _sshPasswordController.text.isNotEmpty;
   }
@@ -2092,8 +2113,12 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     return _backupPathController.text.trim() != _savedBackupPath || _ntfymeTokenController.text.trim() != _savedNtfymeToken || _notificationEmailController.text.trim() != _savedNotificationEmail;
   }
 
+  bool _preferredServersHaveChanges() {
+    return _preferredBackupServerId != _savedPreferredBackupServerId || _preferredRestoreServerId != _savedPreferredRestoreServerId;
+  }
+
   bool _hasAnyChanges() {
-    return _connectionHasChanges() || _localHasChanges();
+    return _connectionHasChanges() || _localHasChanges() || _preferredServersHaveChanges();
   }
 
   Future<void> _testConnection() async {
@@ -2155,6 +2180,55 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         setState(() {});
       }
     } finally {}
+  }
+
+  void _setPreferredBackupServerId(String? serverId) {
+    final normalized = serverId?.trim() ?? '';
+    if (normalized.isNotEmpty && !_serverIdExists(normalized)) {
+      _showSnackBarError('Select an existing backup server.');
+      return;
+    }
+    setState(() {
+      _preferredBackupServerId = normalized;
+      if (normalized.isNotEmpty) {
+        final server = _servers.firstWhere((item) => item.id == normalized);
+        _editingServerId = server.id;
+        _applyServerToForm(server);
+      }
+    });
+    if (normalized.isNotEmpty && _requiresVmInventory(_selectedMenuIndex)) {
+      unawaited(_loadVmInventory(_servers.firstWhere((item) => item.id == normalized)));
+    }
+  }
+
+  void _setPreferredRestoreServerId(String? serverId) {
+    final normalized = serverId?.trim() ?? '';
+    if (normalized.isNotEmpty && !_serverIdExists(normalized)) {
+      _showSnackBarError('Select an existing restore server.');
+      return;
+    }
+    setState(() {
+      _preferredRestoreServerId = normalized;
+      if (normalized.isNotEmpty) {
+        _restoreServerId = normalized;
+      }
+    });
+    if (normalized.isNotEmpty) {
+      final server = _servers.firstWhere((item) => item.id == normalized);
+      if (server.connectionType == ConnectionType.ssh) {
+        unawaited(_loadVmInventory(server));
+      }
+    }
+    if (_selectedMenuIndex == 3) {
+      unawaited(_loadRestoreEntries());
+    }
+  }
+
+  Future<void> _savePreferredServerSettings() async {
+    _agentSettings = _agentSettings.copyWith(preferredBackupServerId: _preferredBackupServerId, preferredRestoreServerId: _preferredRestoreServerId);
+    await _pushAgentSettings();
+    _savedPreferredBackupServerId = _preferredBackupServerId;
+    _savedPreferredRestoreServerId = _preferredRestoreServerId;
   }
 
   Future<void> _saveLocalAgentSettings({bool showSnackBar = true}) async {
@@ -2514,6 +2588,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     try {
       final needsConnectionSave = _connectionHasChanges();
       final needsLocalSave = _localHasChanges();
+      final needsPreferredServersSave = _preferredServersHaveChanges();
       var savedSomething = false;
 
       if (needsConnectionSave) {
@@ -2530,6 +2605,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
           return;
         }
         await _saveLocalAgentSettings(showSnackBar: false);
+        savedSomething = true;
+      }
+
+      if (needsPreferredServersSave) {
+        await _savePreferredServerSettings();
         savedSomething = true;
       }
 

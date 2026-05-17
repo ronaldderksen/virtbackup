@@ -39,6 +39,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   String get _username => (_params['username'] ?? '').toString().trim();
   String get _password => (_params['password'] ?? '').toString();
   String get _basePath => (_params['basePath'] ?? '').toString().trim();
+  String get _storageId => _settings.backupStorageId?.trim() ?? '';
   int get _blockSizeMB => _settings.blockSizeMB;
 
   static int _resolveUploadConcurrency(AppSettings settings) {
@@ -462,6 +463,9 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       opStopwatch.stop();
       _logDebug('connect failed host=$_host port=$_port durationMs=${opStopwatch.elapsedMilliseconds} error=$error');
       _logDebug(stackTrace.toString());
+      if (error is SSHAuthFailError) {
+        throw StateError('SFTP authentication failed for storage "$_storageId" ($_username@$_host:$_port). Check the storage username and password.');
+      }
       rethrow;
     }
   }
