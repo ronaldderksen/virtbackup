@@ -21,13 +21,13 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                   FilledButton.icon(
                     onPressed: _canCreateBackupSchedule() ? () => _openScheduleEditor(type: ScheduledJobType.backup) : null,
                     icon: const Icon(Icons.add),
-                    label: const Text('Backup'),
+                    label: const Text('New backup schedule'),
                   ),
                   const SizedBox(width: 12),
                   FilledButton.icon(
                     onPressed: _canCreateRestoreSchedule() ? () => _openScheduleEditor(type: ScheduledJobType.restore) : null,
                     icon: const Icon(Icons.add),
-                    label: const Text('Restore'),
+                    label: const Text('New restore schedule'),
                   ),
                 ],
               ),
@@ -564,6 +564,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
                           title: const Text('Wait for running jobs'),
+                          subtitle: const Text('Queue this schedule instead of failing when another backup, restore, or check is active.'),
                           value: waitForRunningJobs,
                           onChanged: (value) => setDialogState(() => waitForRunningJobs = value),
                         ),
@@ -598,6 +599,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                                   context,
                                   labelText: frequency == ScheduleFrequency.hourly || frequency == ScheduleFrequency.every5Minutes ? 'Minute' : 'Time',
                                   hintText: frequency == ScheduleFrequency.hourly || frequency == ScheduleFrequency.every5Minutes ? '15' : '23:30',
+                                  helperText: frequency == ScheduleFrequency.hourly || frequency == ScheduleFrequency.every5Minutes ? 'Minute of the hour, 0-59.' : 'Local time in 24-hour format.',
                                   invalid: invalidFields.contains('time'),
                                 ),
                                 keyboardType: frequency == ScheduleFrequency.hourly || frequency == ScheduleFrequency.every5Minutes ? TextInputType.number : TextInputType.datetime,
@@ -754,11 +756,11 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                           const SizedBox(height: 12),
                           DropdownButtonFormField<String>(
                             initialValue: restoreDecision,
-                            decoration: _scheduleDecoration(context, labelText: 'Existing VM handling'),
+                            decoration: _scheduleDecoration(context, labelText: 'Existing VM handling', helperText: 'What to do when the target server already has a VM with this name.'),
                             items: const [
                               DropdownMenuItem(value: 'overwrite', child: Text('Overwrite all')),
                               DropdownMenuItem(value: 'auto_rename', child: Text('Auto rename on conflict')),
-                              DropdownMenuItem(value: 'define', child: Text('Define XML only')),
+                              DropdownMenuItem(value: 'define', child: Text('Define XML only, keep disks')),
                             ],
                             onChanged: (value) => updateDialog(() => restoreDecision = value ?? 'overwrite'),
                           ),
@@ -903,12 +905,13 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
     return null;
   }
 
-  InputDecoration _scheduleDecoration(BuildContext context, {required String labelText, String? hintText, bool invalid = false}) {
+  InputDecoration _scheduleDecoration(BuildContext context, {required String labelText, String? hintText, String? helperText, bool invalid = false}) {
     final borderSide = invalid ? BorderSide(color: Theme.of(context).colorScheme.error, width: 1.6) : const BorderSide();
     final border = OutlineInputBorder(borderSide: borderSide);
     return InputDecoration(
       labelText: labelText,
       hintText: hintText,
+      helperText: helperText,
       border: border,
       enabledBorder: border,
       focusedBorder: invalid ? OutlineInputBorder(borderSide: BorderSide(color: Theme.of(context).colorScheme.error, width: 2)) : null,

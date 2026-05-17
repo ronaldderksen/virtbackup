@@ -323,7 +323,7 @@ The agent supports optional native SFTP via FFI:
 - The GUI can store multiple agent addresses and switch between them.
 - Adding or editing an agent always shows the same dialog fields for endpoint, backup base path, and notification settings. Editing an existing agent first selects and loads that agent when reachable. Saving config creates `<backup base path>/VirtBackup` on the agent and verifies write access before persisting the settings.
 - On startup the agent checks write access to `<backup base path>/VirtBackup` and exposes the result in `/health`. When the selected agent reports storage as not writable or has no configured servers, the GUI keeps only Settings enabled and shows the health state in the agent list.
-- Storage management is available from Settings and is enabled only when the selected agent is healthy.
+- Storage management is available from Settings and is enabled only when the selected agent is healthy. The Settings storage list exposes direct edit/delete actions per storage and a `New storage` action for adding another destination.
 - For `127.0.0.1`, the GUI always uses the local `agent.token` file; other agents require a token entered in the GUI (token is mandatory).
 - Google Drive OAuth refresh/access tokens are stored encrypted in storage params (`storage[*].params.accessTokenEnc`, `storage[*].params.refreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.
 - Saving settings does not mutate in-memory storage token fields; token encryption only applies to the persisted YAML payload.
@@ -351,7 +351,7 @@ The agent supports optional native SFTP via FFI:
 - Google Drive upload HTTP clients are leased from a bounded pool so upload retries/concurrency cannot fan out into unbounded concurrent connections.
 - Google Drive folder creation is guarded by a local folder lock and checks for existing folders before creating; when duplicate folder names are detected, the driver performs a strict merge into a primary folder and fails the operation if duplicates cannot be fully resolved.
 - Storage storage are configured at root-level `storage` in `agent.yaml` (not under `backup`), each with its own `id`, `driverId`, and `params`.
-- In the GUI Storage editor, `driverId: gdrive` supports OAuth connect via browser (PKCE); the returned tokens are stored in that storage's `params`.
+- In the GUI Storage editor, `driverId: gdrive` supports OAuth connect via browser (PKCE); token fields are not shown in the editor, and the returned tokens are stored in that storage's `params`.
 - Storage option `disableFresh: true` forces `fresh` off for that storage; backup requests with `fresh: true` continue and are logged.
 - `fresh` cleanup never deletes filesystem storage blobs (`storage[id=filesystem].params.path/VirtBackup/blobs`).
 - Blob storage is block-size scoped: `.../VirtBackup/blobs/<blockSizeMB>/`.

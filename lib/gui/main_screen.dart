@@ -2903,18 +2903,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     return DateTime.now().toUtc().add(Duration(seconds: parsed));
   }
 
-  String _formatGdriveExpiryFromEpochMs(int? expiresAtMs) {
-    if (expiresAtMs == null || expiresAtMs <= 0) {
-      return 'Unknown';
-    }
-    final instant = DateTime.fromMillisecondsSinceEpoch(expiresAtMs, isUtc: true).toLocal();
-    final paddedMonth = instant.month.toString().padLeft(2, '0');
-    final paddedDay = instant.day.toString().padLeft(2, '0');
-    final paddedHour = instant.hour.toString().padLeft(2, '0');
-    final paddedMinute = instant.minute.toString().padLeft(2, '0');
-    return '${instant.year}-$paddedMonth-$paddedDay $paddedHour:$paddedMinute';
-  }
-
   Future<void> _saveAllAgentSettings() async {
     if (!_hasAnyChanges()) {
       return;
@@ -2970,14 +2958,63 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     };
   }
 
-  Future<void> _openStorageEditor() async {
+  Future<void> _saveStorageSettings(List<BackupStorage> storage, {String successMessage = 'Storages saved'}) async {
+    final nextBackupId = _selectedBackupStorageId != null && storage.any((item) => item.id == _selectedBackupStorageId) ? _selectedBackupStorageId : (storage.isEmpty ? null : storage.first.id);
+    final updated = _agentSettings.copyWith(storage: storage, backupStorageId: nextBackupId);
+    await _agentApiClient.updateConfig(updated);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _agentSettings = updated;
+      _selectedBackupStorageId = nextBackupId;
+      _ensureBackupStorageSelection();
+    });
+    unawaited(_persistSelectedStorageIdToPrefs());
+    _showSnackBarInfo(successMessage);
+  }
+
+  Future<void> _deleteStorageFromSettings(BackupStorage storage) async {
+    if (storage.id == AppSettings.filesystemStorageId) {
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Delete storage?'),
+          content: Text('Delete "${storage.name}"?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.of(dialogContext).pop(true), child: const Text('Delete')),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) {
+      return;
+    }
+    try {
+      final working = _agentSettings.storage.where((item) => item.id != storage.id).toList();
+      await _saveStorageSettings(working, successMessage: 'Storage deleted');
+    } catch (error, stackTrace) {
+      _logError('Deleting storage failed.', error, stackTrace);
+      if (mounted) {
+        _showSnackBarError('Deleting storage failed: $error');
+      }
+    }
+  }
+
+  Future<void> _openStorageEditor({BackupStorage? initialStorage, bool createNew = false}) async {
     var working = List<BackupStorage>.from(_agentSettings.storage);
+    final directMode = initialStorage != null || createNew;
+    var openedDirectEditor = false;
     await showDialog<void>(
       context: context,
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setStateDialog) {
-            Future<void> editStorage({BackupStorage? existing}) async {
+            Future<bool> editStorage({BackupStorage? existing}) async {
               final nameController = TextEditingController(text: existing?.name ?? '');
               var driverId = existing?.driverId ?? (_backupDrivers.isNotEmpty ? _backupDrivers.first.id : 'filesystem');
               var enabled = existing?.enabled ?? true;
@@ -3001,6 +3038,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                 builder: (context) {
                   return StatefulBuilder(
                     builder: (context, setStateStorage) {
+                      final hasStoredGdriveRefreshToken = (params['refreshTokenEnc']?.toString().trim().isNotEmpty ?? false) && !gdriveDisconnected;
+                      final gdriveConnected = _isStorageGdriveConnected(gdriveRefreshController.text) || hasStoredGdriveRefreshToken;
                       return AlertDialog(
                         title: Text(existing == null ? 'New storage' : 'Edit storage'),
                         content: SizedBox(
@@ -3108,26 +3147,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                       decoration: const InputDecoration(labelText: 'Root path'),
                                     ),
                                     const SizedBox(height: 12),
-                                    TextFormField(
-                                      controller: gdriveScopeController,
-                                      decoration: const InputDecoration(labelText: 'Scope'),
-                                    ),
-                                    const SizedBox(height: 12),
-                                    TextFormField(
-                                      controller: gdriveAccessController,
-                                      decoration: const InputDecoration(labelText: 'Access token'),
-                                    ),
-                                    const SizedBox(height: 12),
-                                    TextFormField(
-                                      controller: gdriveRefreshController,
-                                      decoration: const InputDecoration(labelText: 'Refresh token'),
-                                    ),
-                                    const SizedBox(height: 12),
-                                    TextFormField(
-                                      controller: gdriveEmailController,
-                                      decoration: const InputDecoration(labelText: 'Account email'),
-                                    ),
-                                    const SizedBox(height: 12),
                                     Row(
                                       children: [
                                         FilledButton.icon(
@@ -3157,7 +3176,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                         ),
                                         const SizedBox(width: 12),
                                         TextButton.icon(
-                                          onPressed: _isStorageGdriveConnected(gdriveRefreshController.text) && !_isGdriveConnecting
+                                          onPressed: gdriveConnected && !_isGdriveConnecting
                                               ? () {
                                                   gdriveAccessController.clear();
                                                   gdriveRefreshController.clear();
@@ -3173,13 +3192,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                       ],
                                     ),
                                     const SizedBox(height: 8),
-                                    if (_isStorageGdriveConnected(gdriveRefreshController.text)) ...[
+                                    if (gdriveConnected) ...[
                                       Text(
                                         'Connected account: ${gdriveEmailController.text.trim().isEmpty ? 'Unknown' : gdriveEmailController.text.trim()}',
                                         style: Theme.of(context).textTheme.bodyMedium,
                                       ),
-                                      const SizedBox(height: 4),
-                                      Text('Access token expires: ${_formatGdriveExpiryFromEpochMs(gdriveExpiresAtMs)}', style: Theme.of(context).textTheme.bodySmall),
                                     ] else ...[
                                       Text('Not connected. Backups will fail until you connect Google Drive.', style: Theme.of(context).textTheme.bodyMedium),
                                     ],
@@ -3258,7 +3275,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                 },
               );
               if (result == null) {
-                return;
+                return false;
               }
               setStateDialog(() {
                 final index = working.indexWhere((item) => item.id == result.id);
@@ -3268,6 +3285,37 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                   working.add(result);
                 }
               });
+              return true;
+            }
+
+            if (directMode && !openedDirectEditor) {
+              openedDirectEditor = true;
+              WidgetsBinding.instance.addPostFrameCallback((_) async {
+                if (!context.mounted) {
+                  return;
+                }
+                final changed = await editStorage(existing: initialStorage);
+                if (!context.mounted) {
+                  return;
+                }
+                if (changed) {
+                  try {
+                    await _saveStorageSettings(working, successMessage: createNew ? 'Storage created' : 'Storage saved');
+                  } catch (error, stackTrace) {
+                    _logError('Saving storage failed.', error, stackTrace);
+                    if (mounted) {
+                      _showSnackBarError('Saving storage failed: $error');
+                    }
+                  }
+                }
+                if (context.mounted) {
+                  Navigator.of(context).pop();
+                }
+              });
+              return AlertDialog(
+                title: Text(createNew ? 'New storage' : 'Edit storage'),
+                content: const SizedBox(width: 320, child: LinearProgressIndicator()),
+              );
             }
 
             return AlertDialog(
@@ -3328,21 +3376,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                 FilledButton(
                   onPressed: () async {
                     try {
-                      final nextBackupId = _selectedBackupStorageId != null && working.any((item) => item.id == _selectedBackupStorageId)
-                          ? _selectedBackupStorageId
-                          : (working.isEmpty ? null : working.first.id);
-                      final updated = _agentSettings.copyWith(storage: working, backupStorageId: nextBackupId);
-                      await _agentApiClient.updateConfig(updated);
-                      if (!mounted) {
-                        return;
-                      }
-                      setState(() {
-                        _agentSettings = updated;
-                        _selectedBackupStorageId = nextBackupId;
-                        _ensureBackupStorageSelection();
-                      });
-                      unawaited(_persistSelectedStorageIdToPrefs());
-                      _showSnackBarInfo('Storages saved');
+                      await _saveStorageSettings(working);
                       if (!context.mounted) {
                         return;
                       }

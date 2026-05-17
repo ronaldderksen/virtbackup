@@ -153,9 +153,9 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                 children: [
                   Text('Storage', style: Theme.of(context).textTheme.titleMedium),
                   FilledButton.icon(
-                    onPressed: _agentReachable && _storageWritable && !_agentAuthFailed && !_agentTokenMissing && !_isLoadingAgentSettings ? _openStorageEditor : null,
-                    icon: const Icon(Icons.cloud_queue_outlined),
-                    label: const Text('Manage storage'),
+                    onPressed: _agentReachable && _storageWritable && !_agentAuthFailed && !_agentTokenMissing && !_isLoadingAgentSettings ? () => _openStorageEditor(createNew: true) : null,
+                    icon: const Icon(Icons.add),
+                    label: const Text('New storage'),
                   ),
                 ],
               ),
@@ -171,12 +171,29 @@ extension _BackupServerSetupSettingsSection on _BackupServerSetupScreenState {
                   itemBuilder: (context, index) {
                     final storage = _agentSettings.storage[index];
                     final isSelected = storage.id == _selectedBackupStorageId;
+                    final isMandatoryFilesystem = storage.id == AppSettings.filesystemStorageId;
+                    final canManageStorage = _agentReachable && _storageWritable && !_agentAuthFailed && !_agentTokenMissing && !_isLoadingAgentSettings;
                     return ListTile(
                       selected: isSelected,
                       leading: Icon(isSelected ? Icons.cloud_done_outlined : Icons.cloud_queue_outlined),
                       title: Text(storage.name),
                       subtitle: Text('${storage.driverId} - ${storage.enabled ? 'enabled' : 'disabled'}'),
-                      onTap: _agentReachable && _storageWritable && !_agentAuthFailed && !_agentTokenMissing && !_isLoadingAgentSettings ? _openStorageEditor : null,
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: 'Edit storage',
+                            onPressed: canManageStorage ? () => _openStorageEditor(initialStorage: storage) : null,
+                            icon: const Icon(Icons.edit_outlined),
+                          ),
+                          IconButton(
+                            tooltip: isMandatoryFilesystem ? 'Filesystem storage is required' : 'Delete storage',
+                            onPressed: canManageStorage && !isMandatoryFilesystem ? () => _deleteStorageFromSettings(storage) : null,
+                            icon: const Icon(Icons.delete_outline),
+                          ),
+                        ],
+                      ),
+                      onTap: canManageStorage ? () => _openStorageEditor(initialStorage: storage) : null,
                     );
                   },
                 ),

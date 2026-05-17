@@ -98,6 +98,8 @@ extension _BackupServerSetupBackupSection on _BackupServerSetupScreenState {
                                     children: [
                                       Text(vm.name, style: Theme.of(context).textTheme.titleMedium),
                                       Text(isRunning ? 'Running' : 'Stopped', style: Theme.of(context).textTheme.bodyMedium),
+                                      if (hasOverlay)
+                                        Text('Backup is disabled because an overlay exists. Run Cleanup first.', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: colorScheme.error)),
                                     ],
                                   ),
                                 ),

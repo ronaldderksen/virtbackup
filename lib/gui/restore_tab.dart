@@ -240,6 +240,43 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
     }
   }
 
+  String? _restoreActionDisabledReason({required ServerConfig? restoreServer, required String? selectedRestoreStorageId, required List<String> missingTools, required RestoreEntry? selectedEntry}) {
+    if (_isLoadingRestoreEntries) {
+      return 'Restore actions are disabled while VM and date options are loading.';
+    }
+    if (_isDeletingRestoreEntry) {
+      return 'Restore actions are disabled while the selected restore entry is being deleted.';
+    }
+    if (_isPreparingRestore) {
+      return 'Restore actions are disabled while the restore is being prepared.';
+    }
+    if (_isRestoring) {
+      return 'Restore actions are disabled while a restore is running.';
+    }
+    if (_isSanityChecking) {
+      return 'Check actions are disabled while a check is running.';
+    }
+    if (restoreServer == null) {
+      return 'Select a restore server to enable restore.';
+    }
+    if (selectedRestoreStorageId == null) {
+      return 'Select a storage with restore data to enable restore actions.';
+    }
+    if (selectedEntry == null) {
+      return 'Select a VM and date to enable restore actions.';
+    }
+    if (missingTools.isNotEmpty) {
+      return 'Restore is disabled because the selected server is missing required tools: ${missingTools.join(', ')}.';
+    }
+    if (!selectedEntry.hasAllDisks) {
+      return 'Restore is disabled because this backup is missing one or more disks. Full check and quick check can still run.';
+    }
+    if (restoreServer.connectionType != ConnectionType.ssh) {
+      return 'Restore is disabled because the selected restore server is not SSH-managed. Full check and quick check can still run.';
+    }
+    return null;
+  }
+
   List<Widget> _buildRestoreSection(ColorScheme colorScheme) {
     final selectedEntry = _selectedRestoreEntry();
     final restoreServer = _getRestoreServer();
@@ -251,12 +288,16 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
         !_isRestoring &&
         !_isDeletingRestoreEntry &&
         restoreServer != null &&
+        selectedRestoreStorageId != null &&
         restoreServer.connectionType == ConnectionType.ssh &&
         missingTools.isEmpty &&
         selectedEntry != null &&
         selectedEntry.hasAllDisks;
-    final canCheck = !_isSanityChecking && !_isPreparingRestore && !_isRestoring && !_isDeletingRestoreEntry && selectedEntry != null;
+    final canCheck = !_isSanityChecking && !_isPreparingRestore && !_isRestoring && !_isDeletingRestoreEntry && selectedRestoreStorageId != null && selectedEntry != null;
     final canDeleteEntry = !_isDeletingRestoreEntry && !_isLoadingRestoreEntries && !_isPreparingRestore && !_isRestoring && selectedEntry != null;
+    final disabledReason = canRestore && canCheck
+        ? null
+        : _restoreActionDisabledReason(restoreServer: restoreServer, selectedRestoreStorageId: selectedRestoreStorageId, missingTools: missingTools, selectedEntry: selectedEntry);
     final vmOptions = _restoreEntries.map((entry) => entry.vmName).toSet().toList()..sort();
     final selectedVm = _selectedRestoreVmName;
     final dateEntries = _restoreEntries.where((entry) => selectedVm == null ? true : entry.vmName == selectedVm).toList()..sort((a, b) => b.timestamp.compareTo(a.timestamp));
@@ -394,6 +435,7 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
                   ),
                 ],
               ),
+              if (disabledReason != null) ...[const SizedBox(height: 8), Text(disabledReason, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: colorScheme.error))],
               const SizedBox(height: 12),
               if (_restoreEntries.isEmpty && !_isLoadingRestoreEntries)
                 Text('No backup XML files found.', style: Theme.of(context).textTheme.bodyMedium)
