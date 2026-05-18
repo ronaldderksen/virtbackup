@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:io';
 
 class LogWriter {
@@ -7,6 +8,7 @@ class LogWriter {
   static const String _guiSource = 'gui';
   static const String _infoLevel = 'info';
   static const String _defaultLevel = _infoLevel;
+  static const Object _jobIdZoneKey = Object();
   static final Queue<_LogOp> _queue = Queue<_LogOp>();
   static final Map<String, String> _pathsBySource = <String, String>{};
   static final Map<String, String> _levelsBySource = <String, String>{};
@@ -22,6 +24,14 @@ class LogWriter {
       _ => '${_sanitizeFileName(normalizedSource)}.log',
     };
     return '$rootPath${Platform.pathSeparator}VirtBackup${Platform.pathSeparator}logs${Platform.pathSeparator}$fileName';
+  }
+
+  static R withJobLogging<R>(String jobId, R Function() body) {
+    final normalizedJobId = jobId.trim();
+    if (normalizedJobId.isEmpty) {
+      return body();
+    }
+    return runZoned(body, zoneValues: {_jobIdZoneKey: normalizedJobId});
   }
 
   static Future<void> configureSourcePath({required String source, required String path}) async {
@@ -60,7 +70,7 @@ class LogWriter {
     return completer.future;
   }
 
-  static Future<void> log({required String source, required String level, required String message}) async {
+  static Future<void> log({required String source, required String level, required String message, String? jobId}) async {
     final trimmedLevel = level.trim();
     final trimmedMessage = message.trimRight();
     if (trimmedLevel.isEmpty || trimmedMessage.isEmpty) {
@@ -74,21 +84,31 @@ class LogWriter {
     _writeConsole(timestamp: timestamp, level: normalizedLevel, message: trimmedMessage);
     final line = '$timestamp level=$normalizedLevel message=${_sanitize(trimmedMessage)}';
     final allowParentCreate = _allowParentCreate(source);
-    final completer = Completer<void>();
-    _queue.add(_LogOp(path: _resolvePath(source), line: line, truncate: false, rotate: false, allowParentCreate: allowParentCreate, completer: completer));
+    final completers = <Future<void>>[];
+    void enqueue(String path) {
+      final completer = Completer<void>();
+      completers.add(completer.future);
+      _queue.add(_LogOp(path: path, line: line, truncate: false, rotate: false, allowParentCreate: allowParentCreate, completer: completer));
+    }
+
+    enqueue(_resolvePath(source));
+    final jobPath = _resolveJobPath(source: source, jobId: jobId);
+    if (jobPath != null) {
+      enqueue(jobPath);
+    }
     _ensureDrain();
-    return completer.future;
+    await Future.wait(completers);
   }
 
-  static Future<void> logAgent({required String level, required String message}) {
-    return log(source: _agentSource, level: level, message: message);
+  static Future<void> logAgent({required String level, required String message, String? jobId}) {
+    return log(source: _agentSource, level: level, message: message, jobId: jobId);
   }
 
   static Future<void> logGui({required String level, required String message}) {
     return log(source: _guiSource, level: level, message: message);
   }
 
-  static void logSync({required String source, required String level, required String message}) {
+  static void logSync({required String source, required String level, required String message, String? jobId}) {
     final trimmedLevel = level.trim();
     final trimmedMessage = message.trimRight();
     if (trimmedLevel.isEmpty || trimmedMessage.isEmpty) {
@@ -101,25 +121,84 @@ class LogWriter {
     final timestamp = _formatTimestamp(DateTime.now());
     _writeConsole(timestamp: timestamp, level: normalizedLevel, message: trimmedMessage);
     final line = '$timestamp level=$normalizedLevel message=${_sanitize(trimmedMessage)}';
+    final allowParentCreate = _allowParentCreate(source);
     final path = _resolvePath(source);
     try {
-      _appendSync(path, line, allowParentCreate: _allowParentCreate(source));
+      _appendSync(path, line, allowParentCreate: allowParentCreate);
     } catch (error) {
       _writeIoWarning(action: 'write log', path: path, error: error);
     }
+    final jobPath = _resolveJobPath(source: source, jobId: jobId);
+    if (jobPath == null) {
+      return;
+    }
+    try {
+      _appendSync(jobPath, line, allowParentCreate: allowParentCreate);
+    } catch (error) {
+      _writeIoWarning(action: 'write job log', path: jobPath, error: error);
+    }
   }
 
-  static void logAgentSync({required String level, required String message}) {
-    logSync(source: _agentSource, level: level, message: message);
+  static void logAgentSync({required String level, required String message, String? jobId}) {
+    logSync(source: _agentSource, level: level, message: message, jobId: jobId);
+  }
+
+  static void logAgentJsonSync({required String level, required Map<String, Object?> fields, String? jobId}) {
+    logJsonSync(source: _agentSource, level: level, fields: fields, jobId: jobId);
   }
 
   static void logGuiSync({required String level, required String message}) {
     logSync(source: _guiSource, level: level, message: message);
   }
 
+  static void logJsonSync({required String source, required String level, required Map<String, Object?> fields, String? jobId}) {
+    final trimmedLevel = level.trim();
+    if (trimmedLevel.isEmpty || fields.isEmpty) {
+      return;
+    }
+    final normalizedLevel = _normalizeLevel(trimmedLevel, source: source);
+    if (!_shouldLog(source: source, messageLevel: normalizedLevel)) {
+      return;
+    }
+    final timestamp = _formatTimestamp(DateTime.now());
+    final message = jsonEncode(fields);
+    final line = '$timestamp level=$normalizedLevel message=${_sanitize(message)}';
+    _writeConsole(timestamp: timestamp, level: normalizedLevel, message: message);
+    final allowParentCreate = _allowParentCreate(source);
+    final path = _resolvePath(source);
+    try {
+      _appendSync(path, line, allowParentCreate: allowParentCreate);
+    } catch (error) {
+      _writeIoWarning(action: 'write log', path: path, error: error);
+    }
+    final jobPath = _resolveJobPath(source: source, jobId: jobId);
+    if (jobPath == null) {
+      return;
+    }
+    try {
+      _appendSync(jobPath, line, allowParentCreate: allowParentCreate);
+    } catch (error) {
+      _writeIoWarning(action: 'write job log', path: jobPath, error: error);
+    }
+  }
+
   static String _resolvePath(String source) {
     final normalizedSource = _normalizeSource(source);
     return _pathsBySource[normalizedSource] ?? defaultPathForSource(normalizedSource);
+  }
+
+  static String? _resolveJobPath({required String source, String? jobId}) {
+    if (_normalizeSource(source) != _agentSource) {
+      return null;
+    }
+    final normalizedJobId = (jobId ?? Zone.current[_jobIdZoneKey]?.toString() ?? '').trim();
+    if (normalizedJobId.isEmpty) {
+      return null;
+    }
+    final sourcePath = _resolvePath(source);
+    final separatorIndex = sourcePath.lastIndexOf(Platform.pathSeparator);
+    final directory = separatorIndex < 0 ? '.' : sourcePath.substring(0, separatorIndex);
+    return '$directory${Platform.pathSeparator}agent-job-${_sanitizeFileName(normalizedJobId)}.log';
   }
 
   static bool _shouldLog({required String source, required String messageLevel}) {

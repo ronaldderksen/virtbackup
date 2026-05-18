@@ -1818,7 +1818,7 @@ class AgentHttpServer {
           _json(request, 400, {'error': 'storage not found or unavailable'});
           return;
         }
-        final jobId = _createJob(AgentJobType.sanity);
+        final jobId = _createJob(AgentJobType.sanity, vmName: _extractVmNameFromXmlPath(xmlPath), storageId: resolvedStorage.storage.id);
         _json(request, 200, AgentJobStart(jobId: jobId).toMap());
         _startSanityCheckJob(jobId, xmlPath, timestamp, storage: resolvedStorage);
         return;
@@ -1841,7 +1841,7 @@ class AgentHttpServer {
           _json(request, 400, {'error': 'storage not found or unavailable'});
           return;
         }
-        final jobId = _createJob(AgentJobType.sanity);
+        final jobId = _createJob(AgentJobType.sanity, vmName: _extractVmNameFromXmlPath(xmlPath), storageId: resolvedStorage.storage.id);
         _json(request, 200, AgentJobStart(jobId: jobId).toMap());
         _startQuickCheckJob(jobId, xmlPath, timestamp, storage: resolvedStorage);
         return;
@@ -1881,6 +1881,11 @@ class AgentHttpServer {
           return;
         }
         _json(request, 200, {'success': true});
+        return;
+      }
+      if (request.method == 'GET' && path == '/jobs/history') {
+        final history = await _loadJobHistoryFromLogs();
+        _json(request, 200, history.map((entry) => entry.toMap()).toList());
         return;
       }
       if (request.method == 'GET' && path.startsWith('/jobs/')) {
@@ -3103,6 +3108,180 @@ class AgentHttpServer {
     return type == AgentJobType.backup || type == AgentJobType.restore;
   }
 
+  void _logJobResult(AgentJobStatus status) {
+    final fields = <String, Object?>{'event': 'job_result', 'jobId': status.id, 'type': status.type.name, 'state': status.state.name};
+    final message = status.message.trim();
+    if (message.isNotEmpty) {
+      fields['message'] = message;
+    }
+    final sizeBytes = status.totalBytes > 0 ? status.totalBytes : null;
+    final notification = _buildJobCompletionNotification(status.id, type: status.type, state: status.state, message: status.message, sizeBytes: sizeBytes);
+    fields['notificationStatus'] = notification.status;
+    fields['title'] = notification.title;
+    final vmName = status.vmName.trim();
+    if (vmName.isNotEmpty) {
+      fields['vmName'] = vmName;
+    }
+    final storageLabel = _jobControls[status.id]?.storageLabel?.trim() ?? '';
+    if (storageLabel.isNotEmpty) {
+      fields['storage'] = storageLabel;
+    }
+    if (notification.source != null && notification.source!.trim().isNotEmpty) {
+      fields['source'] = notification.source;
+    }
+    if (notification.target != null && notification.target!.trim().isNotEmpty) {
+      fields['target'] = notification.target;
+    }
+    if (notification.durationSeconds != null) {
+      fields['durationSeconds'] = notification.durationSeconds;
+    }
+    if (notification.sizeBytes != null) {
+      fields['size'] = _formatBytes(notification.sizeBytes!);
+    }
+    if (notification.error != null && notification.error!.trim().isNotEmpty) {
+      fields['error'] = notification.error;
+    }
+    if (notification.warning != null && notification.warning!.trim().isNotEmpty) {
+      fields['warning'] = notification.warning;
+    }
+    if (status.scheduleId.trim().isNotEmpty) {
+      fields['scheduleId'] = status.scheduleId.trim();
+    }
+    fields['transferred'] = _formatBytes(status.bytesTransferred);
+    fields['averageSpeed'] = _formatSpeed(status.averageSpeedBytesPerSec);
+    if (status.type != AgentJobType.restore) {
+      fields['physicalTransferred'] = _formatBytes(status.physicalBytesTransferred);
+      fields['averagePhysicalSpeed'] = _formatSpeed(status.averagePhysicalSpeedBytesPerSec);
+      fields['total'] = _formatBytes(status.totalBytes);
+      fields['physicalTotal'] = _formatBytes(status.physicalTotalBytes);
+    }
+    LogWriter.logAgentJsonSync(level: 'info', fields: fields, jobId: status.id);
+  }
+
+  Future<List<AgentJobHistoryEntry>> _loadJobHistoryFromLogs() async {
+    final agentLogPath = LogWriter.defaultPathForSource('agent', basePath: _agentSettings.backupPath.trim());
+    final separatorIndex = agentLogPath.lastIndexOf(Platform.pathSeparator);
+    final logsDir = Directory(separatorIndex < 0 ? '.' : agentLogPath.substring(0, separatorIndex));
+    if (!await logsDir.exists()) {
+      return <AgentJobHistoryEntry>[];
+    }
+
+    final files = <File>[];
+    await for (final entity in logsDir.list(followLinks: false)) {
+      if (entity is! File) {
+        continue;
+      }
+      final name = _baseName(entity.path);
+      if (name.startsWith('agent-job-') && name.endsWith('.log')) {
+        files.add(entity);
+      }
+    }
+
+    final byJobId = <String, AgentJobHistoryEntry>{};
+    for (final file in files) {
+      List<String> lines;
+      try {
+        lines = await file.readAsLines();
+      } catch (error) {
+        _hostLog('Job history skipped unreadable log ${file.path}: $error');
+        continue;
+      }
+      for (final line in lines) {
+        final entry = _parseJobHistoryLogLine(line);
+        if (entry == null) {
+          continue;
+        }
+        final previous = byJobId[entry.jobId];
+        if (previous == null || entry.timestamp.isAfter(previous.timestamp)) {
+          byJobId[entry.jobId] = entry;
+        }
+      }
+    }
+
+    final history = byJobId.values.toList()..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    return history;
+  }
+
+  AgentJobHistoryEntry? _parseJobHistoryLogLine(String line) {
+    final trimmed = line.trim();
+    final firstSpace = trimmed.indexOf(' ');
+    final messageMarker = trimmed.indexOf(' message=');
+    if (firstSpace <= 0 || messageMarker <= firstSpace) {
+      return null;
+    }
+    final timestampText = trimmed.substring(0, firstSpace).trim();
+    final levelTextRaw = trimmed.substring(firstSpace + 1, messageMarker).trim();
+    if (!levelTextRaw.startsWith('level=')) {
+      return null;
+    }
+    final levelText = levelTextRaw.substring('level='.length).trim();
+    final jsonText = trimmed.substring(messageMarker + ' message='.length).trim();
+    Object? decoded;
+    try {
+      decoded = jsonDecode(jsonText);
+    } catch (_) {
+      return null;
+    }
+    if (decoded is! Map) {
+      return null;
+    }
+    final data = Map<String, dynamic>.from(decoded);
+    if (data['event'] != 'job_result') {
+      return null;
+    }
+    final jobId = data['jobId']?.toString().trim() ?? '';
+    final typeText = data['type']?.toString().trim() ?? '';
+    final stateText = data['state']?.toString().trim() ?? '';
+    if (timestampText.isEmpty || jobId.isEmpty || typeText.isEmpty || stateText.isEmpty) {
+      return null;
+    }
+    final timestamp = DateTime.tryParse(timestampText);
+    if (timestamp == null) {
+      return null;
+    }
+    AgentJobType type;
+    AgentJobState state;
+    try {
+      type = AgentJobType.values.firstWhere((value) => value.name == typeText);
+      state = AgentJobState.values.firstWhere((value) => value.name == stateText);
+    } catch (_) {
+      return null;
+    }
+    final fields = Map<String, dynamic>.from(data)
+      ..remove('event')
+      ..remove('notificationStatus');
+    fields['timestamp'] = timestampText;
+    if (levelText.isNotEmpty) {
+      fields['level'] = levelText;
+    }
+    return AgentJobHistoryEntry(
+      timestamp: timestamp,
+      jobId: jobId,
+      type: type,
+      state: state,
+      message: data['message']?.toString() ?? '',
+      vmName: data['vmName']?.toString() ?? '',
+      storageId: data['storageId']?.toString() ?? '',
+      storage: data['storage']?.toString() ?? '',
+      notificationStatus: data['notificationStatus']?.toString() ?? '',
+      title: data['title']?.toString() ?? '',
+      source: data['source']?.toString() ?? '',
+      target: data['target']?.toString() ?? '',
+      durationSeconds: (data['durationSeconds'] as num?)?.toInt(),
+      sizeBytes: (data['sizeBytes'] as num?)?.toInt(),
+      error: data['error']?.toString() ?? '',
+      warning: data['warning']?.toString() ?? '',
+      scheduleId: data['scheduleId']?.toString() ?? '',
+      bytesTransferred: (data['bytesTransferred'] as num?)?.toInt(),
+      averageSpeedBytesPerSec: (data['averageSpeedBytesPerSec'] as num?)?.toDouble(),
+      physicalBytesTransferred: (data['physicalBytesTransferred'] as num?)?.toInt(),
+      averagePhysicalSpeedBytesPerSec: (data['averagePhysicalSpeedBytesPerSec'] as num?)?.toDouble(),
+      totalBytes: (data['totalBytes'] as num?)?.toInt(),
+      physicalTotalBytes: (data['physicalTotalBytes'] as num?)?.toInt(),
+      fields: fields,
+    );
+  }
+
   void _updateJob(String jobId, AgentJobStatus status) {
     final previous = _jobs[jobId];
     final control = _jobControls[jobId];
@@ -3125,6 +3304,9 @@ class AgentHttpServer {
           );
     _jobs[jobId] = next;
     if (next.state != AgentJobState.running) {
+      if (previous?.state != next.state) {
+        _logJobResult(next);
+      }
       if (control != null && !control.completed.isCompleted) {
         control.completed.complete(next);
       }
@@ -3248,7 +3430,7 @@ class AgentHttpServer {
       target: _formatBackupTarget(driverInfo, backupPath, driverId, storageName: storage?.storage.name),
       storageLabel: _formatBackupTarget(driverInfo, backupPath, driverId, storageName: storage?.storage.name),
     );
-    _hostLog('Backup job $jobId using driver: $driverId');
+    _hostLog('Backup job $jobId using driver: $driverId', jobId: jobId);
     final control = _jobControls[jobId];
     if (control == null) {
       return;
@@ -3515,404 +3697,406 @@ class AgentHttpServer {
 
   void _startRestoreCheckJob(String jobId, String xmlPath, String timestamp, {required _ResolvedStorage storage, required _RestoreCheckMode mode}) {
     unawaited(() async {
-      final checkDriversByBlockSizeMB = <int, drv.BackupDriver>{};
-      final quickCachesByBlockSizeMB = <int, _BlobDirectoryLookupCache>{};
-      final checkLabel = mode == _RestoreCheckMode.quick ? 'Quick check' : 'Sanity check';
-      final control = _jobControls[jobId];
-      try {
-        final driverInfo = _driverCatalog[storage.driverId];
-        if (driverInfo == null) {
-          throw 'unknown driverId: ${storage.driverId}';
-        }
-        final backupPath = storage.backupPath;
-        if (driverInfo.usesPath && backupPath.isEmpty) {
-          throw 'Backup path is not configured';
-        }
-        final vmDir = _vmDirFromXmlPath(xmlPath);
-        if (!await vmDir.exists()) {
-          throw 'Cannot resolve restore location for $xmlPath';
-        }
-        final manifests = await _listManifestFilesForTimestamp(vmDir, timestamp);
-        if (manifests.isEmpty) {
-          throw 'No manifests found for $timestamp';
-        }
-
-        var totalBytes = 0;
-        var totalBlocks = 0;
-        for (final manifest in manifests) {
-          final lines = await _readManifestLines(manifest);
-          var blockSize = 1024 * 1024;
-          int? currentFileSize;
-          var currentMaxIndex = -1;
-          var inBlocks = false;
-          void addCurrentDiskBytes() {
-            if (currentFileSize != null && currentFileSize! > 0) {
-              totalBytes += currentFileSize!;
-            } else if (currentMaxIndex >= 0) {
-              totalBytes += (currentMaxIndex + 1) * blockSize;
-            }
-            currentFileSize = null;
-            currentMaxIndex = -1;
+      await LogWriter.withJobLogging(jobId, () async {
+        final checkDriversByBlockSizeMB = <int, drv.BackupDriver>{};
+        final quickCachesByBlockSizeMB = <int, _BlobDirectoryLookupCache>{};
+        final checkLabel = mode == _RestoreCheckMode.quick ? 'Quick check' : 'Sanity check';
+        final control = _jobControls[jobId];
+        try {
+          final driverInfo = _driverCatalog[storage.driverId];
+          if (driverInfo == null) {
+            throw 'unknown driverId: ${storage.driverId}';
+          }
+          final backupPath = storage.backupPath;
+          if (driverInfo.usesPath && backupPath.isEmpty) {
+            throw 'Backup path is not configured';
+          }
+          final vmDir = _vmDirFromXmlPath(xmlPath);
+          if (!await vmDir.exists()) {
+            throw 'Cannot resolve restore location for $xmlPath';
+          }
+          final manifests = await _listManifestFilesForTimestamp(vmDir, timestamp);
+          if (manifests.isEmpty) {
+            throw 'No manifests found for $timestamp';
           }
 
-          for (final line in lines) {
-            final trimmed = line.trim();
-            if (trimmed.isEmpty) {
-              continue;
-            }
-            if (trimmed.startsWith('disk_id:')) {
-              addCurrentDiskBytes();
-              inBlocks = false;
-              continue;
-            }
-            if (!inBlocks) {
-              if (trimmed.startsWith('block_size:')) {
-                final value = trimmed.substring('block_size:'.length).trim();
-                final parsed = int.tryParse(value);
-                if (parsed != null && parsed > 0) {
-                  blockSize = parsed;
-                }
-              } else if (trimmed.startsWith('file_size:')) {
-                final value = trimmed.substring('file_size:'.length).trim();
-                currentFileSize = int.tryParse(value);
-              } else if (trimmed == 'blocks:' || trimmed.startsWith('blocks:')) {
-                inBlocks = true;
+          var totalBytes = 0;
+          var totalBlocks = 0;
+          for (final manifest in manifests) {
+            final lines = await _readManifestLines(manifest);
+            var blockSize = 1024 * 1024;
+            int? currentFileSize;
+            var currentMaxIndex = -1;
+            var inBlocks = false;
+            void addCurrentDiskBytes() {
+              if (currentFileSize != null && currentFileSize! > 0) {
+                totalBytes += currentFileSize!;
+              } else if (currentMaxIndex >= 0) {
+                totalBytes += (currentMaxIndex + 1) * blockSize;
               }
-              continue;
+              currentFileSize = null;
+              currentMaxIndex = -1;
             }
-            if (trimmed.endsWith('-> ZERO')) {
-              final range = _parseZeroRange(trimmed);
-              if (range != null && range.$2 > currentMaxIndex) {
-                currentMaxIndex = range.$2;
+
+            for (final line in lines) {
+              final trimmed = line.trim();
+              if (trimmed.isEmpty) {
+                continue;
               }
-              continue;
-            }
-            final parts = trimmed.split('->');
-            if (parts.length < 2) {
-              continue;
-            }
-            final index = int.tryParse(parts.first.trim());
-            if (index == null) {
-              continue;
-            }
-            final hash = parts.last.trim();
-            if (hash.isNotEmpty && hash != 'ZERO') {
-              totalBlocks += 1;
-            }
-            if (index > currentMaxIndex) {
-              currentMaxIndex = index;
-            }
-          }
-          _blockSizeMbFromManifestBytes(blockSize, manifest.path);
-          addCurrentDiskBytes();
-        }
-
-        _updateJob(jobId, _jobs[jobId]!.copyWith(totalUnits: totalBlocks, completedUnits: 0, bytesTransferred: 0, speedBytesPerSec: 0, totalBytes: totalBytes, message: '$checkLabel...'));
-
-        var bytesChecked = 0;
-        var bytesSinceTick = 0;
-        var smoothedSpeed = 0.0;
-        var speedTrackingStarted = false;
-        var lastSpeedUpdate = DateTime.now();
-        var lastProgressUpdate = DateTime.now();
-        var mismatches = 0;
-        var checked = 0;
-        var presentBlocks = 0;
-        var missingBlocks = 0;
-        final maxConcurrentDownloads = storage.driverId == 'filesystem' ? 1 : storage.storage.downloadConcurrency;
-        if (maxConcurrentDownloads == null) {
-          throw '$checkLabel requires downloadConcurrency for storage ${storage.storage.id}.';
-        }
-        final blocksByBlockSizeMB = <int, List<_CheckBlockRef>>{};
-
-        void handleBytes(int bytes, {String? message}) {
-          if (bytes <= 0) {
-            return;
-          }
-          _ensureJobNotCanceled(jobId);
-          bytesChecked += bytes;
-          if (speedTrackingStarted) {
-            bytesSinceTick += bytes;
-          }
-          final now = DateTime.now();
-          if (speedTrackingStarted) {
-            final elapsedMs = now.difference(lastSpeedUpdate).inMilliseconds;
-            if (elapsedMs >= 1000) {
-              final instant = bytesSinceTick / (elapsedMs / 1000);
-              smoothedSpeed = _smoothSpeed(smoothedSpeed, instant);
-              bytesSinceTick = 0;
-              lastSpeedUpdate = now;
-            }
-          }
-          if (now.difference(lastProgressUpdate).inMilliseconds >= 500) {
-            lastProgressUpdate = now;
-            _updateJob(
-              jobId,
-              _jobs[jobId]!.copyWith(
-                totalUnits: totalBlocks,
-                completedUnits: checked,
-                bytesTransferred: bytesChecked,
-                speedBytesPerSec: smoothedSpeed,
-                message: message ?? _jobs[jobId]!.message,
-                presentUnits: presentBlocks,
-                missingUnits: missingBlocks,
-              ),
-            );
-          }
-        }
-
-        drv.BackupDriver checkDriverForBlockSize(int blockSizeMB) {
-          return checkDriversByBlockSizeMB.putIfAbsent(blockSizeMB, () {
-            final settingsForBlockSize = storage.settings.copyWith(blockSizeMB: blockSizeMB);
-            final driver = _driverForSettings(driverInfo.id, backupPath, settings: settingsForBlockSize);
-            control?.checkDrivers.add(driver);
-            return driver;
-          });
-        }
-
-        for (final manifest in manifests) {
-          _ensureJobNotCanceled(jobId);
-          final lines = await _readManifestLines(manifest);
-          var blockSize = 1024 * 1024;
-          var blockSizeMB = 1;
-          int? fileSize;
-          String? diskId;
-          var inBlocks = false;
-          for (final line in lines) {
-            final trimmed = line.trim();
-            if (trimmed.isEmpty) {
-              continue;
-            }
-            if (trimmed.startsWith('disk_id:')) {
-              inBlocks = false;
-              fileSize = null;
-              diskId = trimmed.substring('disk_id:'.length).trim();
-              continue;
-            }
-            if (!inBlocks) {
-              if (trimmed.startsWith('block_size:')) {
-                final value = trimmed.substring('block_size:'.length).trim();
-                final parsed = int.tryParse(value);
-                if (parsed != null && parsed > 0) {
-                  blockSize = parsed;
-                  blockSizeMB = _blockSizeMbFromManifestBytes(blockSize, manifest.path);
-                }
-              } else if (trimmed.startsWith('file_size:')) {
-                final value = trimmed.substring('file_size:'.length).trim();
-                fileSize = int.tryParse(value);
-              } else if (trimmed == 'blocks:' || trimmed.startsWith('blocks:')) {
-                inBlocks = true;
+              if (trimmed.startsWith('disk_id:')) {
+                addCurrentDiskBytes();
+                inBlocks = false;
+                continue;
               }
-              continue;
-            }
-            _ensureJobNotCanceled(jobId);
-            final message = diskId == null || diskId.isEmpty ? '$checkLabel...' : '$checkLabel: $diskId';
-            if (trimmed.endsWith('-> ZERO')) {
-              final range = _parseZeroRange(trimmed);
-              if (range != null) {
-                final bytes = _bytesForRange(range.$1, range.$2, fileSize, blockSize);
-                handleBytes(bytes, message: message);
-              }
-              continue;
-            }
-            final parts = trimmed.split('->');
-            if (parts.length < 2) {
-              continue;
-            }
-            final index = int.tryParse(parts.first.trim());
-            if (index == null) {
-              continue;
-            }
-            final hash = parts.last.trim();
-            if (hash.isEmpty || hash == 'ZERO') {
-              continue;
-            }
-            final expectedLength = _blockLengthForIndex(index, fileSize, blockSize);
-            if (mode == _RestoreCheckMode.quick) {
-              final driverForBlockSize = checkDriverForBlockSize(blockSizeMB);
-              final cache = quickCachesByBlockSizeMB.putIfAbsent(blockSizeMB, () {
-                final lister = driverForBlockSize is drv.BlobDirectoryLister ? driverForBlockSize as drv.BlobDirectoryLister : null;
-                if (lister == null) {
-                  throw 'Quick check requires BlobDirectoryLister support.';
-                }
-                return _BlobDirectoryLookupCache(lister);
-              });
-              final exists = await cache.blobExists(hash);
-              checked += 1;
-              if (!exists) {
-                mismatches += 1;
-                missingBlocks += 1;
-              } else {
-                presentBlocks += 1;
-              }
-              handleBytes(expectedLength, message: message);
-              continue;
-            }
-            final refs = blocksByBlockSizeMB.putIfAbsent(blockSizeMB, () => <_CheckBlockRef>[]);
-            refs.add(_CheckBlockRef(hash: hash, expectedLength: expectedLength, index: index, message: message));
-          }
-        }
-
-        if (mode == _RestoreCheckMode.full) {
-          for (final blockGroup in blocksByBlockSizeMB.entries) {
-            _ensureJobNotCanceled(jobId);
-            final blockSizeMB = blockGroup.key;
-            final blocks = blockGroup.value;
-            if (blocks.isEmpty) {
-              continue;
-            }
-            final driverForBlockSize = checkDriverForBlockSize(blockSizeMB);
-            final remote = driverForBlockSize is drv.RemoteBlobDriver ? driverForBlockSize as drv.RemoteBlobDriver : null;
-            if (driverInfo.id != 'filesystem' && remote == null) {
-              throw '$checkLabel requires remote blob reads for driver ${driverInfo.id}.';
-            }
-
-            Future<_CheckBlockFetchResult> startFetch(int position) async {
-              final block = blocks[position];
-              if (_isJobCanceled(jobId)) {
-                return _CheckBlockFetchResult(position: position, block: block, bytes: const <int>[], missing: false, canceled: true);
-              }
-              try {
-                if (driverInfo.id == 'filesystem') {
-                  final blobFile = driverForBlockSize.blobFile(block.hash);
-                  try {
-                    final bytes = await blobFile.readAsBytes();
-                    return _CheckBlockFetchResult(position: position, block: block, bytes: bytes, missing: false, canceled: false);
-                  } on FileSystemException {
-                    return _CheckBlockFetchResult(position: position, block: block, bytes: const <int>[], missing: true, canceled: false);
+              if (!inBlocks) {
+                if (trimmed.startsWith('block_size:')) {
+                  final value = trimmed.substring('block_size:'.length).trim();
+                  final parsed = int.tryParse(value);
+                  if (parsed != null && parsed > 0) {
+                    blockSize = parsed;
                   }
+                } else if (trimmed.startsWith('file_size:')) {
+                  final value = trimmed.substring('file_size:'.length).trim();
+                  currentFileSize = int.tryParse(value);
+                } else if (trimmed == 'blocks:' || trimmed.startsWith('blocks:')) {
+                  inBlocks = true;
                 }
-                final builder = BytesBuilder(copy: false);
-                await for (final chunk in remote!.openBlobStream(block.hash, length: block.expectedLength)) {
-                  _ensureJobNotCanceled(jobId);
-                  builder.add(chunk);
+                continue;
+              }
+              if (trimmed.endsWith('-> ZERO')) {
+                final range = _parseZeroRange(trimmed);
+                if (range != null && range.$2 > currentMaxIndex) {
+                  currentMaxIndex = range.$2;
                 }
-                final bytes = builder.takeBytes();
-                return _CheckBlockFetchResult(position: position, block: block, bytes: bytes, missing: bytes.isEmpty, canceled: false);
-              } on _JobCanceled {
-                return _CheckBlockFetchResult(position: position, block: block, bytes: const <int>[], missing: false, canceled: true);
+                continue;
+              }
+              final parts = trimmed.split('->');
+              if (parts.length < 2) {
+                continue;
+              }
+              final index = int.tryParse(parts.first.trim());
+              if (index == null) {
+                continue;
+              }
+              final hash = parts.last.trim();
+              if (hash.isNotEmpty && hash != 'ZERO') {
+                totalBlocks += 1;
+              }
+              if (index > currentMaxIndex) {
+                currentMaxIndex = index;
               }
             }
+            _blockSizeMbFromManifestBytes(blockSize, manifest.path);
+            addCurrentDiskBytes();
+          }
 
-            var nextFetch = 0;
-            var nextConsume = 0;
-            final inFlight = <int, Future<_CheckBlockFetchResult>>{};
+          _updateJob(jobId, _jobs[jobId]!.copyWith(totalUnits: totalBlocks, completedUnits: 0, bytesTransferred: 0, speedBytesPerSec: 0, totalBytes: totalBytes, message: '$checkLabel...'));
 
-            void scheduleFetches() {
-              while (inFlight.length < maxConcurrentDownloads && nextFetch < blocks.length) {
-                if (_isJobCanceled(jobId)) {
-                  break;
-                }
-                final position = nextFetch;
-                final future = startFetch(position);
-                inFlight[position] = future;
-                nextFetch += 1;
+          var bytesChecked = 0;
+          var bytesSinceTick = 0;
+          var smoothedSpeed = 0.0;
+          var speedTrackingStarted = false;
+          var lastSpeedUpdate = DateTime.now();
+          var lastProgressUpdate = DateTime.now();
+          var mismatches = 0;
+          var checked = 0;
+          var presentBlocks = 0;
+          var missingBlocks = 0;
+          final maxConcurrentDownloads = storage.driverId == 'filesystem' ? 1 : storage.storage.downloadConcurrency;
+          if (maxConcurrentDownloads == null) {
+            throw '$checkLabel requires downloadConcurrency for storage ${storage.storage.id}.';
+          }
+          final blocksByBlockSizeMB = <int, List<_CheckBlockRef>>{};
+
+          void handleBytes(int bytes, {String? message}) {
+            if (bytes <= 0) {
+              return;
+            }
+            _ensureJobNotCanceled(jobId);
+            bytesChecked += bytes;
+            if (speedTrackingStarted) {
+              bytesSinceTick += bytes;
+            }
+            final now = DateTime.now();
+            if (speedTrackingStarted) {
+              final elapsedMs = now.difference(lastSpeedUpdate).inMilliseconds;
+              if (elapsedMs >= 1000) {
+                final instant = bytesSinceTick / (elapsedMs / 1000);
+                smoothedSpeed = _smoothSpeed(smoothedSpeed, instant);
+                bytesSinceTick = 0;
+                lastSpeedUpdate = now;
               }
             }
+            if (now.difference(lastProgressUpdate).inMilliseconds >= 500) {
+              lastProgressUpdate = now;
+              _updateJob(
+                jobId,
+                _jobs[jobId]!.copyWith(
+                  totalUnits: totalBlocks,
+                  completedUnits: checked,
+                  bytesTransferred: bytesChecked,
+                  speedBytesPerSec: smoothedSpeed,
+                  message: message ?? _jobs[jobId]!.message,
+                  presentUnits: presentBlocks,
+                  missingUnits: missingBlocks,
+                ),
+              );
+            }
+          }
 
-            try {
-              scheduleFetches();
-              while (nextConsume < blocks.length) {
-                if (_isJobCanceled(jobId)) {
-                  throw const _JobCanceled();
+          drv.BackupDriver checkDriverForBlockSize(int blockSizeMB) {
+            return checkDriversByBlockSizeMB.putIfAbsent(blockSizeMB, () {
+              final settingsForBlockSize = storage.settings.copyWith(blockSizeMB: blockSizeMB);
+              final driver = _driverForSettings(driverInfo.id, backupPath, settings: settingsForBlockSize);
+              control?.checkDrivers.add(driver);
+              return driver;
+            });
+          }
+
+          for (final manifest in manifests) {
+            _ensureJobNotCanceled(jobId);
+            final lines = await _readManifestLines(manifest);
+            var blockSize = 1024 * 1024;
+            var blockSizeMB = 1;
+            int? fileSize;
+            String? diskId;
+            var inBlocks = false;
+            for (final line in lines) {
+              final trimmed = line.trim();
+              if (trimmed.isEmpty) {
+                continue;
+              }
+              if (trimmed.startsWith('disk_id:')) {
+                inBlocks = false;
+                fileSize = null;
+                diskId = trimmed.substring('disk_id:'.length).trim();
+                continue;
+              }
+              if (!inBlocks) {
+                if (trimmed.startsWith('block_size:')) {
+                  final value = trimmed.substring('block_size:'.length).trim();
+                  final parsed = int.tryParse(value);
+                  if (parsed != null && parsed > 0) {
+                    blockSize = parsed;
+                    blockSizeMB = _blockSizeMbFromManifestBytes(blockSize, manifest.path);
+                  }
+                } else if (trimmed.startsWith('file_size:')) {
+                  final value = trimmed.substring('file_size:'.length).trim();
+                  fileSize = int.tryParse(value);
+                } else if (trimmed == 'blocks:' || trimmed.startsWith('blocks:')) {
+                  inBlocks = true;
                 }
+                continue;
+              }
+              _ensureJobNotCanceled(jobId);
+              final message = diskId == null || diskId.isEmpty ? '$checkLabel...' : '$checkLabel: $diskId';
+              if (trimmed.endsWith('-> ZERO')) {
+                final range = _parseZeroRange(trimmed);
+                if (range != null) {
+                  final bytes = _bytesForRange(range.$1, range.$2, fileSize, blockSize);
+                  handleBytes(bytes, message: message);
+                }
+                continue;
+              }
+              final parts = trimmed.split('->');
+              if (parts.length < 2) {
+                continue;
+              }
+              final index = int.tryParse(parts.first.trim());
+              if (index == null) {
+                continue;
+              }
+              final hash = parts.last.trim();
+              if (hash.isEmpty || hash == 'ZERO') {
+                continue;
+              }
+              final expectedLength = _blockLengthForIndex(index, fileSize, blockSize);
+              if (mode == _RestoreCheckMode.quick) {
+                final driverForBlockSize = checkDriverForBlockSize(blockSizeMB);
+                final cache = quickCachesByBlockSizeMB.putIfAbsent(blockSizeMB, () {
+                  final lister = driverForBlockSize is drv.BlobDirectoryLister ? driverForBlockSize as drv.BlobDirectoryLister : null;
+                  if (lister == null) {
+                    throw 'Quick check requires BlobDirectoryLister support.';
+                  }
+                  return _BlobDirectoryLookupCache(lister);
+                });
+                final exists = await cache.blobExists(hash);
+                checked += 1;
+                if (!exists) {
+                  mismatches += 1;
+                  missingBlocks += 1;
+                } else {
+                  presentBlocks += 1;
+                }
+                handleBytes(expectedLength, message: message);
+                continue;
+              }
+              final refs = blocksByBlockSizeMB.putIfAbsent(blockSizeMB, () => <_CheckBlockRef>[]);
+              refs.add(_CheckBlockRef(hash: hash, expectedLength: expectedLength, index: index, message: message));
+            }
+          }
+
+          if (mode == _RestoreCheckMode.full) {
+            for (final blockGroup in blocksByBlockSizeMB.entries) {
+              _ensureJobNotCanceled(jobId);
+              final blockSizeMB = blockGroup.key;
+              final blocks = blockGroup.value;
+              if (blocks.isEmpty) {
+                continue;
+              }
+              final driverForBlockSize = checkDriverForBlockSize(blockSizeMB);
+              final remote = driverForBlockSize is drv.RemoteBlobDriver ? driverForBlockSize as drv.RemoteBlobDriver : null;
+              if (driverInfo.id != 'filesystem' && remote == null) {
+                throw '$checkLabel requires remote blob reads for driver ${driverInfo.id}.';
+              }
+
+              Future<_CheckBlockFetchResult> startFetch(int position) async {
+                final block = blocks[position];
+                if (_isJobCanceled(jobId)) {
+                  return _CheckBlockFetchResult(position: position, block: block, bytes: const <int>[], missing: false, canceled: true);
+                }
+                try {
+                  if (driverInfo.id == 'filesystem') {
+                    final blobFile = driverForBlockSize.blobFile(block.hash);
+                    try {
+                      final bytes = await blobFile.readAsBytes();
+                      return _CheckBlockFetchResult(position: position, block: block, bytes: bytes, missing: false, canceled: false);
+                    } on FileSystemException {
+                      return _CheckBlockFetchResult(position: position, block: block, bytes: const <int>[], missing: true, canceled: false);
+                    }
+                  }
+                  final builder = BytesBuilder(copy: false);
+                  await for (final chunk in remote!.openBlobStream(block.hash, length: block.expectedLength)) {
+                    _ensureJobNotCanceled(jobId);
+                    builder.add(chunk);
+                  }
+                  final bytes = builder.takeBytes();
+                  return _CheckBlockFetchResult(position: position, block: block, bytes: bytes, missing: bytes.isEmpty, canceled: false);
+                } on _JobCanceled {
+                  return _CheckBlockFetchResult(position: position, block: block, bytes: const <int>[], missing: false, canceled: true);
+                }
+              }
+
+              var nextFetch = 0;
+              var nextConsume = 0;
+              final inFlight = <int, Future<_CheckBlockFetchResult>>{};
+
+              void scheduleFetches() {
+                while (inFlight.length < maxConcurrentDownloads && nextFetch < blocks.length) {
+                  if (_isJobCanceled(jobId)) {
+                    break;
+                  }
+                  final position = nextFetch;
+                  final future = startFetch(position);
+                  inFlight[position] = future;
+                  nextFetch += 1;
+                }
+              }
+
+              try {
                 scheduleFetches();
-                final future = inFlight[nextConsume];
-                if (future == null) {
+                while (nextConsume < blocks.length) {
                   if (_isJobCanceled(jobId)) {
                     throw const _JobCanceled();
                   }
-                  await Future<void>.delayed(const Duration(milliseconds: 1));
-                  continue;
-                }
-                final fetched = await future;
-                _ensureJobNotCanceled(jobId);
-                inFlight.remove(nextConsume);
-                nextConsume += 1;
-                if (fetched.canceled) {
-                  throw const _JobCanceled();
-                }
-                checked += 1;
-
-                if (fetched.missing || fetched.bytes.isEmpty) {
-                  mismatches += 1;
-                  _hostLog('$checkLabel missing blob index=${fetched.block.index} hash=${fetched.block.hash}');
-                  handleBytes(fetched.block.expectedLength, message: fetched.block.message);
-                  continue;
-                }
-                if (!speedTrackingStarted) {
-                  speedTrackingStarted = true;
-                  bytesSinceTick = 0;
-                  smoothedSpeed = 0;
-                  lastSpeedUpdate = DateTime.now();
-                }
-
-                final hashInput = fetched.bytes is Uint8List ? fetched.bytes as Uint8List : Uint8List.fromList(fetched.bytes);
-                final actual = _host.sha256Hex(hashInput);
-                handleBytes(hashInput.length, message: fetched.block.message);
-                if (actual != fetched.block.hash) {
-                  mismatches += 1;
-                  _hostLog('$checkLabel hash mismatch index=${fetched.block.index} expected=${fetched.block.hash} got=$actual');
-                }
-                if (fetched.bytes.length < fetched.block.expectedLength) {
-                  handleBytes(fetched.block.expectedLength - fetched.bytes.length, message: fetched.block.message);
-                }
-              }
-            } finally {
-              final pending = inFlight.values.toList();
-              if (pending.isNotEmpty) {
-                if (_isJobCanceled(jobId)) {
-                  for (final future in pending) {
-                    unawaited(() async {
-                      try {
-                        await future;
-                      } catch (_) {}
-                    }());
+                  scheduleFetches();
+                  final future = inFlight[nextConsume];
+                  if (future == null) {
+                    if (_isJobCanceled(jobId)) {
+                      throw const _JobCanceled();
+                    }
+                    await Future<void>.delayed(const Duration(milliseconds: 1));
+                    continue;
                   }
-                } else {
-                  await Future.wait(
-                    pending.map((future) async {
-                      try {
-                        await future;
-                      } catch (_) {}
-                    }),
-                  );
+                  final fetched = await future;
+                  _ensureJobNotCanceled(jobId);
+                  inFlight.remove(nextConsume);
+                  nextConsume += 1;
+                  if (fetched.canceled) {
+                    throw const _JobCanceled();
+                  }
+                  checked += 1;
+
+                  if (fetched.missing || fetched.bytes.isEmpty) {
+                    mismatches += 1;
+                    _hostLog('$checkLabel missing blob index=${fetched.block.index} hash=${fetched.block.hash}');
+                    handleBytes(fetched.block.expectedLength, message: fetched.block.message);
+                    continue;
+                  }
+                  if (!speedTrackingStarted) {
+                    speedTrackingStarted = true;
+                    bytesSinceTick = 0;
+                    smoothedSpeed = 0;
+                    lastSpeedUpdate = DateTime.now();
+                  }
+
+                  final hashInput = fetched.bytes is Uint8List ? fetched.bytes as Uint8List : Uint8List.fromList(fetched.bytes);
+                  final actual = _host.sha256Hex(hashInput);
+                  handleBytes(hashInput.length, message: fetched.block.message);
+                  if (actual != fetched.block.hash) {
+                    mismatches += 1;
+                    _hostLog('$checkLabel hash mismatch index=${fetched.block.index} expected=${fetched.block.hash} got=$actual');
+                  }
+                  if (fetched.bytes.length < fetched.block.expectedLength) {
+                    handleBytes(fetched.block.expectedLength - fetched.bytes.length, message: fetched.block.message);
+                  }
+                }
+              } finally {
+                final pending = inFlight.values.toList();
+                if (pending.isNotEmpty) {
+                  if (_isJobCanceled(jobId)) {
+                    for (final future in pending) {
+                      unawaited(() async {
+                        try {
+                          await future;
+                        } catch (_) {}
+                      }());
+                    }
+                  } else {
+                    await Future.wait(
+                      pending.map((future) async {
+                        try {
+                          await future;
+                        } catch (_) {}
+                      }),
+                    );
+                  }
                 }
               }
             }
           }
-        }
 
-        final resultMessage = mismatches == 0 ? '$checkLabel OK ($checked blocks checked)' : '$checkLabel: $mismatches mismatch(es) out of $checked blocks';
-        _updateJob(
-          jobId,
-          _jobs[jobId]!.copyWith(
-            state: AgentJobState.success,
-            message: resultMessage,
-            totalUnits: totalBlocks,
-            completedUnits: checked,
-            bytesTransferred: bytesChecked,
-            speedBytesPerSec: 0,
-            presentUnits: presentBlocks,
-            missingUnits: missingBlocks,
-          ),
-        );
-      } catch (error, stackTrace) {
-        final isCanceled = error is _JobCanceled || _isJobCanceled(jobId);
-        if (isCanceled) {
-          _hostLog('$checkLabel canceled.');
-        } else {
-          _hostLogError('$checkLabel failed.', error, stackTrace);
+          final resultMessage = mismatches == 0 ? '$checkLabel OK ($checked blocks checked)' : '$checkLabel: $mismatches mismatch(es) out of $checked blocks';
+          _updateJob(
+            jobId,
+            _jobs[jobId]!.copyWith(
+              state: AgentJobState.success,
+              message: resultMessage,
+              totalUnits: totalBlocks,
+              completedUnits: checked,
+              bytesTransferred: bytesChecked,
+              speedBytesPerSec: 0,
+              presentUnits: presentBlocks,
+              missingUnits: missingBlocks,
+            ),
+          );
+        } catch (error, stackTrace) {
+          final isCanceled = error is _JobCanceled || _isJobCanceled(jobId);
+          if (isCanceled) {
+            _hostLog('$checkLabel canceled.');
+          } else {
+            _hostLogError('$checkLabel failed.', error, stackTrace);
+          }
+          _updateJob(jobId, _jobs[jobId]!.copyWith(state: isCanceled ? AgentJobState.canceled : AgentJobState.failure, message: isCanceled ? 'Canceled' : error.toString(), speedBytesPerSec: 0));
+        } finally {
+          for (final driver in checkDriversByBlockSizeMB.values) {
+            try {
+              await driver.closeConnections();
+            } catch (_) {}
+          }
+          control?.checkDrivers.clear();
         }
-        _updateJob(jobId, _jobs[jobId]!.copyWith(state: isCanceled ? AgentJobState.canceled : AgentJobState.failure, message: isCanceled ? 'Canceled' : error.toString(), speedBytesPerSec: 0));
-      } finally {
-        for (final driver in checkDriversByBlockSizeMB.values) {
-          try {
-            await driver.closeConnections();
-          } catch (_) {}
-        }
-        control?.checkDrivers.clear();
-      }
+      });
     }());
   }
 
@@ -4065,7 +4249,7 @@ class AgentHttpServer {
       }
       return;
     }
-    _hostLog('Restore job $jobId using driver: $driverId');
+    _hostLog('Restore job $jobId using driver: $driverId', jobId: jobId);
     final control = _jobControls[jobId];
     if (control == null) {
       return;
@@ -4208,17 +4392,19 @@ class AgentHttpServer {
     if (state != AgentJobState.success && state != AgentJobState.failure) {
       return;
     }
-    final control = _jobControls[jobId];
-    final notification = _buildJobCompletionNotification(jobId, type: type, state: state, message: message, sizeBytes: sizeBytes);
-    final dedupeKey = '${type.name}:${notification.status}';
-    if (control != null && control.lastNtfyCompletionKey == dedupeKey) {
-      return;
-    }
-    if (control != null) {
-      control.lastNtfyCompletionKey = dedupeKey;
-    }
-    _sendNtfymeNotification(notification);
-    _sendEmailNotification(notification);
+    LogWriter.withJobLogging(jobId, () {
+      final control = _jobControls[jobId];
+      final notification = _buildJobCompletionNotification(jobId, type: type, state: state, message: message, sizeBytes: sizeBytes);
+      final dedupeKey = '${type.name}:${notification.status}';
+      if (control != null && control.lastNtfyCompletionKey == dedupeKey) {
+        return;
+      }
+      if (control != null) {
+        control.lastNtfyCompletionKey = dedupeKey;
+      }
+      _sendNtfymeNotification(notification);
+      _sendEmailNotification(notification);
+    });
   }
 
   _JobCompletionNotification _buildJobCompletionNotification(String jobId, {required AgentJobType type, required AgentJobState state, required String message, int? sizeBytes}) {
@@ -4775,13 +4961,13 @@ class AgentHttpServer {
     return ServerConfig(id: 'missing', name: 'missing', connectionType: ConnectionType.ssh, sshHost: '', sshPort: '22', sshUser: '', sshPassword: '', apiBaseUrl: '', apiToken: '');
   }
 
-  void _hostLog(String message) {
-    LogWriter.logAgentSync(level: 'info', message: message);
+  void _hostLog(String message, {String? jobId}) {
+    LogWriter.logAgentSync(level: 'info', message: message, jobId: jobId);
   }
 
-  void _hostLogError(String message, Object error, StackTrace stackTrace) {
-    LogWriter.logAgentSync(level: 'error', message: '$message $error');
-    LogWriter.logAgentSync(level: 'info', message: stackTrace.toString());
+  void _hostLogError(String message, Object error, StackTrace stackTrace, {String? jobId}) {
+    LogWriter.logAgentSync(level: 'error', message: '$message $error', jobId: jobId);
+    LogWriter.logAgentSync(level: 'info', message: stackTrace.toString(), jobId: jobId);
   }
 
   String _formatLocalLogTime(DateTime? value) {

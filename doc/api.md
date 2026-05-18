@@ -657,6 +657,17 @@ Response (array):
 [{"id":"<job-id>","type":"backup","state":"running","message":"","vmName":"vm01","storageId":"gdrive","totalUnits":0,"completedUnits":0,"bytesTransferred":0,"speedBytesPerSec":0}]
 ```
 
+### List job history
+
+- `GET /jobs/history`
+
+Returns jobs found in `agent-job-*.log` files that have a LogWriter line with a `job_result` JSON message payload.
+
+Response (array):
+```json
+[{"timestamp":"2026-05-18T09:34:44.514","level":"info","jobId":"<job-id>","type":"backup","state":"success","message":"","vmName":"vm01","storage":"Google Drive","source":"nuc04:vm01","target":"Google Drive","durationSeconds":156,"size":"55.6 GiB","transferred":"55.6 GiB","averageSpeed":"365 MiB/s"}]
+```
+
 ### Get job status
 
 - `GET /jobs/{jobId}`

@@ -677,7 +677,9 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     if (type == _typeStart) {
       await runZonedGuarded(
         () async {
-          await runRestore(payload);
+          await LogWriter.withJobLogging(payload['jobId']?.toString() ?? '', () async {
+            await runRestore(payload);
+          });
         },
         (error, _) {
           final jobId = payload['jobId']?.toString() ?? '';

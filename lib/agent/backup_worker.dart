@@ -139,7 +139,9 @@ void backupWorkerMain(Map<String, dynamic> init) {
     if (type == _typeStart) {
       await runZonedGuarded(
         () async {
-          await runBackup(payload);
+          await LogWriter.withJobLogging(payload['jobId']?.toString() ?? '', () async {
+            await runBackup(payload);
+          });
         },
         (error, _) {
           mainPort.send({'type': _typeResult, 'jobId': payload['jobId']?.toString() ?? '', 'result': BackupAgentResult(success: false, message: error.toString()).toMap()});

@@ -26,6 +26,7 @@ part 'backup_tab.dart';
 part 'restore_tab.dart';
 part 'schedules_tab.dart';
 part 'queue_tab.dart';
+part 'history_tab.dart';
 part 'ssh_service.dart';
 part 'service.dart';
 
@@ -105,6 +106,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   final TextEditingController _sshPasswordController = TextEditingController();
   final TextEditingController _apiBaseUrlController = TextEditingController();
   final TextEditingController _apiTokenController = TextEditingController();
+  final TextEditingController _historyFromController = TextEditingController();
+  final TextEditingController _historyToController = TextEditingController();
 
   final List<ServerConfig> _servers = [];
   final List<BackupDriverInfo> _backupDrivers = [];
@@ -141,6 +144,13 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String _scheduleFilterType = '';
   String _scheduleFilterServerVmKey = '';
   String _scheduleFilterStorageId = '';
+  String _historyFilterState = '';
+  String _historyFilterType = '';
+  String _historyFilterVmName = '';
+  String _historyFilterStorage = '';
+  String _historySortField = 'timestamp';
+  bool _historySortAscending = false;
+  final Set<String> _expandedHistoryJobIds = <String>{};
   final Map<String, bool> _vmHasOverlayByName = {};
   final Map<String, Map<String, bool>> _overlayByServerId = {};
   final Map<String, List<String>> _missingToolsByServerId = {};
@@ -186,6 +196,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   double _backupSanityCheckSpeedBytesPerSec = 0;
   List<AgentJobStatus> _latestAgentJobs = <AgentJobStatus>[];
   List<ScheduleQueueEntry> _latestScheduleQueue = <ScheduleQueueEntry>[];
+  List<AgentJobHistoryEntry> _jobHistory = <AgentJobHistoryEntry>[];
   final Set<String> _startingScheduleIds = <String>{};
   final AgentApiClient _agentApiClient = AgentApiClient();
   AppSettings _agentSettings = AppSettings.empty();
@@ -206,6 +217,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   bool _isLoadingAgentSettings = false;
   bool _isLoadingAccountSession = false;
   bool _isLoadingScheduleQueue = false;
+  bool _isLoadingJobHistory = false;
   bool _isSigningInAccount = false;
   bool _isSigningOutAccount = false;
   String? _accountEmail;
@@ -245,6 +257,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _sshPasswordController.dispose();
     _apiBaseUrlController.dispose();
     _apiTokenController.dispose();
+    _historyFromController.dispose();
+    _historyToController.dispose();
     super.dispose();
   }
 
@@ -733,6 +747,9 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       setState(() {});
     }
     await _syncRunningJobs();
+    if (_selectedMenuIndex == 6) {
+      await _refreshJobHistory();
+    }
     if (_selectedMenuIndex == 3) {
       await _loadRestoreEntries();
     }
@@ -1456,6 +1473,31 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
+  Future<void> _refreshJobHistory() async {
+    if (_isLoadingJobHistory) {
+      return;
+    }
+    _updateUi(() {
+      _isLoadingJobHistory = true;
+    });
+    try {
+      final history = await _agentApiClient.fetchJobHistory();
+      _jobHistory = history;
+      if (mounted) {
+        _updateUi(() {});
+      }
+    } catch (error, stackTrace) {
+      _logError('Failed to load job history.', error, stackTrace);
+      _showSnackBarError('Unable to load job history: $error');
+    } finally {
+      if (mounted) {
+        _updateUi(() {
+          _isLoadingJobHistory = false;
+        });
+      }
+    }
+  }
+
   Future<void> _persistServers() async {
     _agentSettings = _agentSettings.copyWith(servers: List<ServerConfig>.from(_servers));
     await _pushAgentSettings();
@@ -1497,7 +1539,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       });
       return;
     }
-    if (index != 0 && _servers.isEmpty) {
+    if (index != 0 && index != 6 && _servers.isEmpty) {
       setState(() {
         _selectedMenuIndex = 0;
       });
@@ -1528,6 +1570,9 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     if (index == 5) {
       await _refreshScheduleQueue();
     }
+    if (index == 6) {
+      await _refreshJobHistory();
+    }
   }
 
   String _menuTitle(int index) {
@@ -1544,6 +1589,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         return 'Schedules';
       case 5:
         return 'Queue';
+      case 6:
+        return 'History';
       default:
         return 'Settings';
     }
@@ -1563,6 +1610,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         return 'Schedule recurring backup and restore jobs.';
       case 5:
         return 'View schedule runs waiting for active jobs to finish.';
+      case 6:
+        return 'Review completed jobs from agent logs.';
       default:
         return 'Configure servers and storage for backups.';
     }
@@ -3681,6 +3730,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     final isSaveEnabled = _selectedMenuIndex == 0 && !_isSavingAll && _hasAnyChanges();
     final isSettingsEnabled = true;
     final isStorageNavigationEnabled = _agentReachable && _storageWritable && _servers.isNotEmpty;
+    final isHistoryNavigationEnabled = _agentReachable && _storageWritable;
     return Scaffold(
       floatingActionButton: _selectedMenuIndex == 0
           ? FloatingActionButton.extended(
@@ -3702,62 +3752,91 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                 Container(
                   width: railWidth,
                   color: colorScheme.surface,
-                  child: Column(
-                    children: [
-                      const SizedBox(height: 16),
-                      _buildRailItem(index: 1, icon: Icons.dns_outlined, selectedIcon: Icons.dns, label: 'Manage', colorScheme: colorScheme, railTheme: railTheme, enabled: isStorageNavigationEnabled),
-                      const SizedBox(height: 8),
-                      _buildRailItem(
-                        index: 2,
-                        icon: Icons.backup_outlined,
-                        selectedIcon: Icons.backup,
-                        label: 'Backup',
-                        colorScheme: colorScheme,
-                        railTheme: railTheme,
-                        enabled: isStorageNavigationEnabled,
-                      ),
-                      const SizedBox(height: 8),
-                      _buildRailItem(
-                        index: 3,
-                        icon: Icons.restore_outlined,
-                        selectedIcon: Icons.restore,
-                        label: 'Restore',
-                        colorScheme: colorScheme,
-                        railTheme: railTheme,
-                        enabled: isStorageNavigationEnabled,
-                      ),
-                      const SizedBox(height: 8),
-                      _buildRailItem(
-                        index: 4,
-                        icon: Icons.event_repeat_outlined,
-                        selectedIcon: Icons.event_repeat,
-                        label: 'Schedules',
-                        colorScheme: colorScheme,
-                        railTheme: railTheme,
-                        enabled: isStorageNavigationEnabled,
-                      ),
-                      const SizedBox(height: 8),
-                      _buildRailItem(
-                        index: 5,
-                        icon: Icons.pending_actions_outlined,
-                        selectedIcon: Icons.pending_actions,
-                        label: 'Queue',
-                        colorScheme: colorScheme,
-                        railTheme: railTheme,
-                        enabled: isStorageNavigationEnabled,
-                      ),
-                      const Spacer(),
-                      _buildRailItem(
-                        index: 0,
-                        icon: Icons.settings_outlined,
-                        selectedIcon: Icons.settings,
-                        label: 'Settings',
-                        colorScheme: colorScheme,
-                        railTheme: railTheme,
-                        enabled: isSettingsEnabled,
-                      ),
-                      const SizedBox(height: 16),
-                    ],
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      return SingleChildScrollView(
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                          child: IntrinsicHeight(
+                            child: Column(
+                              children: [
+                                const SizedBox(height: 16),
+                                _buildRailItem(
+                                  index: 1,
+                                  icon: Icons.dns_outlined,
+                                  selectedIcon: Icons.dns,
+                                  label: 'Manage',
+                                  colorScheme: colorScheme,
+                                  railTheme: railTheme,
+                                  enabled: isStorageNavigationEnabled,
+                                ),
+                                const SizedBox(height: 8),
+                                _buildRailItem(
+                                  index: 2,
+                                  icon: Icons.backup_outlined,
+                                  selectedIcon: Icons.backup,
+                                  label: 'Backup',
+                                  colorScheme: colorScheme,
+                                  railTheme: railTheme,
+                                  enabled: isStorageNavigationEnabled,
+                                ),
+                                const SizedBox(height: 8),
+                                _buildRailItem(
+                                  index: 3,
+                                  icon: Icons.restore_outlined,
+                                  selectedIcon: Icons.restore,
+                                  label: 'Restore',
+                                  colorScheme: colorScheme,
+                                  railTheme: railTheme,
+                                  enabled: isStorageNavigationEnabled,
+                                ),
+                                const SizedBox(height: 8),
+                                _buildRailItem(
+                                  index: 4,
+                                  icon: Icons.event_repeat_outlined,
+                                  selectedIcon: Icons.event_repeat,
+                                  label: 'Schedules',
+                                  colorScheme: colorScheme,
+                                  railTheme: railTheme,
+                                  enabled: isStorageNavigationEnabled,
+                                ),
+                                const SizedBox(height: 8),
+                                _buildRailItem(
+                                  index: 5,
+                                  icon: Icons.pending_actions_outlined,
+                                  selectedIcon: Icons.pending_actions,
+                                  label: 'Queue',
+                                  colorScheme: colorScheme,
+                                  railTheme: railTheme,
+                                  enabled: isStorageNavigationEnabled,
+                                ),
+                                const SizedBox(height: 8),
+                                _buildRailItem(
+                                  index: 6,
+                                  icon: Icons.history_outlined,
+                                  selectedIcon: Icons.history,
+                                  label: 'History',
+                                  colorScheme: colorScheme,
+                                  railTheme: railTheme,
+                                  enabled: isHistoryNavigationEnabled,
+                                ),
+                                const Spacer(),
+                                _buildRailItem(
+                                  index: 0,
+                                  icon: Icons.settings_outlined,
+                                  selectedIcon: Icons.settings,
+                                  label: 'Settings',
+                                  colorScheme: colorScheme,
+                                  railTheme: railTheme,
+                                  enabled: isSettingsEnabled,
+                                ),
+                                const SizedBox(height: 16),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 ),
                 const VerticalDivider(width: 1),
@@ -3866,6 +3945,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                 if (_selectedMenuIndex == 3) ..._buildRestoreSection(colorScheme),
                                 if (_selectedMenuIndex == 4) ..._buildScheduleSection(colorScheme),
                                 if (_selectedMenuIndex == 5) ..._buildQueueSection(colorScheme),
+                                if (_selectedMenuIndex == 6) ..._buildHistorySection(colorScheme),
                               ],
                             ),
                           ),

@@ -415,6 +415,18 @@ class AgentApiClient {
     return decoded.whereType<Map>().map((item) => AgentJobStatus.fromMap(Map<String, dynamic>.from(item))).toList();
   }
 
+  Future<List<AgentJobHistoryEntry>> fetchJobHistory() async {
+    final response = await _get('/jobs/history');
+    if (response.statusCode != 200) {
+      throw 'Agent responded ${response.statusCode}';
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! List) {
+      return <AgentJobHistoryEntry>[];
+    }
+    return decoded.whereType<Map>().map((item) => AgentJobHistoryEntry.fromMap(Map<String, dynamic>.from(item))).toList();
+  }
+
   Future<List<ScheduleQueueEntry>> fetchScheduleQueue() async {
     final response = await _get('/schedule-queue');
     if (response.statusCode != 200) {

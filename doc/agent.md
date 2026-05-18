@@ -333,6 +333,8 @@ The agent supports optional native SFTP via FFI:
 - The Google Drive storage driver (`driverId: gdrive`) stores data as individual blob files using the same directory layout as the filesystem driver.
 - All Google Drive API calls retry up to 5 times with exponential backoff starting at 2 seconds; each retry recreates the HTTP client connection, and a persistent failure aborts the backup with a clean error.
 - Log records are routed by source: `agent` writes to `VirtBackup/logs/agent.log` and `gui` writes to `VirtBackup/logs/gui.log` under the configured backup base path.
+- Agent job logs are mirrored to `VirtBackup/logs/agent-job-<jobId>.log` while the job is running; the same filtered log lines still remain in `agent.log`.
+- When a job reaches a terminal state, the agent writes one log line with the normal LogWriter timestamp/level prefix and a JSON `message` payload with result fields: `event`, `jobId`, `type`, `state`, `message` when present, `vmName`, `storage`, source/target/duration/size context, schedule ID when present, and transfer counters used by job result emails.
 - Backup/restore worker isolates write their logs directly to `LogWriter` (`source=agent`) and do not route log lines through the HTTP server event channel.
 - Backup writer loop diagnostics (`writer debug: ...`) are emitted at `debug` level via `LogWriter` and not forwarded as `info` progress lines.
 - Agent log filtering reads `log_level` from `agent.yaml` (default `info` when missing/empty); GUI log filtering reads `log_level` from SharedPreferences (default `info` when missing/empty). Accepted levels are strict: `fatal`, `error`, `warn`, `info`, `debug`, `trace`.

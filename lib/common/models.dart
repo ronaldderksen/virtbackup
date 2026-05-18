@@ -503,6 +503,97 @@ class AgentJobStart {
   }
 }
 
+class AgentJobHistoryEntry {
+  AgentJobHistoryEntry({
+    required this.timestamp,
+    required this.jobId,
+    required this.type,
+    required this.state,
+    required this.message,
+    required this.vmName,
+    required this.storageId,
+    required this.storage,
+    required this.notificationStatus,
+    required this.title,
+    required this.source,
+    required this.target,
+    required this.durationSeconds,
+    required this.sizeBytes,
+    required this.error,
+    required this.warning,
+    required this.scheduleId,
+    required this.bytesTransferred,
+    required this.averageSpeedBytesPerSec,
+    required this.physicalBytesTransferred,
+    required this.averagePhysicalSpeedBytesPerSec,
+    required this.totalBytes,
+    required this.physicalTotalBytes,
+    required this.fields,
+  });
+
+  final DateTime timestamp;
+  final String jobId;
+  final AgentJobType type;
+  final AgentJobState state;
+  final String message;
+  final String vmName;
+  final String storageId;
+  final String storage;
+  final String notificationStatus;
+  final String title;
+  final String source;
+  final String target;
+  final int? durationSeconds;
+  final int? sizeBytes;
+  final String error;
+  final String warning;
+  final String scheduleId;
+  final int? bytesTransferred;
+  final double? averageSpeedBytesPerSec;
+  final int? physicalBytesTransferred;
+  final double? averagePhysicalSpeedBytesPerSec;
+  final int? totalBytes;
+  final int? physicalTotalBytes;
+  final Map<String, dynamic> fields;
+
+  Map<String, dynamic> toMap() {
+    return Map<String, dynamic>.from(fields);
+  }
+
+  factory AgentJobHistoryEntry.fromMap(Map<String, dynamic> json) {
+    final typeValue = (json['type'] ?? '').toString();
+    final stateValue = (json['state'] ?? '').toString();
+    int? optionalInt(String key) => (json[key] as num?)?.toInt();
+    double? optionalDouble(String key) => (json[key] as num?)?.toDouble();
+    return AgentJobHistoryEntry(
+      timestamp: DateTime.parse((json['timestamp'] ?? '').toString()),
+      jobId: (json['jobId'] ?? '').toString(),
+      type: AgentJobType.values.firstWhere((value) => value.name == typeValue),
+      state: AgentJobState.values.firstWhere((value) => value.name == stateValue),
+      message: (json['message'] ?? '').toString(),
+      vmName: (json['vmName'] ?? '').toString(),
+      storageId: (json['storageId'] ?? '').toString(),
+      storage: (json['storage'] ?? '').toString(),
+      notificationStatus: (json['notificationStatus'] ?? '').toString(),
+      title: (json['title'] ?? '').toString(),
+      source: (json['source'] ?? '').toString(),
+      target: (json['target'] ?? '').toString(),
+      durationSeconds: optionalInt('durationSeconds'),
+      sizeBytes: optionalInt('sizeBytes'),
+      error: (json['error'] ?? '').toString(),
+      warning: (json['warning'] ?? '').toString(),
+      scheduleId: (json['scheduleId'] ?? '').toString(),
+      bytesTransferred: optionalInt('bytesTransferred'),
+      averageSpeedBytesPerSec: optionalDouble('averageSpeedBytesPerSec'),
+      physicalBytesTransferred: optionalInt('physicalBytesTransferred'),
+      averagePhysicalSpeedBytesPerSec: optionalDouble('averagePhysicalSpeedBytesPerSec'),
+      totalBytes: optionalInt('totalBytes'),
+      physicalTotalBytes: optionalInt('physicalTotalBytes'),
+      fields: Map<String, dynamic>.from(json),
+    );
+  }
+}
+
 class ScheduleQueueEntry {
   ScheduleQueueEntry({
     required this.scheduleId,
