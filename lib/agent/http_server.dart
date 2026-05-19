@@ -109,6 +109,45 @@ class AgentHttpServer {
     await _server?.close(force: true);
   }
 
+  Future<void> cancelRunningJobsAndStop() async {
+    _scheduleTimer?.cancel();
+    _scheduleTimer = null;
+    _waitingScheduleRuns.clear();
+
+    final runningJobIds = _jobs.entries.where((entry) => entry.value.state == AgentJobState.running).map((entry) => entry.key).toList();
+    if (runningJobIds.isNotEmpty) {
+      _hostLog('Shutdown: canceling ${runningJobIds.length} running job(s).');
+    }
+
+    for (final jobId in runningJobIds) {
+      final job = _jobs[jobId];
+      if (job == null || job.state != AgentJobState.running) {
+        continue;
+      }
+      final cancelRequested = _cancelJob(jobId);
+      if (cancelRequested) {
+        _hostLog('Shutdown: cancel requested for job $jobId.', jobId: jobId);
+      } else {
+        _hostLog('Shutdown: waiting for job $jobId to finish; cancel is not available in its current state.', jobId: jobId);
+      }
+    }
+
+    final completions = <Future<AgentJobStatus>>[];
+    for (final jobId in runningJobIds) {
+      final job = _jobs[jobId];
+      final control = _jobControls[jobId];
+      if (job?.state == AgentJobState.running && control != null) {
+        completions.add(control.completed.future);
+      }
+    }
+    if (completions.isNotEmpty) {
+      await Future.wait(completions);
+      _hostLog('Shutdown: running jobs finished.');
+    }
+
+    await stop();
+  }
+
   void _restartScheduleTimer() {
     _scheduleTimer?.cancel();
     _scheduleTimer = null;
@@ -3196,10 +3235,91 @@ class AgentHttpServer {
           byJobId[entry.jobId] = entry;
         }
       }
+      final jobId = _jobIdFromJobLogPath(file.path);
+      if (jobId.isNotEmpty && !byJobId.containsKey(jobId)) {
+        byJobId[jobId] = await _unknownJobHistoryEntry(file, lines, jobId);
+      }
     }
 
     final history = byJobId.values.toList()..sort((a, b) => b.timestamp.compareTo(a.timestamp));
     return history;
+  }
+
+  Future<AgentJobHistoryEntry> _unknownJobHistoryEntry(File file, List<String> lines, String jobId) async {
+    final timestamp = _lastLogTimestamp(lines) ?? (await file.stat()).modified;
+    final timestampText = timestamp.toIso8601String();
+    const message = 'Job log has no valid job result JSON.';
+    final type = _jobTypeFromJobId(jobId);
+    final fields = <String, dynamic>{
+      'timestamp': timestampText,
+      'level': 'warn',
+      'jobId': jobId,
+      'type': type.name,
+      'state': AgentJobState.unknown.name,
+      'message': message,
+      'logFile': _baseName(file.path),
+    };
+    return AgentJobHistoryEntry(
+      timestamp: timestamp,
+      jobId: jobId,
+      type: type,
+      state: AgentJobState.unknown,
+      message: message,
+      vmName: '',
+      storageId: '',
+      storage: '',
+      notificationStatus: '',
+      title: '',
+      source: '',
+      target: '',
+      durationSeconds: null,
+      sizeBytes: null,
+      error: '',
+      warning: message,
+      scheduleId: '',
+      bytesTransferred: null,
+      averageSpeedBytesPerSec: null,
+      physicalBytesTransferred: null,
+      averagePhysicalSpeedBytesPerSec: null,
+      totalBytes: null,
+      physicalTotalBytes: null,
+      fields: fields,
+    );
+  }
+
+  DateTime? _lastLogTimestamp(List<String> lines) {
+    for (final line in lines.reversed) {
+      final trimmed = line.trim();
+      final firstSpace = trimmed.indexOf(' ');
+      if (firstSpace <= 0) {
+        continue;
+      }
+      final parsed = DateTime.tryParse(trimmed.substring(0, firstSpace).trim());
+      if (parsed != null) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
+  String _jobIdFromJobLogPath(String path) {
+    final name = _baseName(path);
+    const prefix = 'agent-job-';
+    const suffix = '.log';
+    if (!name.startsWith(prefix) || !name.endsWith(suffix) || name.length <= prefix.length + suffix.length) {
+      return '';
+    }
+    return name.substring(prefix.length, name.length - suffix.length).trim();
+  }
+
+  AgentJobType _jobTypeFromJobId(String jobId) {
+    final suffix = jobId.split('-').last.trim();
+    for (final type in AgentJobType.values) {
+      if (type.name == suffix) {
+        return type;
+      }
+    }
+    return AgentJobType.unknown;
   }
 
   AgentJobHistoryEntry? _parseJobHistoryLogLine(String line) {
@@ -4552,6 +4672,7 @@ class AgentHttpServer {
       AgentJobType.backup => 'Backup',
       AgentJobType.restore => 'Restore',
       AgentJobType.sanity => 'Check',
+      AgentJobType.unknown => 'Job',
     };
     final statusText = switch (status) {
       'success' => 'succeeded',

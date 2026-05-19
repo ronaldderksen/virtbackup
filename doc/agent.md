@@ -270,6 +270,7 @@ The agent supports optional native SFTP via FFI:
 ## Error Handling and Cancellation
 
 - Jobs can be canceled via API. Checks and restore jobs before finalization stop immediately; backup jobs let the worker check and finish VM snapshot cleanup before closing; restores that have entered finalization finish that protected phase before closing.
+- When the agent process receives Ctrl-C (`SIGINT`) or `SIGTERM`, it stops schedule dispatch, requests cancellation for all running jobs through the normal job cancel path, waits until those jobs leave the running state, and then shuts down the HTTP server.
 - Cancel is disabled during backup snapshot commit and restore final define/rebase/upload phases.
 - Most operations are wrapped with try/catch; failures update job status.
 - Snapshot cleanup is attempted on failure to avoid dangling overlays.
@@ -335,6 +336,7 @@ The agent supports optional native SFTP via FFI:
 - Log records are routed by source: `agent` writes to `VirtBackup/logs/agent.log` and `gui` writes to `VirtBackup/logs/gui.log` under the configured backup base path.
 - Agent job logs are mirrored to `VirtBackup/logs/agent-job-<jobId>.log` while the job is running; the same filtered log lines still remain in `agent.log`.
 - When a job reaches a terminal state, the agent writes one log line with the normal LogWriter timestamp/level prefix and a JSON `message` payload with result fields: `event`, `jobId`, `type`, `state`, `message` when present, `vmName`, `storage`, source/target/duration/size context, schedule ID when present, and transfer counters used by job result emails.
+- Job history still includes `agent-job-*.log` files that do not end with a valid result JSON payload. Those entries are returned with `state:"unknown"` and a warning message so interrupted or incomplete logs are visible in the GUI.
 - Backup/restore worker isolates write their logs directly to `LogWriter` (`source=agent`) and do not route log lines through the HTTP server event channel.
 - Backup writer loop diagnostics (`writer debug: ...`) are emitted at `debug` level via `LogWriter` and not forwarded as `info` progress lines.
 - Agent log filtering reads `log_level` from `agent.yaml` (default `info` when missing/empty); GUI log filtering reads `log_level` from SharedPreferences (default `info` when missing/empty). Accepted levels are strict: `fatal`, `error`, `warn`, `info`, `debug`, `trace`.

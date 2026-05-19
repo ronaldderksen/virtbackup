@@ -300,9 +300,9 @@ class SshCommandResult {
   }
 }
 
-enum AgentJobType { backup, restore, sanity }
+enum AgentJobType { backup, restore, sanity, unknown }
 
-enum AgentJobState { running, success, failure, canceled }
+enum AgentJobState { running, success, failure, canceled, unknown }
 
 class AgentJobStatus {
   AgentJobStatus({

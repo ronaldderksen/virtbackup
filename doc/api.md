@@ -661,7 +661,7 @@ Response (array):
 
 - `GET /jobs/history`
 
-Returns jobs found in `agent-job-*.log` files that have a LogWriter line with a `job_result` JSON message payload.
+Returns jobs found in `agent-job-*.log` files. When a job log has no valid final `job_result` JSON message payload, the agent returns a synthetic history row with `state:"unknown"` so incomplete or interrupted jobs remain visible.
 
 Response (array):
 ```json

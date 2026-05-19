@@ -14,6 +14,11 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
     final successCount = entries.where((entry) => entry.state == AgentJobState.success).length;
     final failureCount = entries.where((entry) => entry.state == AgentJobState.failure).length;
     final canceledCount = entries.where((entry) => entry.state == AgentJobState.canceled).length;
+    final unknownCount = entries.where((entry) => entry.state == AgentJobState.unknown).length;
+    final summaryParts = <String>['$totalCount total', '$successCount success', '$failureCount failed', '$canceledCount canceled'];
+    if (unknownCount > 0) {
+      summaryParts.add('$unknownCount unknown');
+    }
     return [
       Row(
         children: [
@@ -25,7 +30,7 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
           ),
         ],
       ),
-      Text('$totalCount total • $successCount success • $failureCount failed • $canceledCount canceled', style: Theme.of(context).textTheme.bodyMedium),
+      Text(summaryParts.join(' • '), style: Theme.of(context).textTheme.bodyMedium),
       const SizedBox(height: 16),
       _buildHistoryQuickFilters(allEntries, filters),
       const SizedBox(height: 16),
@@ -371,6 +376,7 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
       AgentJobState.failure => (colorScheme.errorContainer, colorScheme.onErrorContainer),
       AgentJobState.canceled => (colorScheme.tertiaryContainer, colorScheme.onTertiaryContainer),
       AgentJobState.running => (colorScheme.secondaryContainer, colorScheme.onSecondaryContainer),
+      AgentJobState.unknown => (colorScheme.surfaceContainerHighest, colorScheme.onSurfaceVariant),
     };
   }
 
@@ -380,6 +386,7 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
       AgentJobState.failure => Icons.error_outline,
       AgentJobState.canceled => Icons.cancel_outlined,
       AgentJobState.running => Icons.play_circle_outline,
+      AgentJobState.unknown => Icons.help_outline,
     };
   }
 
@@ -388,6 +395,7 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
       AgentJobType.backup => 'Backup',
       AgentJobType.restore => 'Restore',
       AgentJobType.sanity => 'Check',
+      AgentJobType.unknown => 'Unknown',
     };
   }
 
@@ -397,6 +405,7 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
       AgentJobState.failure => 'Failed',
       AgentJobState.canceled => 'Canceled',
       AgentJobState.running => 'Running',
+      AgentJobState.unknown => 'Unknown',
     };
   }
 

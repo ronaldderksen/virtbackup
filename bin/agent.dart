@@ -36,14 +36,13 @@ Future<void> main(List<String> _) async {
       var shuttingDown = false;
       Future<void> shutdown() async {
         if (shuttingDown) {
+          _logInfo('Shutdown already in progress.');
           return;
         }
         shuttingDown = true;
         try {
-          _logInfo('Shutdown signal received. Stopping server...');
-          await server.stop().timeout(const Duration(seconds: 1));
-        } on TimeoutException {
-          _logInfo('Shutdown timed out; forcing exit.');
+          _logInfo('Shutdown signal received. Canceling running jobs...');
+          await server.cancelRunningJobsAndStop();
         } catch (error) {
           _logInfo('Shutdown error: $error');
         } finally {
