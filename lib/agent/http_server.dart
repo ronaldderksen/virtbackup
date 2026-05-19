@@ -1927,6 +1927,26 @@ class AgentHttpServer {
         _json(request, 200, history.map((entry) => entry.toMap()).toList());
         return;
       }
+      if (request.method == 'GET' && path.startsWith('/jobs/history/') && path.endsWith('/log')) {
+        final parts = path.split('/');
+        if (parts.length != 5) {
+          _json(request, 400, {'error': 'missing job id'});
+          return;
+        }
+        final jobId = Uri.decodeComponent(parts[3]).trim();
+        final logFile = await _jobHistoryLogFile(jobId);
+        if (logFile == null) {
+          _json(request, 404, {'error': 'job log not found'});
+          return;
+        }
+        try {
+          _json(request, 200, {'jobId': jobId, 'fileName': _baseName(logFile.path), 'content': await logFile.readAsString()});
+        } catch (error) {
+          _hostLog('Job history failed to read log ${logFile.path}: $error');
+          _json(request, 500, {'error': 'job log unreadable'});
+        }
+        return;
+      }
       if (request.method == 'GET' && path.startsWith('/jobs/')) {
         final jobId = path.split('/')[2];
         final job = _jobs[jobId];
@@ -3243,6 +3263,31 @@ class AgentHttpServer {
 
     final history = byJobId.values.toList()..sort((a, b) => b.timestamp.compareTo(a.timestamp));
     return history;
+  }
+
+  Future<File?> _jobHistoryLogFile(String jobId) async {
+    if (jobId.isEmpty) {
+      return null;
+    }
+    final agentLogPath = LogWriter.defaultPathForSource('agent', basePath: _agentSettings.backupPath.trim());
+    final separatorIndex = agentLogPath.lastIndexOf(Platform.pathSeparator);
+    final logsDir = Directory(separatorIndex < 0 ? '.' : agentLogPath.substring(0, separatorIndex));
+    if (!await logsDir.exists()) {
+      return null;
+    }
+    await for (final entity in logsDir.list(followLinks: false)) {
+      if (entity is! File) {
+        continue;
+      }
+      final name = _baseName(entity.path);
+      if (!name.startsWith('agent-job-') || !name.endsWith('.log')) {
+        continue;
+      }
+      if (_jobIdFromJobLogPath(entity.path) == jobId) {
+        return entity;
+      }
+    }
+    return null;
   }
 
   Future<AgentJobHistoryEntry> _unknownJobHistoryEntry(File file, List<String> lines, String jobId) async {

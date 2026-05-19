@@ -151,6 +151,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String _historySortField = 'timestamp';
   bool _historySortAscending = false;
   final Set<String> _expandedHistoryJobIds = <String>{};
+  final Set<String> _loadingHistoryLogJobIds = <String>{};
   final Map<String, bool> _vmHasOverlayByName = {};
   final Map<String, Map<String, bool>> _overlayByServerId = {};
   final Map<String, List<String>> _missingToolsByServerId = {};

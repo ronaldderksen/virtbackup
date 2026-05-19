@@ -668,6 +668,17 @@ Response (array):
 [{"timestamp":"2026-05-18T09:34:44.514","level":"info","jobId":"<job-id>","type":"backup","state":"success","message":"","vmName":"vm01","storage":"Google Drive","source":"nuc04:vm01","target":"Google Drive","durationSeconds":156,"size":"55.6 GiB","transferred":"55.6 GiB","averageSpeed":"365 MiB/s"}]
 ```
 
+### Get job history log
+
+- `GET /jobs/history/{jobId}/log`
+
+Returns the matching `agent-job-<jobId>.log` file content for a history row.
+
+Response:
+```json
+{"jobId":"<job-id>","fileName":"agent-job-<job-id>.log","content":"2026-05-18T09:34:44.514 level=info message=..."}
+```
+
 ### Get job status
 
 - `GET /jobs/{jobId}`

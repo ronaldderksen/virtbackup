@@ -1,6 +1,6 @@
 part of 'main_screen.dart';
 
-const double _historyTableMinWidth = 790;
+const double _historyTableMinWidth = 834;
 const double _historyDatePickerDialogWidth = 570;
 const double _historyTimePickerDialogWidth = 600;
 const double _historyPickerDialogHeight = 620;
@@ -217,6 +217,8 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
           const SizedBox(width: 10),
           SizedBox(width: 220, child: _buildHistorySortHeader('Storage', 'storage', style, colorScheme)),
           const Spacer(),
+          const SizedBox(width: 36),
+          const SizedBox(width: 8),
           const SizedBox(width: 32),
         ],
       ),
@@ -331,10 +333,97 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
           ),
           const Spacer(),
           const SizedBox(width: 8),
+          SizedBox(
+            width: 36,
+            height: 36,
+            child: IconButton(
+              padding: EdgeInsets.zero,
+              tooltip: 'Open job log',
+              onPressed: _loadingHistoryLogJobIds.contains(entry.jobId) ? null : () => _openHistoryJobLog(entry),
+              icon: _loadingHistoryLogJobIds.contains(entry.jobId) ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.download_outlined),
+            ),
+          ),
+          const SizedBox(width: 8),
           Icon(expanded ? Icons.expand_less : Icons.expand_more, color: colorScheme.onSurfaceVariant),
         ],
       ),
     );
+  }
+
+  Future<void> _openHistoryJobLog(AgentJobHistoryEntry entry) async {
+    if (_loadingHistoryLogJobIds.contains(entry.jobId)) {
+      return;
+    }
+    _updateUi(() => _loadingHistoryLogJobIds.add(entry.jobId));
+    try {
+      final logFile = await _agentApiClient.fetchJobHistoryLog(entry.jobId);
+      if (!mounted) {
+        return;
+      }
+      await _showHistoryJobLogDialog(entry: entry, logFile: logFile);
+    } catch (error, stackTrace) {
+      _logError('Failed to load job log.', error, stackTrace);
+      if (mounted) {
+        _showSnackBarError('Unable to load job log: $error');
+      }
+    } finally {
+      if (mounted) {
+        _updateUi(() => _loadingHistoryLogJobIds.remove(entry.jobId));
+      }
+    }
+  }
+
+  Future<void> _showHistoryJobLogDialog({required AgentJobHistoryEntry entry, required AgentJobLogFile logFile}) async {
+    final title = logFile.fileName.isEmpty ? entry.jobId : logFile.fileName;
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(title, overflow: TextOverflow.ellipsis),
+          content: SizedBox(
+            width: min(MediaQuery.sizeOf(context).width * 0.82, 1100),
+            height: min(MediaQuery.sizeOf(context).height * 0.72, 720),
+            child: _HistoryJobLogViewer(content: logFile.content),
+          ),
+          actions: [
+            TextButton.icon(
+              onPressed: () {
+                unawaited(Clipboard.setData(ClipboardData(text: logFile.content)));
+                _showSnackBar('Job log copied to clipboard.');
+              },
+              icon: const Icon(Icons.copy_outlined),
+              label: const Text('Copy'),
+            ),
+            TextButton.icon(onPressed: () => _saveHistoryJobLog(logFile), icon: const Icon(Icons.download_outlined), label: const Text('Download')),
+            TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Close')),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _saveHistoryJobLog(AgentJobLogFile logFile) async {
+    try {
+      final fileName = logFile.fileName.trim();
+      final location = await getSaveLocation(
+        suggestedName: fileName.isEmpty ? 'job-history.log' : fileName,
+        acceptedTypeGroups: const [
+          XTypeGroup(label: 'Log files', extensions: ['log', 'txt']),
+        ],
+      );
+      if (location == null) {
+        return;
+      }
+      await File(location.path).writeAsString(logFile.content);
+      if (mounted) {
+        _showSnackBar('Job log saved.');
+      }
+    } catch (error, stackTrace) {
+      _logError('Failed to save job log.', error, stackTrace);
+      if (mounted) {
+        _showSnackBarError('Unable to save job log: $error');
+      }
+    }
   }
 
   Widget _buildHistoryEntryDetails(AgentJobHistoryEntry entry, ColorScheme colorScheme) {
@@ -584,5 +673,137 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
     final hour = local.hour.toString().padLeft(2, '0');
     final minute = local.minute.toString().padLeft(2, '0');
     return '${local.year}-$month-$day $hour:$minute';
+  }
+}
+
+class _HistoryJobLogViewer extends StatefulWidget {
+  const _HistoryJobLogViewer({required this.content});
+
+  final String content;
+
+  @override
+  State<_HistoryJobLogViewer> createState() => _HistoryJobLogViewerState();
+}
+
+class _HistoryJobLogViewerState extends State<_HistoryJobLogViewer> {
+  late final ScrollController _scrollController;
+  late final ScrollController _horizontalScrollController;
+  late final FocusNode _focusNode;
+  late final List<String> _lines;
+  late final int _maxLineLength;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController = ScrollController();
+    _horizontalScrollController = ScrollController();
+    _focusNode = FocusNode();
+    _lines = widget.content.isEmpty ? const <String>['Log file is empty.'] : const LineSplitter().convert(widget.content);
+    _maxLineLength = _lines.fold<int>(0, (length, line) => max(length, line.length));
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    _horizontalScrollController.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textStyle = Theme.of(context).textTheme.bodySmall?.copyWith(fontFamily: 'monospace');
+    final lineNumberStyle = textStyle?.copyWith(color: colorScheme.onSurfaceVariant);
+    final lineNumberWidth = max(44.0, (_lines.length.toString().length * 8.0) + 18);
+    return DecoratedBox(
+      decoration: BoxDecoration(color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5), borderRadius: BorderRadius.circular(8)),
+      child: Focus(
+        focusNode: _focusNode,
+        autofocus: true,
+        onKeyEvent: _handleKeyEvent,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _focusNode.requestFocus,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final contentWidth = max(constraints.maxWidth, lineNumberWidth + 48 + (_maxLineLength * 7.5));
+              return Scrollbar(
+                controller: _scrollController,
+                thumbVisibility: true,
+                notificationPredicate: (notification) => notification.metrics.axis == Axis.vertical,
+                child: Scrollbar(
+                  controller: _horizontalScrollController,
+                  thumbVisibility: true,
+                  notificationPredicate: (notification) => notification.metrics.axis == Axis.horizontal,
+                  child: SingleChildScrollView(
+                    controller: _horizontalScrollController,
+                    scrollDirection: Axis.horizontal,
+                    child: SizedBox(
+                      width: contentWidth,
+                      child: SelectionArea(
+                        child: ListView.builder(
+                          controller: _scrollController,
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          itemCount: _lines.length,
+                          itemBuilder: (context, index) {
+                            return Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  SizedBox(
+                                    width: lineNumberWidth,
+                                    child: SelectionContainer.disabled(
+                                      child: Text((index + 1).toString(), textAlign: TextAlign.right, style: lineNumberStyle),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(child: Text(_lines[index], maxLines: 1, softWrap: false, style: textStyle)),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    switch (event.logicalKey) {
+      case LogicalKeyboardKey.arrowUp:
+        _scrollBy(_scrollController, -40);
+        return KeyEventResult.handled;
+      case LogicalKeyboardKey.arrowDown:
+        _scrollBy(_scrollController, 40);
+        return KeyEventResult.handled;
+      case LogicalKeyboardKey.arrowLeft:
+        _scrollBy(_horizontalScrollController, -60);
+        return KeyEventResult.handled;
+      case LogicalKeyboardKey.arrowRight:
+        _scrollBy(_horizontalScrollController, 60);
+        return KeyEventResult.handled;
+      default:
+        return KeyEventResult.ignored;
+    }
+  }
+
+  void _scrollBy(ScrollController controller, double delta) {
+    if (!controller.hasClients) {
+      return;
+    }
+    final target = (controller.offset + delta).clamp(controller.position.minScrollExtent, controller.position.maxScrollExtent);
+    controller.jumpTo(target);
   }
 }

@@ -594,6 +594,18 @@ class AgentJobHistoryEntry {
   }
 }
 
+class AgentJobLogFile {
+  AgentJobLogFile({required this.jobId, required this.fileName, required this.content});
+
+  final String jobId;
+  final String fileName;
+  final String content;
+
+  factory AgentJobLogFile.fromMap(Map<String, dynamic> json) {
+    return AgentJobLogFile(jobId: (json['jobId'] ?? '').toString(), fileName: (json['fileName'] ?? '').toString(), content: (json['content'] ?? '').toString());
+  }
+}
+
 class ScheduleQueueEntry {
   ScheduleQueueEntry({
     required this.scheduleId,

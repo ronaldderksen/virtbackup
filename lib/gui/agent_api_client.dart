@@ -427,6 +427,18 @@ class AgentApiClient {
     return decoded.whereType<Map>().map((item) => AgentJobHistoryEntry.fromMap(Map<String, dynamic>.from(item))).toList();
   }
 
+  Future<AgentJobLogFile> fetchJobHistoryLog(String jobId) async {
+    final response = await _get('/jobs/history/${Uri.encodeComponent(jobId)}/log');
+    if (response.statusCode != 200) {
+      throw 'Agent responded ${response.statusCode}';
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map) {
+      throw 'Agent returned invalid job log payload';
+    }
+    return AgentJobLogFile.fromMap(Map<String, dynamic>.from(decoded));
+  }
+
   Future<List<ScheduleQueueEntry>> fetchScheduleQueue() async {
     final response = await _get('/schedule-queue');
     if (response.statusCode != 200) {

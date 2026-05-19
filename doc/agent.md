@@ -337,6 +337,7 @@ The agent supports optional native SFTP via FFI:
 - Agent job logs are mirrored to `VirtBackup/logs/agent-job-<jobId>.log` while the job is running; the same filtered log lines still remain in `agent.log`.
 - When a job reaches a terminal state, the agent writes one log line with the normal LogWriter timestamp/level prefix and a JSON `message` payload with result fields: `event`, `jobId`, `type`, `state`, `message` when present, `vmName`, `storage`, source/target/duration/size context, schedule ID when present, and transfer counters used by job result emails.
 - Job history still includes `agent-job-*.log` files that do not end with a valid result JSON payload. Those entries are returned with `state:"unknown"` and a warning message so interrupted or incomplete logs are visible in the GUI.
+- The GUI can fetch the full mirrored job log for a history row from the agent and shows it in a selectable log viewer.
 - Backup/restore worker isolates write their logs directly to `LogWriter` (`source=agent`) and do not route log lines through the HTTP server event channel.
 - Backup writer loop diagnostics (`writer debug: ...`) are emitted at `debug` level via `LogWriter` and not forwarded as `info` progress lines.
 - Agent log filtering reads `log_level` from `agent.yaml` (default `info` when missing/empty); GUI log filtering reads `log_level` from SharedPreferences (default `info` when missing/empty). Accepted levels are strict: `fatal`, `error`, `warn`, `info`, `debug`, `trace`.
