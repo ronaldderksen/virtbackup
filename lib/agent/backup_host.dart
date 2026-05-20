@@ -27,6 +27,7 @@ class BackupAgentHost {
   DateTime? _firstSftpUploadAt;
   DateTime? _lastSftpUploadAt;
   static const int _sftpRangeReadChunkSize = 16 * 1024 * 1024;
+  static const int _nativeSftpTransferTimeoutMs = 30000;
 
   final SSHAlgorithms _sshAlgorithms = const SSHAlgorithms(cipher: [SSHCipherType.aes128ctr, SSHCipherType.aes256ctr]);
   final Map<String, SSHSocket> _eventSockets = {};
@@ -529,7 +530,7 @@ class BackupAgentHost {
       lease = _acquireNativeReadLease(server.id, remotePath, nativeSession);
       while (remaining > 0) {
         final toRead = remaining > chunkSize ? chunkSize : remaining;
-        final read = _nativeSftp.read(lease.file, currentOffset, buffer, toRead);
+        final read = _nativeSftp.read(lease.file, currentOffset, buffer, toRead, _nativeSftpTransferTimeoutMs);
         if (read <= 0) {
           break;
         }
@@ -563,7 +564,7 @@ class BackupAgentHost {
       lease = _acquireNativeReadLease(server.id, remotePath, sessionAfterRetry);
       while (remaining > 0) {
         final toRead = remaining > chunkSize ? chunkSize : remaining;
-        final read = _nativeSftp.read(lease.file, currentOffset, buffer, toRead);
+        final read = _nativeSftp.read(lease.file, currentOffset, buffer, toRead, _nativeSftpTransferTimeoutMs);
         if (read <= 0) {
           break;
         }
@@ -1125,7 +1126,7 @@ class BackupAgentHost {
       var total = 0;
       try {
         while (true) {
-          final read = _nativeSftp.read(file, total, buffer, chunkSize);
+          final read = _nativeSftp.read(file, total, buffer, chunkSize, _nativeSftpTransferTimeoutMs);
           if (read <= 0) {
             break;
           }
@@ -1320,7 +1321,7 @@ class BackupAgentHost {
         nativeCapacity = length;
       }
       nativeBuffer!.asTypedList(length).setAll(0, Uint8List.sublistView(source, start, start + length));
-      final wrote = _nativeSftp.write(file, nativeBuffer!, length);
+      final wrote = _nativeSftp.write(file, nativeBuffer!, length, _nativeSftpTransferTimeoutMs);
       if (wrote != length) {
         throw 'native sftp write failed for $remotePath';
       }
@@ -1473,12 +1474,12 @@ class _NativeSftpBindings {
     return result;
   }
 
-  int read(Pointer<Void> file, int offset, Pointer<Uint8> buffer, int length) {
-    return _read(file, offset, buffer, length);
+  int read(Pointer<Void> file, int offset, Pointer<Uint8> buffer, int length, int timeoutMs) {
+    return _read(file, offset, buffer, length, timeoutMs);
   }
 
-  int write(Pointer<Void> file, Pointer<Uint8> buffer, int length) {
-    return _write(file, buffer, length);
+  int write(Pointer<Void> file, Pointer<Uint8> buffer, int length, int timeoutMs) {
+    return _write(file, buffer, length, timeoutMs);
   }
 
   String fileSha256Hex(Pointer<Void> file) {
@@ -1528,10 +1529,10 @@ typedef _SftpOpenReadC = Pointer<Void> Function(Pointer<Void> session, Pointer<U
 typedef _SftpOpenReadDart = Pointer<Void> Function(Pointer<Void> session, Pointer<Utf8> path);
 typedef _SftpOpenWriteC = Pointer<Void> Function(Pointer<Void> session, Pointer<Utf8> path, Int32 truncate);
 typedef _SftpOpenWriteDart = Pointer<Void> Function(Pointer<Void> session, Pointer<Utf8> path, int truncate);
-typedef _SftpReadC = Int32 Function(Pointer<Void> file, Int64 offset, Pointer<Uint8> buffer, Int32 length);
-typedef _SftpReadDart = int Function(Pointer<Void> file, int offset, Pointer<Uint8> buffer, int length);
-typedef _SftpWriteC = Int32 Function(Pointer<Void> file, Pointer<Uint8> buffer, Int32 length);
-typedef _SftpWriteDart = int Function(Pointer<Void> file, Pointer<Uint8> buffer, int length);
+typedef _SftpReadC = Int32 Function(Pointer<Void> file, Int64 offset, Pointer<Uint8> buffer, Int32 length, Int32 timeoutMs);
+typedef _SftpReadDart = int Function(Pointer<Void> file, int offset, Pointer<Uint8> buffer, int length, int timeoutMs);
+typedef _SftpWriteC = Int32 Function(Pointer<Void> file, Pointer<Uint8> buffer, Int32 length, Int32 timeoutMs);
+typedef _SftpWriteDart = int Function(Pointer<Void> file, Pointer<Uint8> buffer, int length, int timeoutMs);
 typedef _SftpFileSha256HexC = Int32 Function(Pointer<Void> file, Pointer<Uint8> outHex, Int32 outLen);
 typedef _SftpFileSha256HexDart = int Function(Pointer<Void> file, Pointer<Uint8> outHex, int outLen);
 typedef _SftpCloseFileC = Void Function(Pointer<Void> file);

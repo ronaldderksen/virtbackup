@@ -333,6 +333,7 @@ The agent supports optional native SFTP via FFI:
 - Storage editor saves preserve existing `passwordEnc`/`accessTokenEnc`/`refreshTokenEnc` when plaintext fields are left empty; explicit Google Drive disconnect clears those tokens.
 - The Google Drive storage driver (`driverId: gdrive`) stores data as individual blob files using the same directory layout as the filesystem driver.
 - All Google Drive API calls retry up to 5 times with exponential backoff starting at 2 seconds; each retry recreates the HTTP client connection, and a persistent failure aborts the backup with a clean error.
+- SFTP driver operations retry up to 5 times with exponential backoff starting at 2 seconds and recreate idle SFTP/native sessions between attempts. Missing blobs, write-conflict mismatches, and permanent configuration errors are not retried.
 - Log records are routed by source: `agent` writes to `VirtBackup/logs/agent.log` and `gui` writes to `VirtBackup/logs/gui.log` under the configured backup base path.
 - Agent job logs are mirrored to `VirtBackup/logs/agent-job-<jobId>.log` while the job is running; the same filtered log lines still remain in `agent.log`.
 - When a job reaches a terminal state, the agent writes one log line with the normal LogWriter timestamp/level prefix and a JSON `message` payload with result fields: `event`, `jobId`, `type`, `state`, `message` when present, `vmName`, `storage`, source/target/duration/size context, schedule ID when present, and transfer counters used by job result emails.
@@ -367,9 +368,12 @@ The agent supports optional native SFTP via FFI:
 - For non-filesystem storage, `uploadConcurrency` (backup) and `downloadConcurrency` (restore) are persisted in `agent.yaml`.
 - On agent startup, missing `uploadConcurrency`/`downloadConcurrency` keys on non-filesystem storage are auto-added as `8` and written back immediately.
 - Restore read concurrency uses storage `downloadConcurrency` from `agent.yaml`; if not present, it defaults to `8`.
-- `SftpBackupDriver` resolves concurrency from the selected SFTP storage (`uploadConcurrency`/`downloadConcurrency`, default `8`) and uses that for SFTP/native session pools.
-- `SftpBackupDriver` requires native SFTP for blob data paths; no dartssh blob read/write fallback is used.
+- `SftpBackupDriver` resolves concurrency from the selected SFTP storage (`uploadConcurrency`/`downloadConcurrency`, default `8`) and uses that for native SFTP session pools.
+- `SftpBackupDriver` requires native SFTP for all remote operations (`stat`, `mkdir`, `rename`, `remove`, `listdir`, blob reads, and blob writes); no `dartssh2` fallback is used inside the driver.
+- Native SFTP blob transfer calls are guarded by a 30 second native timeout. Timed-out transfer calls invalidate their native session and enter the normal retry path.
+- Retryable SFTP failures are attempted up to 5 times total: first attempt plus 4 retries with backoff delays of 2, 4, 8, and 16 seconds. Every retry is logged; if attempt 5 fails, the backup/restore job is allowed to fail.
 - `SftpBackupDriver` native blob transfers use fixed 16 MiB chunks.
+- `SftpBackupDriver.openBlobStream` emits native read chunks directly and resumes retries from the last emitted offset instead of buffering the full blob before yielding.
 - Native FFI `vb_sftp_read` uses a fill loop and keeps reading until the requested length is satisfied or EOF is reached, reducing Dart/FFI roundtrips on short libssh2 reads.
 - Remote storage cache folders under `<filesystem path>/VirtBackup/cache/` are keyed by storage id (not by driver id).
 - Restore behavior for non-filesystem storage:
