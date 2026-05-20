@@ -105,7 +105,7 @@ class BackupAgent {
   BackupDriver? _activeDriver;
   final Set<_ExistsWorker> _activeExistsWorkers = <_ExistsWorker>{};
   final Set<_WriterWorker> _activeWriterWorkers = <_WriterWorker>{};
-  _BlobDirectoryCache? _blobDirectoryCache;
+  BlobDirectoryCache? _blobDirectoryCache;
   _BlobCacheWorker? _blobCacheWorker;
   Future<void>? _blobCacheWorkerFuture;
 
@@ -189,20 +189,17 @@ class BackupAgent {
       final vmFolderName = _dependencies.sanitizeFileName(vm.name);
       final serverFolderName = _dependencies.sanitizeFileName(server.id);
       await driver.ensureReady();
-      final BlobDirectoryLister? blobLister = driver is BlobDirectoryLister ? driver as BlobDirectoryLister : null;
-      _blobDirectoryCache = blobLister == null
-          ? null
-          : _BlobDirectoryCache(
-              driver: blobLister,
-              createShard: (hash) => driver.ensureBlobDir(hash),
-              ensureNotCanceled: _ensureNotCanceled,
-              onShardCreateProgress: (created, total) {
-                if (_cancelRequested || total <= 0) {
-                  return;
-                }
-                _setProgress(_progress.copyWith(completedDisks: created, totalDisks: total, statusMessage: 'Preparing storage folders $created/$total...'));
-              },
-            );
+      _blobDirectoryCache = BlobDirectoryCache(
+        driver: driver,
+        createShard: (hash) => driver.ensureBlobDir(hash),
+        ensureNotCanceled: _ensureNotCanceled,
+        onShardCreateProgress: (created, total) {
+          if (_cancelRequested || total <= 0) {
+            return;
+          }
+          _setProgress(_progress.copyWith(completedDisks: created, totalDisks: total, statusMessage: 'Preparing storage folders $created/$total...'));
+        },
+      );
       await driver.prepareBackup(serverFolderName, vmFolderName);
       await _blobDirectoryCache?.initialize();
       _startBlobCacheWorker();
@@ -1407,22 +1404,25 @@ class _LocalManifestWrite {
   bool closed = false;
 }
 
-class _BlobDirectoryCache {
-  _BlobDirectoryCache({required BlobDirectoryLister driver, required this.createShard, required this.ensureNotCanceled, this.onShardCreateProgress}) : _driver = driver;
+class BlobDirectoryCache {
+  BlobDirectoryCache({required BackupDriver driver, required this.createShard, required this.ensureNotCanceled, this.onShardCreateProgress, this.ensureMissingShards = true}) : _driver = driver;
 
-  final BlobDirectoryLister _driver;
+  final BackupDriver _driver;
   final Future<void> Function(String hash) createShard;
   final void Function() ensureNotCanceled;
   final void Function(int created, int total)? onShardCreateProgress;
+  final bool ensureMissingShards;
 
   Set<String>? _shardNames;
-  Future<Set<String>>? _shardsInFlight;
+  Future<void>? _shardsInFlight;
   final Map<String, Set<String>> _blobNamesByShardKey = {};
-  final Map<String, Future<Set<String>>> _blobNamesInFlight = {};
+  Future<void>? _blobDirectoryLoadInFlight;
   final Map<String, Future<void>> _shardCreateInFlight = {};
   final List<Completer<void>> _writeReadyWaiters = <Completer<void>>[];
   Future<void>? _initializeInFlight;
+  Future<void>? _prefillAllBlobNamesInFlight;
   bool _writeReady = false;
+  bool _allBlobNamesPrefilled = false;
 
   Future<void> initialize() async {
     await _ensureInitialized();
@@ -1445,7 +1445,9 @@ class _BlobDirectoryCache {
     if (hash.length < 2) {
       return false;
     }
-    await _ensureInitialized();
+    if (!_allBlobNamesPrefilled) {
+      await _ensureInitialized();
+    }
     final shardKey = hash.substring(0, 2);
     final shardNames = _shardNames ?? <String>{};
     if (!shardNames.contains(shardKey)) {
@@ -1468,6 +1470,23 @@ class _BlobDirectoryCache {
     await _loadBlobNames(shardKey);
   }
 
+  Future<void> prefillAllBlobNames({required int concurrency, void Function(int loaded, int total)? onProgress}) async {
+    if (_allBlobNamesPrefilled) {
+      return;
+    }
+    final inFlight = _prefillAllBlobNamesInFlight;
+    if (inFlight != null) {
+      return inFlight;
+    }
+    final future = _prefillAllBlobNamesCore(concurrency: concurrency, onProgress: onProgress);
+    _prefillAllBlobNamesInFlight = future;
+    try {
+      await future;
+    } finally {
+      _prefillAllBlobNamesInFlight = null;
+    }
+  }
+
   void markHashKnown(String hash) {
     if (hash.length < 2) {
       return;
@@ -1482,6 +1501,9 @@ class _BlobDirectoryCache {
   }
 
   Future<void> _ensureInitialized() async {
+    if (_shardNames != null && _writeReady) {
+      return;
+    }
     final inFlight = _initializeInFlight;
     if (inFlight != null) {
       return inFlight;
@@ -1505,6 +1527,11 @@ class _BlobDirectoryCache {
       if (!shardNames.contains(shardKey)) {
         missingShards.add(shardKey);
       }
+    }
+    if (!ensureMissingShards) {
+      _writeReady = true;
+      _notifyWriteReady();
+      return;
     }
     if (missingShards.isNotEmpty) {
       onShardCreateProgress?.call(0, missingShards.length);
@@ -1532,14 +1559,14 @@ class _BlobDirectoryCache {
     }
     final inFlight = _shardsInFlight;
     if (inFlight != null) {
-      return inFlight;
+      await inFlight;
+      return _shardNames ?? <String>{};
     }
-    final future = _driver.listBlobShards();
+    final future = _loadBlobDirectory();
     _shardsInFlight = future;
     try {
-      final names = await future;
-      _shardNames = names;
-      return names;
+      await future;
+      return _shardNames ?? <String>{};
     } finally {
       _shardsInFlight = null;
     }
@@ -1550,19 +1577,123 @@ class _BlobDirectoryCache {
     if (cached != null) {
       return cached;
     }
-    final inFlight = _blobNamesInFlight[shardKey];
+    final inFlight = _blobDirectoryLoadInFlight;
+    if (inFlight != null) {
+      await inFlight;
+      return _blobNamesByShardKey[shardKey] ?? <String>{};
+    }
+    await _loadBlobDirectory();
+    return _blobNamesByShardKey[shardKey] ?? <String>{};
+  }
+
+  Future<void> _loadBlobDirectory() async {
+    if (_shardNames != null) {
+      return;
+    }
+    final inFlight = _blobDirectoryLoadInFlight;
     if (inFlight != null) {
       return inFlight;
     }
-    final future = _driver.listBlobNames(shardKey);
-    _blobNamesInFlight[shardKey] = future;
+    final future = _loadBlobDirectoryCore();
+    _blobDirectoryLoadInFlight = future;
     try {
-      final names = await future;
-      _blobNamesByShardKey[shardKey] = names;
-      return names;
+      await future;
     } finally {
-      _blobNamesInFlight.remove(shardKey);
+      _blobDirectoryLoadInFlight = null;
     }
+  }
+
+  Future<void> _loadBlobDirectoryCore() async {
+    final activeBlockSize = _driver.baseName(_driver.blobsDir().path);
+    final files = await _driver.listRelativeFiles('blobs/$activeBlockSize');
+    final shardNames = <String>{};
+    final blobNamesByShard = <String, Set<String>>{};
+    for (final rawPath in files) {
+      final parts = rawPath.replaceAll('\\', '/').split('/').where((part) => part.trim().isNotEmpty && part != '.').toList();
+      final blobsIndex = parts.indexOf('blobs');
+      if (blobsIndex < 0 || parts.length - blobsIndex < 4) {
+        continue;
+      }
+      final blockSize = parts[blobsIndex + 1];
+      if (blockSize != activeBlockSize) {
+        continue;
+      }
+      final shard = parts[blobsIndex + 2];
+      final name = parts.last;
+      if (shard.length != 2 || name.endsWith('.inprogress')) {
+        continue;
+      }
+      shardNames.add(shard);
+      blobNamesByShard.putIfAbsent(shard, () => <String>{}).add(name);
+    }
+    _shardNames = shardNames;
+    _blobNamesByShardKey
+      ..clear()
+      ..addAll(blobNamesByShard);
+  }
+
+  Future<void> _prefillAllBlobNamesCore({required int concurrency, void Function(int loaded, int total)? onProgress}) async {
+    final activeBlockSize = _driver.baseName(_driver.blobsDir().path);
+    final shardNames = _allBlobShardKeys();
+    final listingConcurrency = min(concurrency, _driver.capabilities.maxConcurrentDirectoryListings);
+    final batchSize = max(1, listingConcurrency);
+    var loaded = 0;
+    LogWriter.logAgentSync(level: 'debug', message: 'blob-cache: prefill all blob names start shards=${shardNames.length} concurrency=$batchSize');
+    onProgress?.call(0, shardNames.length);
+    await Future<void>.delayed(Duration.zero);
+    for (var i = 0; i < shardNames.length; i += batchSize) {
+      ensureNotCanceled();
+      final end = min(i + batchSize, shardNames.length);
+      await Future.wait(
+        shardNames.sublist(i, end).map((shardKey) async {
+          await _loadBlobNamesFromShard(activeBlockSize: activeBlockSize, shardKey: shardKey);
+          loaded += 1;
+          onProgress?.call(loaded, shardNames.length);
+          await Future<void>.delayed(Duration.zero);
+        }),
+      );
+      if (loaded == shardNames.length || loaded % 32 == 0) {
+        LogWriter.logAgentSync(level: 'debug', message: 'blob-cache: prefill all blob names progress $loaded/${shardNames.length}');
+      }
+    }
+    _shardNames = shardNames.toSet();
+    _writeReady = true;
+    _allBlobNamesPrefilled = true;
+    LogWriter.logAgentSync(level: 'debug', message: 'blob-cache: prefill all blob names complete shards=${shardNames.length}');
+  }
+
+  List<String> _allBlobShardKeys() {
+    return List<String>.generate(256, (index) => index.toRadixString(16).padLeft(2, '0'));
+  }
+
+  Future<Set<String>> _loadBlobNamesFromShard({required String activeBlockSize, required String shardKey}) async {
+    final cached = _blobNamesByShardKey[shardKey];
+    if (cached != null) {
+      (_shardNames ??= <String>{}).add(shardKey);
+      return cached;
+    }
+    final files = await _driver.listRelativeFiles('blobs/$activeBlockSize/$shardKey');
+    final blobNames = <String>{};
+    for (final rawPath in files) {
+      final parts = rawPath.replaceAll('\\', '/').split('/').where((part) => part.trim().isNotEmpty && part != '.').toList();
+      if (parts.isEmpty) {
+        continue;
+      }
+      final blobsIndex = parts.indexOf('blobs');
+      if (blobsIndex >= 0) {
+        if (parts.length - blobsIndex < 4 || parts[blobsIndex + 1] != activeBlockSize || parts[blobsIndex + 2] != shardKey) {
+          continue;
+        }
+      }
+      final name = parts.last;
+      if (name.endsWith('.inprogress')) {
+        continue;
+      }
+      blobNames.add(name);
+    }
+    (_shardNames ??= <String>{}).add(shardKey);
+    _blobNamesByShardKey[shardKey] = blobNames;
+    return blobNames;
   }
 
   Future<void> _ensureShardCreated({required String shardKey}) async {

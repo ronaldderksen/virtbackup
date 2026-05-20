@@ -11,7 +11,7 @@ import 'package:virtbackup/common/log_writer.dart';
 import 'package:virtbackup/common/models.dart' show BackupStorage;
 import 'package:virtbackup/common/settings.dart';
 
-class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
+class SftpBackupDriver implements BackupDriver, RemoteBlobDriver {
   SftpBackupDriver({required AppSettings settings, int? poolSessions})
     : _settings = settings,
       _cacheRoot = _cacheRootForSettings(settings),
@@ -107,6 +107,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     supportsConditionalWrite: false,
     supportsVersioning: false,
     maxConcurrentWrites: _maxConcurrentWrites,
+    maxConcurrentDirectoryListings: 1,
     params: [],
   );
 
@@ -172,41 +173,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     }
     final shard = hash.substring(0, 2);
     return File('${blobsDir().path}${Platform.pathSeparator}$shard${Platform.pathSeparator}$hash');
-  }
-
-  @override
-  Future<Set<String>> listBlobShards() async {
-    final entries = await _remoteListDir(_remoteBlobsRoot(), useBlobCachePool: true);
-    final names = <String>{};
-    for (final entry in entries) {
-      if (entry.name == '.' || entry.name == '..') {
-        continue;
-      }
-      if (!entry.isDirectory) {
-        continue;
-      }
-      names.add(entry.name);
-    }
-    return names;
-  }
-
-  @override
-  Future<Set<String>> listBlobNames(String shard) async {
-    final entries = await _remoteListDir(_remoteJoin(_remoteBlobsRoot(), shard), useBlobCachePool: true);
-    final names = <String>{};
-    for (final entry in entries) {
-      if (entry.name == '.' || entry.name == '..') {
-        continue;
-      }
-      if (entry.isDirectory) {
-        continue;
-      }
-      if (entry.name.endsWith('.inprogress')) {
-        continue;
-      }
-      names.add(entry.name);
-    }
-    return names;
   }
 
   @override

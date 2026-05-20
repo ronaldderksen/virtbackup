@@ -2,7 +2,7 @@ import 'dart:io';
 
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 
-class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
+class DummyBackupDriver implements BackupDriver {
   DummyBackupDriver(this._storageRoot, {required bool tmpWritesEnabled, required int blockSizeMB, Map<String, dynamic> driverParams = const <String, dynamic>{}})
     : _tmpWritesEnabled = tmpWritesEnabled,
       _blockSizeMB = blockSizeMB,
@@ -24,6 +24,7 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
     supportsConditionalWrite: false,
     supportsVersioning: false,
     maxConcurrentWrites: 1,
+    maxConcurrentDirectoryListings: 1,
     params: [DriverParamDefinition(key: 'throttleMbps', label: 'Dummy throttle (MB/s)', type: DriverParamType.number, min: 0, unit: 'MB/s', help: 'Leave empty or 0 for unlimited.')],
   );
 
@@ -175,16 +176,6 @@ class DummyBackupDriver implements BackupDriver, BlobDirectoryLister {
       return null;
     }
     return (parsed * 1024 * 1024).round();
-  }
-
-  @override
-  Future<Set<String>> listBlobShards() async {
-    return <String>{};
-  }
-
-  @override
-  Future<Set<String>> listBlobNames(String shard) async {
-    return <String>{};
   }
 
   @override

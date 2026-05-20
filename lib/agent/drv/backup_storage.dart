@@ -9,6 +9,7 @@ class BackupDriverCapabilities {
     required this.supportsConditionalWrite,
     required this.supportsVersioning,
     required this.maxConcurrentWrites,
+    required this.maxConcurrentDirectoryListings,
     this.params = const <DriverParamDefinition>[],
   });
 
@@ -19,6 +20,7 @@ class BackupDriverCapabilities {
   final bool supportsConditionalWrite;
   final bool supportsVersioning;
   final int maxConcurrentWrites;
+  final int maxConcurrentDirectoryListings;
   final List<DriverParamDefinition> params;
 }
 
@@ -86,9 +88,4 @@ abstract class RemoteBlobDriver {
   Future<int?> blobLength(String hash);
   Stream<List<int>> openBlobStream(String hash, {int? length});
   Future<List<int>?> readBlobBytes(String hash);
-}
-
-abstract class BlobDirectoryLister {
-  Future<Set<String>> listBlobShards();
-  Future<Set<String>> listBlobNames(String shard);
 }

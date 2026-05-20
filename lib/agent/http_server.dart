@@ -2642,6 +2642,7 @@ class AgentHttpServer {
       supportsConditionalWrite: false,
       supportsVersioning: false,
       maxConcurrentWrites: maxConcurrentWrites,
+      maxConcurrentDirectoryListings: 1,
       params: const <drv.DriverParamDefinition>[],
     );
   }
@@ -2655,6 +2656,7 @@ class AgentHttpServer {
       supportsConditionalWrite: false,
       supportsVersioning: false,
       maxConcurrentWrites: 4,
+      maxConcurrentDirectoryListings: 8,
     );
   }
 
@@ -3864,7 +3866,7 @@ class AgentHttpServer {
     unawaited(() async {
       await LogWriter.withJobLogging(jobId, () async {
         final checkDriversByBlockSizeMB = <int, drv.BackupDriver>{};
-        final quickCachesByBlockSizeMB = <int, _BlobDirectoryLookupCache>{};
+        final quickCachesByBlockSizeMB = <int, BlobDirectoryCache>{};
         final checkLabel = mode == _RestoreCheckMode.quick ? 'Quick check' : 'Sanity check';
         final control = _jobControls[jobId];
         try {
@@ -4078,13 +4080,44 @@ class AgentHttpServer {
               final expectedLength = _blockLengthForIndex(index, fileSize, blockSize);
               if (mode == _RestoreCheckMode.quick) {
                 final driverForBlockSize = checkDriverForBlockSize(blockSizeMB);
-                final cache = quickCachesByBlockSizeMB.putIfAbsent(blockSizeMB, () {
-                  final lister = driverForBlockSize is drv.BlobDirectoryLister ? driverForBlockSize as drv.BlobDirectoryLister : null;
-                  if (lister == null) {
-                    throw 'Quick check requires BlobDirectoryLister support.';
-                  }
-                  return _BlobDirectoryLookupCache(lister);
-                });
+                final cache = quickCachesByBlockSizeMB.putIfAbsent(
+                  blockSizeMB,
+                  () => BlobDirectoryCache(driver: driverForBlockSize, createShard: (_) async {}, ensureNotCanceled: () => _ensureJobNotCanceled(jobId), ensureMissingShards: false),
+                );
+                await cache.prefillAllBlobNames(
+                  concurrency: maxConcurrentDownloads,
+                  onProgress: (loaded, total) {
+                    if (total <= 0) {
+                      return;
+                    }
+                    _updateJob(
+                      jobId,
+                      _jobs[jobId]!.copyWith(
+                        totalUnits: total,
+                        completedUnits: loaded,
+                        bytesTransferred: bytesChecked,
+                        speedBytesPerSec: 0,
+                        totalBytes: totalBytes,
+                        message: '$checkLabel: loading blob cache $loaded/$total shards',
+                        presentUnits: presentBlocks,
+                        missingUnits: missingBlocks,
+                      ),
+                    );
+                  },
+                );
+                _updateJob(
+                  jobId,
+                  _jobs[jobId]!.copyWith(
+                    totalUnits: totalBlocks,
+                    completedUnits: checked,
+                    bytesTransferred: bytesChecked,
+                    speedBytesPerSec: smoothedSpeed,
+                    totalBytes: totalBytes,
+                    message: message,
+                    presentUnits: presentBlocks,
+                    missingUnits: missingBlocks,
+                  ),
+                );
                 final exists = await cache.blobExists(hash);
                 checked += 1;
                 if (!exists) {
@@ -4342,22 +4375,22 @@ class AgentHttpServer {
         .toSet();
     await _pruneCachedRelativeDir(driver: driver, normalizedDir: normalizedDir, remoteFiles: remoteFiles);
     for (final relativePath in files) {
-      final bytes = await driver.readFileBytes(relativePath);
-      if (bytes == null) {
-        continue;
-      }
       final normalizedPath = relativePath.replaceAll('\\', '/').split('/').where((part) => part.trim().isNotEmpty && part != '.').join('/');
       if (normalizedPath.isEmpty) {
         continue;
       }
       final localFilePath = '${driver.storage}${Platform.pathSeparator}${normalizedPath.replaceAll('/', Platform.pathSeparator)}';
       final localFile = File(localFilePath);
+      if (await localFile.exists()) {
+        continue;
+      }
+      final bytes = await driver.readFileBytes(relativePath);
+      if (bytes == null) {
+        continue;
+      }
       final tempFile = File('${localFile.path}.inprogress.${DateTime.now().microsecondsSinceEpoch}');
       await tempFile.parent.create(recursive: true);
       await tempFile.writeAsBytes(bytes);
-      if (await localFile.exists()) {
-        await localFile.delete();
-      }
       await tempFile.rename(localFile.path);
     }
   }
@@ -5185,47 +5218,6 @@ class _VirtBackupAccountRefreshRejected implements Exception {
 }
 
 enum _RestoreCheckMode { full, quick }
-
-class _BlobDirectoryLookupCache {
-  _BlobDirectoryLookupCache(this._driver);
-
-  final drv.BlobDirectoryLister _driver;
-  Set<String>? _shards;
-  final Map<String, Set<String>> _blobNamesByShard = <String, Set<String>>{};
-
-  Future<bool> blobExists(String hash) async {
-    if (hash.length < 2) {
-      return false;
-    }
-    final shard = hash.substring(0, 2);
-    final shards = await _loadShards();
-    if (!shards.contains(shard)) {
-      return false;
-    }
-    final names = await _loadBlobNames(shard);
-    return names.contains(hash);
-  }
-
-  Future<Set<String>> _loadShards() async {
-    final cached = _shards;
-    if (cached != null) {
-      return cached;
-    }
-    final names = await _driver.listBlobShards();
-    _shards = names;
-    return names;
-  }
-
-  Future<Set<String>> _loadBlobNames(String shard) async {
-    final cached = _blobNamesByShard[shard];
-    if (cached != null) {
-      return cached;
-    }
-    final names = await _driver.listBlobNames(shard);
-    _blobNamesByShard[shard] = names;
-    return names;
-  }
-}
 
 class _CheckBlockRef {
   const _CheckBlockRef({required this.hash, required this.expectedLength, required this.index, required this.message});

@@ -45,7 +45,7 @@ class _DriveApiException implements Exception {
   String toString() => 'Drive $action failed: $statusCode $body';
 }
 
-class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
+class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver {
   GdriveBackupDriver({required AppSettings settings, required Future<void> Function(AppSettings) persistSettings, Directory? settingsDir, void Function(String message)? logInfo})
     : _settings = settings,
       _persistSettings = persistSettings,
@@ -128,6 +128,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     supportsConditionalWrite: false,
     supportsVersioning: false,
     maxConcurrentWrites: 4,
+    maxConcurrentDirectoryListings: 8,
   );
 
   @override
@@ -174,38 +175,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   File blobFile(String hash) {
     final path = _blobCachePath(hash);
     return File(path);
-  }
-
-  @override
-  Future<Set<String>> listBlobShards() async {
-    await _ensureBlobsRoot();
-    final rootId = _blobsRootId;
-    if (rootId == null || rootId.isEmpty) {
-      return <String>{};
-    }
-    final folders = await _listChildFolders(rootId);
-    final names = <String>{};
-    for (final folder in folders) {
-      names.add(folder.name);
-    }
-    return names;
-  }
-
-  @override
-  Future<Set<String>> listBlobNames(String shard) async {
-    final shardId = await _findFolderByPath(<String>[..._blobsPathPrefix(), shard]);
-    if (shardId == null || shardId.isEmpty) {
-      return <String>{};
-    }
-    final files = await _listFilesRaw("mimeType!='$_driveFolderMime' and '$shardId' in parents and trashed=false", fields: 'nextPageToken,files(id,name,parents)');
-    final names = <String>{};
-    for (final file in files) {
-      if (file.name.endsWith('.inprogress')) {
-        continue;
-      }
-      names.add(file.name);
-    }
-    return names;
   }
 
   @override

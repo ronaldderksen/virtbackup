@@ -325,6 +325,7 @@ The agent supports optional native SFTP via FFI:
 - Adding or editing an agent always shows the same dialog fields for endpoint, backup base path, and notification settings. Editing an existing agent first selects and loads that agent when reachable. Saving config creates `<backup base path>/VirtBackup` on the agent and verifies write access before persisting the settings.
 - On startup the agent checks write access to `<backup base path>/VirtBackup` and exposes the result in `/health`. When the selected agent reports storage as not writable or has no configured servers, the GUI keeps only Settings enabled and shows the health state in the agent list.
 - Storage management is available from Settings and is enabled only when the selected agent is healthy. The Settings storage list exposes direct edit/delete actions per storage and a `New storage` action for adding another destination.
+- Storage create, edit, and delete actions in the GUI are posted to the agent immediately; the agent writes the updated settings to `agent.yaml` before returning success.
 - For `127.0.0.1`, the GUI always uses the local `agent.token` file; other agents require a token entered in the GUI (token is mandatory).
 - Google Drive OAuth refresh/access tokens are stored encrypted in storage params (`storage[*].params.accessTokenEnc`, `storage[*].params.refreshTokenEnc`) using the same AES-GCM key derivation as SSH passwords.
 - Saving settings does not mutate in-memory storage token fields; token encryption only applies to the persisted YAML payload.
@@ -356,8 +357,11 @@ The agent supports optional native SFTP via FFI:
 - Google Drive HTTP calls are logged as operation records with timestamp, action (`mkdir`, `list`, `upload`, `download`, `move`, `trash`, `auth.refresh`), status, duration, and request details.
 - Google Drive upload HTTP clients are leased from a bounded pool so upload retries/concurrency cannot fan out into unbounded concurrent connections.
 - Google Drive folder creation is guarded by a local folder lock and checks for existing folders before creating; when duplicate folder names are detected, the driver performs a strict merge into a primary folder and fails the operation if duplicates cannot be fully resolved.
+- Quick check uses the same generic blob directory cache implementation as backup, in read-only mode, and preloads blob listings per shard through `BackupDriver.listRelativeFiles('blobs/<blockSize>/<shard>')` before the block loop so cache build progress is visible; drivers do not expose quick-check-specific blob listing APIs.
+- Quick check yields after blob cache progress updates so drivers with blocking native calls, including SFTP, can expose intermediate job status to the GUI while the cache is being built.
+- Drivers expose `maxConcurrentDirectoryListings` for generic directory-listing workloads; SFTP sets this to `1` because native listdir calls block the agent isolate, while Google Drive can keep concurrent listings.
 - Storage storage are configured at root-level `storage` in `agent.yaml` (not under `backup`), each with its own `id`, `driverId`, and `params`.
-- In the GUI Storage editor, `driverId: gdrive` supports OAuth connect via browser (PKCE); token fields are not shown in the editor, and the returned tokens are stored in that storage's `params`.
+- In the GUI Storage editor, `driverId: gdrive` supports OAuth connect via browser (PKCE); the OAuth request always uses `https://www.googleapis.com/auth/drive.file` plus `openid email`, does not request previously granted Google scopes, token fields are not shown in the editor, and the returned tokens are stored in that storage's `params`.
 - Storage option `disableFresh: true` forces `fresh` off for that storage; backup requests with `fresh: true` continue and are logged.
 - `fresh` cleanup never deletes filesystem storage blobs (`storage[id=filesystem].params.path/VirtBackup/blobs`).
 - Blob storage is block-size scoped: `.../VirtBackup/blobs/<blockSizeMB>/`.
@@ -394,4 +398,4 @@ The agent supports optional native SFTP via FFI:
 - The GUI stores optional `preferredBackupServerId` and `preferredRestoreServerId` values in `agent.yaml`; when present and matching configured servers, they select the initial Backup and Restore server.
 - Restore storage selection is request-driven via `storageId` (`POST /servers/{id}/restore/start`), otherwise the active/default storage is used.
 - The GUI restore flow sends the currently selected backup storage as `storageId` for restore entry listing, precheck, and restore start so restore reads stay on the same storage.
-- Restore manifest caching is skipped for filesystem storage because the local manifest directory is already the source of truth; this avoids rewriting manifests and changing their mtimes during restore/precheck/listing.
+- Restore manifest caching is skipped for filesystem storage because the local manifest directory is already the source of truth; remote manifest caching prunes deleted remote files but does not re-download manifest files that already exist locally.

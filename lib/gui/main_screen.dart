@@ -1945,6 +1945,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     _sanityJobTimer?.cancel();
     _sanityJobId = jobId;
     var consecutiveErrors = 0;
+    var pollInFlight = false;
+    var terminalHandled = false;
     _applySanityCheckJobStatus(
       AgentJobStatus(
         id: jobId,
@@ -1962,7 +1964,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         sanitySpeedBytesPerSec: 0,
       ),
     );
-    _sanityJobTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+    Future<void> poll() async {
+      if (pollInFlight || terminalHandled) {
+        return;
+      }
+      pollInFlight = true;
       try {
         final status = await _agentApiClient.fetchJob(jobId);
         if (consecutiveErrors > 0) {
@@ -1971,6 +1977,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         }
         _applySanityCheckJobStatus(status);
         if (status.state != AgentJobState.running) {
+          terminalHandled = true;
           _stopSanityCheckJobPolling();
           if (mounted) {
             final checkName = _checkUiNameFromMessage(status.message);
@@ -1984,13 +1991,21 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         consecutiveErrors += 1;
         _logError('Sanity Check polling error (attempt $consecutiveErrors)', error, StackTrace.current);
         if (consecutiveErrors >= 5) {
+          terminalHandled = true;
           _stopSanityCheckJobPolling();
           if (mounted) {
             unawaited(_showResultDialog(title: 'Check Failed', message: 'Check polling failed: $error'));
           }
         }
+      } finally {
+        pollInFlight = false;
       }
+    }
+
+    _sanityJobTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      unawaited(poll());
     });
+    unawaited(poll());
   }
 
   void _stopRestoreJobPolling() {
@@ -2758,7 +2773,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   }
 
   Future<void> _startGdriveStorageOAuth({
-    required String scope,
     required String existingRefreshToken,
     required void Function({required String accessToken, required String refreshToken, required String accountEmail, required int? expiresAtMs}) onConnected,
     bool forceConsent = false,
@@ -2779,11 +2793,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       _showSnackBarError('Google Drive client ID is not configured.');
       return;
     }
-    final trimmedScope = scope.trim();
-    if (trimmedScope.isEmpty) {
-      _showSnackBarError('Google Drive scope is required.');
-      return;
-    }
     _logInfo('Google Drive OAuth client_id: $clientId');
     _updateUi(() {
       _isGdriveConnecting = true;
@@ -2801,9 +2810,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         'client_id': clientId,
         'redirect_uri': redirectUri,
         'response_type': 'code',
-        'scope': _buildGdriveOAuthScope(trimmedScope),
+        'scope': _buildGdriveOAuthScope(),
         'access_type': 'offline',
-        'include_granted_scopes': 'true',
         'state': state,
         'code_challenge': codeChallenge,
         'code_challenge_method': 'S256',
@@ -2890,8 +2898,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
   }
 
-  String _buildGdriveOAuthScope(String scope) {
-    return '$scope openid email';
+  String _buildGdriveOAuthScope() {
+    return '$_gdriveScopeFile openid email';
   }
 
   Future<_OAuthCallbackResult> _waitForOAuthCallback(HttpServer server) {
@@ -3076,7 +3084,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
               final sftpPasswordController = TextEditingController(text: params['password']?.toString() ?? '');
               final sftpBasePathController = TextEditingController(text: params['basePath']?.toString() ?? '');
               final gdriveRootController = TextEditingController(text: params['rootPath']?.toString() ?? '/');
-              final gdriveScopeController = TextEditingController(text: params['scope']?.toString() ?? _gdriveScopeFile);
               final gdriveAccessController = TextEditingController(text: params['accessToken']?.toString() ?? '');
               final gdriveRefreshController = TextEditingController(text: params['refreshToken']?.toString() ?? '');
               final gdriveEmailController = TextEditingController(text: params['accountEmail']?.toString() ?? '');
@@ -3204,7 +3211,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                               ? null
                                               : () async {
                                                   await _startGdriveStorageOAuth(
-                                                    scope: gdriveScopeController.text.trim(),
                                                     existingRefreshToken: gdriveRefreshController.text,
                                                     onConnected: ({required accessToken, required refreshToken, required accountEmail, required expiresAtMs}) {
                                                       gdriveAccessController.text = accessToken;
@@ -3283,7 +3289,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                 final accessToken = gdriveAccessController.text.trim();
                                 final refreshToken = gdriveRefreshController.text.trim();
                                 storageParams['rootPath'] = gdriveRootController.text.trim();
-                                storageParams['scope'] = gdriveScopeController.text.trim();
+                                storageParams['scope'] = _gdriveScopeFile;
                                 storageParams['accessToken'] = accessToken;
                                 storageParams['refreshToken'] = refreshToken;
                                 storageParams['accountEmail'] = gdriveEmailController.text.trim();
@@ -3327,13 +3333,24 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
               if (result == null) {
                 return false;
               }
-              setStateDialog(() {
-                final index = working.indexWhere((item) => item.id == result.id);
-                if (index >= 0) {
-                  working[index] = result;
-                } else {
-                  working.add(result);
+              final nextWorking = List<BackupStorage>.from(working);
+              final index = nextWorking.indexWhere((item) => item.id == result.id);
+              if (index >= 0) {
+                nextWorking[index] = result;
+              } else {
+                nextWorking.add(result);
+              }
+              try {
+                await _saveStorageSettings(nextWorking, successMessage: existing == null ? 'Storage created' : 'Storage saved');
+              } catch (error, stackTrace) {
+                _logError('Saving storage failed.', error, stackTrace);
+                if (mounted) {
+                  _showSnackBarError('Saving storage failed: $error');
                 }
+                return false;
+              }
+              setStateDialog(() {
+                working = nextWorking;
               });
               return true;
             }
@@ -3344,19 +3361,9 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                 if (!context.mounted) {
                   return;
                 }
-                final changed = await editStorage(existing: initialStorage);
+                await editStorage(existing: initialStorage);
                 if (!context.mounted) {
                   return;
-                }
-                if (changed) {
-                  try {
-                    await _saveStorageSettings(working, successMessage: createNew ? 'Storage created' : 'Storage saved');
-                  } catch (error, stackTrace) {
-                    _logError('Saving storage failed.', error, stackTrace);
-                    if (mounted) {
-                      _showSnackBarError('Saving storage failed: $error');
-                    }
-                  }
                 }
                 if (context.mounted) {
                   Navigator.of(context).pop();
@@ -3393,15 +3400,27 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                 spacing: 8,
                                 children: [
                                   IconButton(
-                                    onPressed: () => editStorage(existing: storage),
+                                    onPressed: () async {
+                                      await editStorage(existing: storage);
+                                    },
                                     icon: const Icon(Icons.edit_outlined),
                                   ),
                                   IconButton(
                                     onPressed: isMandatoryFilesystem
                                         ? null
-                                        : () {
+                                        : () async {
+                                            final nextWorking = working.where((item) => item.id != storage.id).toList();
+                                            try {
+                                              await _saveStorageSettings(nextWorking, successMessage: 'Storage deleted');
+                                            } catch (error, stackTrace) {
+                                              _logError('Deleting storage failed.', error, stackTrace);
+                                              if (mounted) {
+                                                _showSnackBarError('Deleting storage failed: $error');
+                                              }
+                                              return;
+                                            }
                                             setStateDialog(() {
-                                              working.removeAt(index);
+                                              working = nextWorking;
                                             });
                                           },
                                     icon: const Icon(Icons.delete_outline),
@@ -3416,7 +3435,13 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                     const SizedBox(height: 12),
                     Align(
                       alignment: Alignment.centerLeft,
-                      child: OutlinedButton.icon(onPressed: () => editStorage(), icon: const Icon(Icons.add), label: const Text('New storage')),
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          await editStorage();
+                        },
+                        icon: const Icon(Icons.add),
+                        label: const Text('New storage'),
+                      ),
                     ),
                   ],
                 ),

@@ -2,7 +2,7 @@ import 'dart:io';
 
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 
-class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
+class FilesystemBackupDriver implements BackupDriver {
   FilesystemBackupDriver(this._storageRoot, {required int blockSizeMB}) : _blockSizeMB = blockSizeMB;
 
   final String _storageRoot;
@@ -18,6 +18,7 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
     supportsConditionalWrite: false,
     supportsVersioning: false,
     maxConcurrentWrites: 16,
+    maxConcurrentDirectoryListings: 1,
   );
 
   @override
@@ -48,42 +49,6 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
     }
     final shard = hash.substring(0, 2);
     return File('${blobsDir().path}${Platform.pathSeparator}$shard${Platform.pathSeparator}$hash');
-  }
-
-  @override
-  Future<Set<String>> listBlobShards() async {
-    final root = blobsDir();
-    if (!await root.exists()) {
-      return <String>{};
-    }
-    final names = <String>{};
-    await for (final entity in root.list(followLinks: false)) {
-      if (entity is Directory) {
-        names.add(baseName(entity.path));
-      }
-    }
-    return names;
-  }
-
-  @override
-  Future<Set<String>> listBlobNames(String shard) async {
-    final path = '${blobsDir().path}${Platform.pathSeparator}$shard';
-    final dir = Directory(path);
-    if (!await dir.exists()) {
-      return <String>{};
-    }
-    final names = <String>{};
-    await for (final entity in dir.list(followLinks: false)) {
-      if (entity is! File) {
-        continue;
-      }
-      final name = baseName(entity.path);
-      if (name.endsWith('.inprogress')) {
-        continue;
-      }
-      names.add(name);
-    }
-    return names;
   }
 
   @override

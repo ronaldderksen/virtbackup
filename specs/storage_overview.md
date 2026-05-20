@@ -29,7 +29,7 @@ Current expected params by built-in driver:
 
 - `gdrive`
 - `rootPath` (string)
-- `scope` (string)
+- `scope` (string, saved as `https://www.googleapis.com/auth/drive.file` by the GUI)
 - `accessToken` (string, decrypted in-memory)
 - `refreshToken` (string, decrypted in-memory)
 - `accessTokenEnc` (string, encrypted at rest)
