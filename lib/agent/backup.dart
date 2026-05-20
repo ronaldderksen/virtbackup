@@ -1421,7 +1421,6 @@ class _BlobDirectoryCache {
   final Map<String, Future<Set<String>>> _blobNamesInFlight = {};
   final Map<String, Future<void>> _shardCreateInFlight = {};
   final List<Completer<void>> _writeReadyWaiters = <Completer<void>>[];
-  final Map<String, DateTime> _lastExistsLogAt = <String, DateTime>{};
   Future<void>? _initializeInFlight;
   bool _writeReady = false;
 
@@ -1450,13 +1449,10 @@ class _BlobDirectoryCache {
     final shardKey = hash.substring(0, 2);
     final shardNames = _shardNames ?? <String>{};
     if (!shardNames.contains(shardKey)) {
-      _maybeLogExistsShard(shardKey, 'absent');
       return false;
     }
     final blobNames = await _loadBlobNames(shardKey);
-    final exists = blobNames.contains(hash);
-    _maybeLogExistsShard(shardKey, exists ? 'hit' : 'miss');
-    return exists;
+    return blobNames.contains(hash);
   }
 
   Future<void> prefetchHash(String hash) async {
@@ -1563,7 +1559,6 @@ class _BlobDirectoryCache {
     try {
       final names = await future;
       _blobNamesByShardKey[shardKey] = names;
-      LogWriter.logAgentSync(level: 'trace', message: 'blob-cache: shard scan completed shard=$shardKey blobCount=${names.length}');
       return names;
     } finally {
       _blobNamesInFlight.remove(shardKey);
@@ -1609,15 +1604,5 @@ class _BlobDirectoryCache {
       }
     }
     _writeReadyWaiters.clear();
-  }
-
-  void _maybeLogExistsShard(String shardKey, String result) {
-    final now = DateTime.now();
-    final last = _lastExistsLogAt[shardKey];
-    if (last != null && now.difference(last) < const Duration(seconds: 5)) {
-      return;
-    }
-    _lastExistsLogAt[shardKey] = now;
-    LogWriter.logAgentSync(level: 'trace', message: 'blob-cache: exists shard=$shardKey result=$result writeReady=$_writeReady');
   }
 }

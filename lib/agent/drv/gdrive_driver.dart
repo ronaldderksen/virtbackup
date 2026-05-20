@@ -1223,28 +1223,18 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       }
       final response = await send();
       stopwatch.stop();
-      await _appendApiLogLine('action=$action status=${response.statusCode} durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()}');
       return response;
     } catch (error, stackTrace) {
       stopwatch.stop();
       if (_closingConnections) {
-        await _appendApiLogLine('action=$action status=closed durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()}');
         throw 'gdrive $action stopped because the storage connection was closed';
       }
-      await _appendApiLogLine('action=$action status=error durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()} error=$error');
       await _logGdriveError(
         'gdrive: api request failed action=$action durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()} error=$error',
         stackTrace: stackTrace,
       );
       rethrow;
     }
-  }
-
-  Future<void> _appendApiLogLine(String line) async {
-    try {
-      await _configureAgentLogPath();
-      LogWriter.logAgentSync(level: 'debug', message: 'driver=gdrive $line');
-    } catch (_) {}
   }
 
   Future<void> _configureAgentLogPath() async {

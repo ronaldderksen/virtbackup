@@ -1375,7 +1375,6 @@ Stream<List<int>> _blobStream(
   }
   driver.setReadConcurrencyLimit(maxConcurrentDownloads);
   final localBlobCache = _BlobReadCache(maxBytes: 512 * 1024 * 1024);
-  final debug = _RestorePipelineDebug(mode: driver is RemoteBlobDriver ? 'remote' : 'local');
   var totalEmitted = 0;
   final remote = driver is RemoteBlobDriver ? driver as RemoteBlobDriver : null;
   if (remote != null) {
@@ -1385,7 +1384,6 @@ Stream<List<int>> _blobStream(
     final inFlight = <int, Future<_BlockData>>{};
 
     Future<_BlockData> startFetch(int index) async {
-      final fetchStartedAt = DateTime.now();
       if (isCanceled?.call() == true) {
         throw const _Canceled();
       }
@@ -1395,18 +1393,15 @@ Stream<List<int>> _blobStream(
         throw 'restore manifest block beyond file_size at index=$index';
       }
       if (block.zeroRun) {
-        debug.markFetchDone(index: index, source: 'zero', expectedLength: expectedLength, fetchStartedAt: fetchStartedAt);
         return _BlockData(index, expectedLength > 0 ? Uint8List(expectedLength) : const <int>[]);
       }
       final hash = block.hash;
       if (hash == null) {
-        debug.markFetchDone(index: index, source: 'empty', expectedLength: expectedLength, fetchStartedAt: fetchStartedAt);
         return const _BlockData.empty();
       }
       if (useStoredBlobs && localBlobDriver != null) {
         final localBytes = await _readLocalBlob(localBlobDriver, hash, expectedLength, index, cache: localBlobCache);
         if (localBytes != null) {
-          debug.markFetchDone(index: index, source: 'local-cache', expectedLength: expectedLength, fetchStartedAt: fetchStartedAt);
           return _BlockData(index, localBytes);
         }
       }
@@ -1428,18 +1423,13 @@ Stream<List<int>> _blobStream(
       if (storeDownloadedBlobs && localBlobDriver != null) {
         await _storeLocalBlob(localBlobDriver, hash, bytes, index);
       }
-      debug.markFetchDone(index: index, source: 'remote', expectedLength: expectedLength, fetchStartedAt: fetchStartedAt);
       return _BlockData(index, bytes);
     }
 
     void schedule() {
       while (inFlight.length < maxConcurrent && nextIndex < blocks.length) {
         final index = nextIndex;
-        debug.markScheduled(index);
-        final future = startFetch(index).then((data) {
-          debug.markReady(index);
-          return data;
-        });
+        final future = startFetch(index);
         unawaited(future.catchError((_) => const _BlockData.empty()));
         inFlight[index] = future;
         nextIndex += 1;
@@ -1450,7 +1440,6 @@ Stream<List<int>> _blobStream(
       schedule();
       while (nextEmit < blocks.length) {
         schedule();
-        debug.maybeLog(nextIndex: nextIndex, nextEmit: nextEmit, inFlight: inFlight.length);
         final future = inFlight[nextEmit];
         if (future == null) {
           await Future<void>.delayed(const Duration(milliseconds: 1));
@@ -1458,8 +1447,6 @@ Stream<List<int>> _blobStream(
         }
         final data = await future;
         inFlight.remove(nextEmit);
-        debug.markInFlightDone(nextEmit);
-        debug.markEmitted(index: data.index, bytes: data.bytes.length);
         if (data.bytes.isNotEmpty) {
           yield data.bytes;
           totalEmitted += data.bytes.length;
@@ -1473,7 +1460,6 @@ Stream<List<int>> _blobStream(
         } catch (_) {}
       }
     }
-    debug.maybeLog(nextIndex: nextIndex, nextEmit: nextEmit, inFlight: inFlight.length, force: true);
   } else {
     final maxConcurrent = maxConcurrentDownloads;
     var nextIndex = 0;
@@ -1481,7 +1467,6 @@ Stream<List<int>> _blobStream(
     final inFlight = <int, Future<_BlockData>>{};
 
     Future<_BlockData> startFetchLocal(int index) async {
-      final fetchStartedAt = DateTime.now();
       if (isCanceled?.call() == true) {
         throw const _Canceled();
       }
@@ -1491,7 +1476,6 @@ Stream<List<int>> _blobStream(
         throw 'restore manifest block beyond file_size at index=$index';
       }
       if (block.zeroRun) {
-        debug.markFetchDone(index: index, source: 'zero', expectedLength: expectedLength, fetchStartedAt: fetchStartedAt);
         if (expectedLength > 0) {
           return _BlockData(index, Uint8List(expectedLength));
         }
@@ -1499,7 +1483,6 @@ Stream<List<int>> _blobStream(
       }
       final hash = block.hash;
       if (hash == null) {
-        debug.markFetchDone(index: index, source: 'empty', expectedLength: expectedLength, fetchStartedAt: fetchStartedAt);
         return const _BlockData.empty();
       }
       final localBytes = await _readLocalBlob(driver, hash, expectedLength, index, cache: localBlobCache);
@@ -1507,18 +1490,13 @@ Stream<List<int>> _blobStream(
         final blobFile = driver.blobFile(hash);
         throw 'restore missing local blob hash=$hash index=$index path=${blobFile.path}';
       }
-      debug.markFetchDone(index: index, source: 'local', expectedLength: expectedLength, fetchStartedAt: fetchStartedAt);
       return _BlockData(index, localBytes);
     }
 
     void schedule() {
       while (inFlight.length < maxConcurrent && nextIndex < blocks.length) {
         final index = nextIndex;
-        debug.markScheduled(index);
-        final future = startFetchLocal(index).then((data) {
-          debug.markReady(index);
-          return data;
-        });
+        final future = startFetchLocal(index);
         unawaited(future.catchError((_) => const _BlockData.empty()));
         inFlight[index] = future;
         nextIndex += 1;
@@ -1529,7 +1507,6 @@ Stream<List<int>> _blobStream(
       schedule();
       while (nextEmit < blocks.length) {
         schedule();
-        debug.maybeLog(nextIndex: nextIndex, nextEmit: nextEmit, inFlight: inFlight.length);
         final future = inFlight[nextEmit];
         if (future == null) {
           await Future<void>.delayed(const Duration(milliseconds: 1));
@@ -1537,8 +1514,6 @@ Stream<List<int>> _blobStream(
         }
         final data = await future;
         inFlight.remove(nextEmit);
-        debug.markInFlightDone(nextEmit);
-        debug.markEmitted(index: data.index, bytes: data.bytes.length);
         if (data.bytes.isNotEmpty) {
           yield data.bytes;
           totalEmitted += data.bytes.length;
@@ -1552,7 +1527,6 @@ Stream<List<int>> _blobStream(
         } catch (_) {}
       }
     }
-    debug.maybeLog(nextIndex: nextIndex, nextEmit: nextEmit, inFlight: inFlight.length, force: true);
   }
   if (totalSize != null && totalEmitted < totalSize) {
     throw 'restore manifest incomplete: emitted $totalEmitted bytes, expected $totalSize';
@@ -1781,113 +1755,4 @@ double _smooth(double value, double next) {
     return next;
   }
   return (value * 0.8) + (next * 0.2);
-}
-
-class _RestorePipelineDebug {
-  _RestorePipelineDebug({required this.mode});
-
-  final String mode;
-  DateTime _lastLogAt = DateTime.now();
-  final Map<int, DateTime> _readyAt = <int, DateTime>{};
-  final Map<int, DateTime> _inFlightStartedAt = <int, DateTime>{};
-  int _fetchCount = 0;
-  int _fetchMsTotal = 0;
-  int _fetchMsMax = 0;
-  int _emitCount = 0;
-  int _emitBytes = 0;
-  int _holCount = 0;
-  int _holMsTotal = 0;
-  int _holMsMax = 0;
-  final Map<String, int> _sourceCounts = <String, int>{};
-
-  void markFetchDone({required int index, required String source, required int expectedLength, required DateTime fetchStartedAt}) {
-    final fetchMs = DateTime.now().difference(fetchStartedAt).inMilliseconds;
-    _fetchCount += 1;
-    _fetchMsTotal += fetchMs;
-    if (fetchMs > _fetchMsMax) {
-      _fetchMsMax = fetchMs;
-    }
-    _sourceCounts[source] = (_sourceCounts[source] ?? 0) + 1;
-  }
-
-  void markReady(int index) {
-    _readyAt[index] = DateTime.now();
-  }
-
-  void markScheduled(int index) {
-    _inFlightStartedAt[index] = DateTime.now();
-  }
-
-  void markInFlightDone(int index) {
-    _inFlightStartedAt.remove(index);
-  }
-
-  void markEmitted({required int index, required int bytes}) {
-    _emitCount += 1;
-    _emitBytes += bytes > 0 ? bytes : 0;
-    final readyAt = _readyAt.remove(index);
-    if (readyAt != null) {
-      final waitMs = DateTime.now().difference(readyAt).inMilliseconds;
-      _holCount += 1;
-      _holMsTotal += waitMs;
-      if (waitMs > _holMsMax) {
-        _holMsMax = waitMs;
-      }
-    }
-  }
-
-  void maybeLog({required int nextIndex, required int nextEmit, required int inFlight, bool force = false}) {
-    final now = DateTime.now();
-    final elapsedMs = now.difference(_lastLogAt).inMilliseconds;
-    if (!force && elapsedMs < 1000) {
-      return;
-    }
-    final sec = elapsedMs <= 0 ? 1.0 : (elapsedMs / 1000.0);
-    final emitMbPerSec = (_emitBytes / sec) / (1024 * 1024);
-    final fetchAvgMs = _fetchCount == 0 ? 0 : (_fetchMsTotal / _fetchCount).round();
-    final holAvgMs = _holCount == 0 ? 0 : (_holMsTotal / _holCount).round();
-    final sourceSummary = _sourceCounts.entries.map((entry) => '${entry.key}:${entry.value}').join(',');
-    int readyMin = -1;
-    int readyMax = -1;
-    for (final index in _readyAt.keys) {
-      if (readyMin < 0 || index < readyMin) {
-        readyMin = index;
-      }
-      if (readyMax < 0 || index > readyMax) {
-        readyMax = index;
-      }
-    }
-    int oldestInFlightIndex = -1;
-    int oldestInFlightAgeMs = 0;
-    for (final entry in _inFlightStartedAt.entries) {
-      final ageMs = now.difference(entry.value).inMilliseconds;
-      if (ageMs > oldestInFlightAgeMs) {
-        oldestInFlightAgeMs = ageMs;
-        oldestInFlightIndex = entry.key;
-      }
-    }
-    final nextEmitStartedAt = _inFlightStartedAt[nextEmit];
-    final nextEmitAgeMs = nextEmitStartedAt == null ? -1 : now.difference(nextEmitStartedAt).inMilliseconds;
-    final readyAhead = readyMin >= 0 && readyMin >= nextEmit ? (readyMin - nextEmit) : -1;
-    LogWriter.logAgentSync(
-      level: 'trace',
-      message:
-          'restore pipeline debug: mode=$mode nextEmit=$nextEmit nextIndex=$nextIndex inFlight=$inFlight '
-          'ready=${_readyAt.length} readyMin=$readyMin readyMax=$readyMax readyAhead=$readyAhead '
-          'oldestInFlightIndex=$oldestInFlightIndex oldestInFlightAgeMs=$oldestInFlightAgeMs nextEmitAgeMs=$nextEmitAgeMs '
-          'emitted=$_emitCount emittedMBps=${emitMbPerSec.toStringAsFixed(1)} '
-          'fetchCount=$_fetchCount fetchAvgMs=$fetchAvgMs fetchMaxMs=$_fetchMsMax '
-          'holCount=$_holCount holAvgMs=$holAvgMs holMaxMs=$_holMsMax sources=$sourceSummary',
-    );
-    _lastLogAt = now;
-    _fetchCount = 0;
-    _fetchMsTotal = 0;
-    _fetchMsMax = 0;
-    _emitCount = 0;
-    _emitBytes = 0;
-    _holCount = 0;
-    _holMsTotal = 0;
-    _holMsMax = 0;
-    _sourceCounts.clear();
-  }
 }

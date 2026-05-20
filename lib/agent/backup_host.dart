@@ -382,12 +382,7 @@ class BackupAgentHost {
       final stderrText = await utf8.decodeStream(session.stderr);
       await session.done;
       final exitCode = session.exitCode;
-      LogWriter.logAgentSync(level: 'trace', message: 'SSH exit code: ${exitCode ?? 0}');
-      final trimmedStdout = stdoutText.trim();
       final trimmedStderr = stderrText.trim();
-      if (trimmedStdout.isNotEmpty) {
-        LogWriter.logAgentSync(level: 'trace', message: 'SSH stdout: $trimmedStdout');
-      }
       if (trimmedStderr.isNotEmpty) {
         LogWriter.logAgentSync(level: 'info', message: 'SSH stderr: $trimmedStderr');
       }

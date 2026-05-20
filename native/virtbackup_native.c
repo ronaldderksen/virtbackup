@@ -597,20 +597,14 @@ int vb_sftp_write(void *file_ptr, const unsigned char *buffer, int length, int t
     return -1;
   }
   LIBSSH2_SESSION *session = file->sess->session;
-  double deadline = now_seconds() + ((double)timeout_ms / 1000.0);
   libssh2_session_set_blocking(session, 0);
   int total = 0;
   while (total < length) {
     ssize_t n = libssh2_sftp_write(file->handle, (const char *)buffer + total, length - total);
     if (n == LIBSSH2_ERROR_EAGAIN || n == 0) {
-      int remaining_ms = transfer_remaining_ms(deadline);
-      if (remaining_ms <= 0) {
+      if (wait_socket_ready_for(file->sess, VB_SFTP_TIMEOUT_MS) != 0) {
         libssh2_session_set_blocking(session, 1);
-        return -1;
-      }
-      if (wait_socket_ready_for(file->sess, remaining_ms < VB_SFTP_TIMEOUT_MS ? remaining_ms : VB_SFTP_TIMEOUT_MS) != 0) {
-        libssh2_session_set_blocking(session, 1);
-        return -1;
+        return total > 0 ? total : -1;
       }
       continue;
     }

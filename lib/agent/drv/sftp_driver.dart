@@ -436,13 +436,11 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       final lease = await selectedPool.lease(_connectNative);
       var released = false;
       final opStopwatch = Stopwatch()..start();
-      _logDebug('op start label="$label" mode=native lease={${_formatLeaseMetrics(lease.metrics)}}');
       try {
         final result = await Future<T>.sync(() => action(lease, bindings)).timeout(_callTimeout);
         opStopwatch.stop();
         lease.release();
         released = true;
-        _logDebug('op success label="$label" durationMs=${opStopwatch.elapsedMilliseconds} lease={${_formatLeaseMetrics(lease.metrics)}}');
         return result;
       } on TimeoutException catch (error) {
         opStopwatch.stop();
