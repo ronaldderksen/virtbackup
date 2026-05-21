@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.0 - 2026-05-21
+
+- Added a Job History log viewer and made incomplete history logs visible instead of silently failing.
+- Added History date presets and range shift controls for quickly moving a selected date window.
+- Improved Settings storage health checks and quick check behavior.
+- Hardened native SFTP transfers with stricter timeouts, safer retry handling, and restored read and write performance.
+- Reduced hot-path logging in storage drivers and workers to avoid unnecessary backup and restore throughput loss.
+- Improved backup preparation by keeping blob cache filling fast for Google Drive, SFTP, and filesystem storage.
+- Improved backup cleanup after cancellation or storage failures so temporary snapshots and overlays are cleaned up more reliably.
+- Kept completed hashblocks progress stable while remaining backup writes are still flushing.
+
 ## 1.0.0 - 2026-05-17
 
 - Improved the Settings storage list with a direct New storage action plus edit and delete actions on each storage entry.

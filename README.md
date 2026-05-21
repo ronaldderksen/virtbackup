@@ -20,7 +20,7 @@ Virt Backup is licensed under the Apache License 2.0. See `LICENSE`.
 
 - `filesystem`: stores manifests/blobs on a local path you choose.
 - `sftp`: stores manifests/blobs on a remote SFTP server.
-- `gdrive` (preview): stores manifests/blobs in Google Drive (with a local cache).
+- `gdrive`: stores manifests/blobs in Google Drive (with a local cache).
 
 ## Components
 

@@ -2566,7 +2566,7 @@ class AgentHttpServer {
       ),
       'gdrive': _DriverDescriptor(
         id: 'gdrive',
-        label: 'Google Drive (Preview)',
+        label: 'Google Drive',
         usesPath: false,
         capabilities: _gdriveCapabilities(),
         validateStart: () {
