@@ -148,6 +148,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String _historyFilterType = '';
   String _historyFilterVmName = '';
   String _historyFilterStorage = '';
+  String _historyDatePreset = '';
   String _historySortField = 'timestamp';
   bool _historySortAscending = false;
   final Set<String> _expandedHistoryJobIds = <String>{};

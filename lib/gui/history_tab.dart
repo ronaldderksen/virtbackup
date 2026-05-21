@@ -69,6 +69,8 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
     final types = entries.map((entry) => entry.type).toSet().toList()..sort((a, b) => _historyTypeLabel(a).toLowerCase().compareTo(_historyTypeLabel(b).toLowerCase()));
     final vmNames = entries.map((entry) => entry.vmName.trim()).where((value) => value.isNotEmpty).toSet().toList()..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
     final storageKeys = entries.map(_historyStorageFilterValue).where((value) => value.isNotEmpty).toSet().toList()..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    final canShiftHistoryDateRange = _canShiftHistoryDateRange(filters);
+    final canShiftHistoryDateRangeForward = _canShiftHistoryDateRangeForward(filters);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -137,13 +139,117 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
           runSpacing: 12,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
+            _buildHistoryDatePresetDropdown(),
             _buildHistoryDateFilterField(label: 'From', controller: _historyFromController, valid: filters.fromValid),
             _buildHistoryDateFilterField(label: 'To', controller: _historyToController, valid: filters.toValid),
+            if (canShiftHistoryDateRange) ...[
+              IconButton.filledTonal(onPressed: () => _shiftHistoryDateRange(forward: false), icon: const Icon(Icons.remove), tooltip: 'Move date range back'),
+              IconButton.filledTonal(onPressed: canShiftHistoryDateRangeForward ? () => _shiftHistoryDateRange(forward: true) : null, icon: const Icon(Icons.add), tooltip: 'Move date range forward'),
+            ],
             TextButton.icon(onPressed: _hasHistoryQuickFilter ? () => _updateUi(_clearHistoryQuickFilters) : null, icon: const Icon(Icons.filter_alt_off_outlined), label: const Text('Clear')),
           ],
         ),
       ],
     );
+  }
+
+  Widget _buildHistoryDatePresetDropdown() {
+    return SizedBox(
+      width: 180,
+      child: DropdownButtonFormField<String>(
+        initialValue: _historyDatePreset,
+        decoration: _scheduleDecoration(context, labelText: 'Preset'),
+        items: const [
+          DropdownMenuItem(value: '', child: Text('Date preset')),
+          DropdownMenuItem(value: 'today', child: Text('Today')),
+          DropdownMenuItem(value: 'yesterday', child: Text('Yesterday')),
+          DropdownMenuItem(value: 'last7', child: Text('Last 7 days')),
+          DropdownMenuItem(value: 'last30', child: Text('Last 30 days')),
+          DropdownMenuItem(value: 'thisMonth', child: Text('This month')),
+          DropdownMenuItem(value: 'lastMonth', child: Text('Last month')),
+        ],
+        onChanged: (value) {
+          if (value == null || value.isEmpty) {
+            return;
+          }
+          _applyHistoryDatePreset(value);
+        },
+      ),
+    );
+  }
+
+  void _applyHistoryDatePreset(String preset) {
+    final now = DateTime.now();
+    final todayStart = DateTime(now.year, now.month, now.day);
+    final (from, to) = switch (preset) {
+      'today' => (todayStart, _endOfDay(todayStart)),
+      'yesterday' => (todayStart.subtract(const Duration(days: 1)), _endOfDay(todayStart.subtract(const Duration(days: 1)))),
+      'last7' => (todayStart.subtract(const Duration(days: 6)), _endOfDay(todayStart)),
+      'last30' => (todayStart.subtract(const Duration(days: 29)), _endOfDay(todayStart)),
+      'thisMonth' => (DateTime(now.year, now.month), _endOfDay(DateTime(now.year, now.month + 1, 0))),
+      'lastMonth' => (DateTime(now.year, now.month - 1), _endOfDay(DateTime(now.year, now.month, 0))),
+      _ => (todayStart, _endOfDay(todayStart)),
+    };
+    _updateUi(() {
+      _historyDatePreset = preset;
+      _setHistoryDateFilterText(_historyFromController, _formatHistoryDateTimeInput(from), resetPreset: false);
+      _setHistoryDateFilterText(_historyToController, _formatHistoryDateTimeInput(to), resetPreset: false);
+    });
+  }
+
+  DateTime _endOfDay(DateTime day) {
+    return DateTime(day.year, day.month, day.day, 23, 59);
+  }
+
+  bool _canShiftHistoryDateRange(({String state, String type, String vmName, String storage, DateTime? from, bool fromValid, DateTime? to, bool toValid}) filters) {
+    final fromText = _historyFromController.text.trim();
+    final toText = _historyToController.text.trim();
+    if (fromText.isEmpty || toText.isEmpty || !filters.fromValid || !filters.toValid) {
+      return false;
+    }
+    final from = filters.from;
+    final to = filters.to;
+    return from != null && to != null && to.isAfter(from);
+  }
+
+  bool _canShiftHistoryDateRangeForward(({String state, String type, String vmName, String storage, DateTime? from, bool fromValid, DateTime? to, bool toValid}) filters) {
+    if (!_canShiftHistoryDateRange(filters)) {
+      return false;
+    }
+    final from = filters.from!;
+    final to = filters.to!;
+    final range = _historyDateRangeStep(from: from, to: to);
+    return !from.add(range).isAfter(DateTime.now());
+  }
+
+  void _shiftHistoryDateRange({required bool forward}) {
+    final from = _parseHistoryDateTimeFilter(_historyFromController.text.trim());
+    final to = _parseHistoryDateTimeFilter(_historyToController.text.trim());
+    if (from == null || to == null || !to.isAfter(from)) {
+      return;
+    }
+    final range = _historyDateRangeStep(from: from, to: to);
+    final signedRange = forward ? range : -range;
+    final nextFrom = from.add(signedRange);
+    if (forward && nextFrom.isAfter(DateTime.now())) {
+      return;
+    }
+    final nextTo = to.add(signedRange);
+    _updateUi(() {
+      _setHistoryDateFilterText(_historyFromController, _formatHistoryDateTimeInput(nextFrom));
+      _setHistoryDateFilterText(_historyToController, _formatHistoryDateTimeInput(nextTo), resetPreset: false);
+    });
+  }
+
+  void _setHistoryDateFilterText(TextEditingController controller, String value, {bool resetPreset = true}) {
+    if (resetPreset) {
+      _historyDatePreset = '';
+    }
+    controller.text = value;
+  }
+
+  Duration _historyDateRangeStep({required DateTime from, required DateTime to}) {
+    return to.add(const Duration(minutes: 1)).difference(from);
   }
 
   Widget _buildHistoryDateFilterField({required String label, required TextEditingController controller, required bool valid}) {
@@ -161,7 +267,7 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
           ),
         ),
         keyboardType: TextInputType.datetime,
-        onChanged: (_) => _updateUi(() {}),
+        onChanged: (_) => _updateUi(() => _historyDatePreset = ''),
       ),
     );
   }
@@ -529,6 +635,7 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
     _historyFilterType = '';
     _historyFilterVmName = '';
     _historyFilterStorage = '';
+    _historyDatePreset = '';
     _historyFromController.clear();
     _historyToController.clear();
   }
@@ -610,7 +717,7 @@ extension _BackupServerSetupHistorySection on _BackupServerSetupScreenState {
     }
     final selected = DateTime(date.year, date.month, date.day, time.hour, time.minute);
     _updateUi(() {
-      controller.text = _formatHistoryDateTimeInput(selected);
+      _setHistoryDateFilterText(controller, _formatHistoryDateTimeInput(selected));
     });
   }
 
