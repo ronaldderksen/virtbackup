@@ -225,6 +225,7 @@ class BackupAgent {
       if (activeDisks.isEmpty || inactiveDisks.isEmpty) {
         throw 'No disk files found for ${vm.name}.';
       }
+      disks = inactiveDisks;
       _ensureNoPendingCleanup(activeDisks: activeDisks, inactiveDisks: inactiveDisks);
 
       if (_requireSimpleDisksForBackup) {
@@ -342,9 +343,7 @@ class BackupAgent {
       }
       if (snapshotCreated) {
         try {
-          _setProgress(_progress.copyWith(statusMessage: isCanceled ? 'Committing snapshot after cancel...' : 'Committing snapshot after failure...', vmCleanupRequired: true));
-          await _dependencies.commitVmSnapshot(server, vm, disks);
-          _setProgress(_progress.copyWith(vmCleanupRequired: false));
+          await _cleanupSnapshotAfterInterruptedBackup(server: server, vm: vm, disks: disks, isCanceled: isCanceled);
         } catch (commitError, commitStack) {
           _onError?.call('Snapshot commit failed.', commitError, commitStack);
         }
@@ -381,6 +380,57 @@ class BackupAgent {
       _setProgress(_progress.copyWith(isRunning: false, statusMessage: '', speedBytesPerSec: 0, physicalSpeedBytesPerSec: 0, sanitySpeedBytesPerSec: 0));
       _isRunning = false;
     }
+  }
+
+  Future<List<MapEntry<String, String>>> _snapshotCleanupDisks({required ServerConfig server, required VmEntry vm, required List<MapEntry<String, String>> disks}) async {
+    if (disks.isNotEmpty) {
+      return disks;
+    }
+    try {
+      final inactiveDisks = await _dependencies.loadVmDiskPaths(server, vm, inactive: true);
+      if (inactiveDisks.isNotEmpty) {
+        return inactiveDisks;
+      }
+    } catch (_) {}
+    return _dependencies.loadVmDiskPaths(server, vm);
+  }
+
+  Future<void> _cleanupSnapshotAfterInterruptedBackup({required ServerConfig server, required VmEntry vm, required List<MapEntry<String, String>> disks, required bool isCanceled}) async {
+    _setProgress(_progress.copyWith(statusMessage: isCanceled ? 'Committing snapshot after cancel...' : 'Committing snapshot after failure...', vmCleanupRequired: true));
+    final cleanupDisks = await _snapshotCleanupDisks(server: server, vm: vm, disks: disks);
+    await _dependencies.commitVmSnapshot(server, vm, cleanupDisks);
+    await _cleanupRemainingActiveOverlays(server: server, vm: vm);
+    _setProgress(_progress.copyWith(vmCleanupRequired: false));
+  }
+
+  Future<void> _cleanupRemainingActiveOverlays({required ServerConfig server, required VmEntry vm}) async {
+    final activeDisks = await _dependencies.loadVmDiskPaths(server, vm);
+    final inactiveDisks = await _dependencies.loadVmDiskPaths(server, vm, inactive: true);
+    if (!_hasOverlayCleanupCandidate(activeDisks: activeDisks, inactiveDisks: inactiveDisks)) {
+      return;
+    }
+    _logInfo('Snapshot cleanup verification found remaining active overlay paths for ${vm.name}.');
+    await _dependencies.cleanupActiveOverlays(server, vm, activeDisks, inactiveDisks);
+  }
+
+  bool _hasOverlayCleanupCandidate({required List<MapEntry<String, String>> activeDisks, required List<MapEntry<String, String>> inactiveDisks}) {
+    if (activeDisks.isEmpty || inactiveDisks.isEmpty) {
+      return false;
+    }
+    final inactiveByTarget = {for (final entry in inactiveDisks) entry.key: entry.value};
+    for (final entry in activeDisks) {
+      final inactiveSource = inactiveByTarget[entry.key];
+      if (inactiveSource == null) {
+        continue;
+      }
+      if (entry.value != inactiveSource) {
+        return true;
+      }
+      if (entry.value.toLowerCase().contains('.virtbackup-')) {
+        return true;
+      }
+    }
+    return false;
   }
 
   void _handleBytes(int bytes) {
@@ -1405,9 +1455,12 @@ class _LocalManifestWrite {
 }
 
 class BlobDirectoryCache {
-  BlobDirectoryCache({required BackupDriver driver, required this.createShard, required this.ensureNotCanceled, this.onShardCreateProgress, this.ensureMissingShards = true}) : _driver = driver;
+  BlobDirectoryCache({required BackupDriver driver, required this.createShard, required this.ensureNotCanceled, this.onShardCreateProgress, this.ensureMissingShards = true})
+    : _driver = driver,
+      _blobDirectoryLister = driver is BlobDirectoryLister ? driver as BlobDirectoryLister : null;
 
   final BackupDriver _driver;
+  final BlobDirectoryLister? _blobDirectoryLister;
   final Future<void> Function(String hash) createShard;
   final void Function() ensureNotCanceled;
   final void Function(int created, int total)? onShardCreateProgress;
@@ -1562,6 +1615,19 @@ class BlobDirectoryCache {
       await inFlight;
       return _shardNames ?? <String>{};
     }
+    final lister = _blobDirectoryLister;
+    if (lister != null) {
+      final future = () async {
+        _shardNames = await lister.listBlobShards();
+      }();
+      _shardsInFlight = future;
+      try {
+        await future;
+        return _shardNames ?? <String>{};
+      } finally {
+        _shardsInFlight = null;
+      }
+    }
     final future = _loadBlobDirectory();
     _shardsInFlight = future;
     try {
@@ -1576,6 +1642,13 @@ class BlobDirectoryCache {
     final cached = _blobNamesByShardKey[shardKey];
     if (cached != null) {
       return cached;
+    }
+    final lister = _blobDirectoryLister;
+    if (lister != null) {
+      final names = await lister.listBlobNames(shardKey);
+      (_shardNames ??= <String>{}).add(shardKey);
+      _blobNamesByShardKey[shardKey] = names;
+      return names;
     }
     final inFlight = _blobDirectoryLoadInFlight;
     if (inFlight != null) {
@@ -1671,6 +1744,13 @@ class BlobDirectoryCache {
     if (cached != null) {
       (_shardNames ??= <String>{}).add(shardKey);
       return cached;
+    }
+    final lister = _blobDirectoryLister;
+    if (lister != null) {
+      final names = await lister.listBlobNames(shardKey);
+      (_shardNames ??= <String>{}).add(shardKey);
+      _blobNamesByShardKey[shardKey] = names;
+      return names;
     }
     final files = await _driver.listRelativeFiles('blobs/$activeBlockSize/$shardKey');
     final blobNames = <String>{};

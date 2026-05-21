@@ -89,3 +89,8 @@ abstract class RemoteBlobDriver {
   Stream<List<int>> openBlobStream(String hash, {int? length});
   Future<List<int>?> readBlobBytes(String hash);
 }
+
+abstract class BlobDirectoryLister {
+  Future<Set<String>> listBlobShards();
+  Future<Set<String>> listBlobNames(String shard);
+}

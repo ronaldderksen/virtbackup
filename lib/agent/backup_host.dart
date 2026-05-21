@@ -680,12 +680,12 @@ class BackupAgentHost {
           continue;
         }
         final command = await _blockCommitCommand(server, vm, target, verbose: false, top: activeIsVirtbackup ? activeSource : null, base: activeIsVirtbackup ? inactiveSource : null);
-        await _runSshCommandForServer(server, command);
+        await _runCheckedSshCommand(server, command, 'Cleanup blockcommit failed for ${vm.name} target $target.');
         continue;
       }
       if (_sourcePathLooksLikeOverlay(activeSource)) {
         final command = await _blockCommitCommand(server, vm, target, verbose: false, top: activeSource, base: inactiveSource);
-        await _runSshCommandForServer(server, command);
+        await _runCheckedSshCommand(server, command, 'Cleanup blockcommit failed for ${vm.name} target $target.');
       }
     }
   }
@@ -875,6 +875,7 @@ class BackupAgentHost {
     if (state == 'running') {
       args.add('--active');
     }
+    args.add('--wait');
     args.add('--pivot');
     if (top != null && top.isNotEmpty) {
       args.add('--top "$top"');
