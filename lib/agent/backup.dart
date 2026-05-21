@@ -92,6 +92,11 @@ class BackupAgent {
   int _writerQueuedBytes = 0;
   int _writerInFlightBytes = 0;
   int _driverBufferedBytes = 0;
+  bool _logicalProgressFrozen = false;
+  int _frozenLogicalBytesTransferred = 0;
+  double _frozenLogicalSpeedBytesPerSec = 0;
+  double _frozenAverageLogicalSpeedBytesPerSec = 0;
+  int? _frozenLogicalEtaSeconds;
   DateTime? _backupStartAt;
   final int _blockSize;
   final bool _requireSimpleDisksForBackup;
@@ -169,6 +174,11 @@ class BackupAgent {
     _writerQueuedBytes = 0;
     _writerInFlightBytes = 0;
     _driverBufferedBytes = 0;
+    _logicalProgressFrozen = false;
+    _frozenLogicalBytesTransferred = 0;
+    _frozenLogicalSpeedBytesPerSec = 0;
+    _frozenAverageLogicalSpeedBytesPerSec = 0;
+    _frozenLogicalEtaSeconds = null;
     _backupStartAt = DateTime.now();
     _startSpeedTimer();
     _startProgressLogTimer();
@@ -434,6 +444,9 @@ class BackupAgent {
   }
 
   void _handleBytes(int bytes) {
+    if (bytes > 0) {
+      _logicalProgressFrozen = false;
+    }
     _logicalBytesTransferred += bytes;
     _progress = _progress.copyWith(bytesTransferred: _logicalBytesTransferred);
   }
@@ -552,16 +565,19 @@ class BackupAgent {
   }
 
   BackupAgentProgress _decorateProgress(BackupAgentProgress progress) {
-    final displayBytes = _computeDisplayBytesTransferred(progress.totalBytes);
     final elapsedSec = _elapsedBackupSeconds();
-    final avgLogical = elapsedSec > 0 ? _logicalBytesTransferred / elapsedSec : 0.0;
+    final liveAvgLogical = elapsedSec > 0 ? _logicalBytesTransferred / elapsedSec : 0.0;
     final avgPhysical = elapsedSec > 0 ? _physicalBytesTransferred / elapsedSec : 0.0;
     final physicalRemaining = _writerQueuedBytes + _writerInFlightBytes + _driverBufferedBytes;
     final physicalTotal = _physicalBytesTransferred + physicalRemaining;
     final physicalPercent = physicalTotal > 0 ? (_physicalBytesTransferred / physicalTotal) * 100 : 0.0;
-    final etaSeconds = _calculateEtaSeconds(avgLogical, avgPhysical, progress.totalBytes, physicalRemaining);
+    final displayBytes = _logicalProgressFrozen ? _frozenLogicalBytesTransferred : _computeDisplayBytesTransferred(progress.totalBytes);
+    final logicalSpeed = _logicalProgressFrozen ? _frozenLogicalSpeedBytesPerSec : progress.speedBytesPerSec;
+    final avgLogical = _logicalProgressFrozen ? _frozenAverageLogicalSpeedBytesPerSec : liveAvgLogical;
+    final etaSeconds = _logicalProgressFrozen ? _frozenLogicalEtaSeconds : _calculateEtaSeconds(avgLogical, progress.totalBytes);
     return progress.copyWith(
       bytesTransferred: displayBytes,
+      speedBytesPerSec: logicalSpeed,
       averageSpeedBytesPerSec: avgLogical,
       averagePhysicalSpeedBytesPerSec: avgPhysical,
       etaSeconds: etaSeconds,
@@ -594,7 +610,19 @@ class BackupAgent {
     return elapsed > 0 ? elapsed : 0;
   }
 
-  int? _calculateEtaSeconds(double avgLogical, double avgPhysical, int totalBytes, int physicalRemainingBytes) {
+  void _freezeLogicalProgress() {
+    final totalBytes = _progress.totalBytes;
+    final elapsedSec = _elapsedBackupSeconds();
+    final avgLogical = elapsedSec > 0 ? _logicalBytesTransferred / elapsedSec : 0.0;
+    _frozenLogicalBytesTransferred = totalBytes > 0 ? min(_logicalBytesTransferred, totalBytes) : _logicalBytesTransferred;
+    _frozenLogicalSpeedBytesPerSec = _progress.speedBytesPerSec;
+    _frozenAverageLogicalSpeedBytesPerSec = avgLogical;
+    _frozenLogicalEtaSeconds = _calculateEtaSeconds(avgLogical, totalBytes);
+    _logicalProgressFrozen = true;
+    _setProgress(_progress);
+  }
+
+  int? _calculateEtaSeconds(double avgLogical, int totalBytes) {
     if (totalBytes <= 0) {
       return null;
     }
@@ -604,12 +632,6 @@ class BackupAgent {
       }
       final remainingLogical = totalBytes - _logicalBytesTransferred;
       return (remainingLogical / avgLogical).ceil();
-    }
-    if (physicalRemainingBytes > 0) {
-      if (avgPhysical <= 0) {
-        return null;
-      }
-      return (physicalRemainingBytes / avgPhysical).ceil();
     }
     return 0;
   }
@@ -1060,6 +1082,7 @@ class BackupAgent {
         wakeMissingWorker = null;
       }
       await missingWorkerFuture;
+      _freezeLogicalProgress();
       writerWorker.signalDone();
       await writerFuture;
       writerAwaited = true;
