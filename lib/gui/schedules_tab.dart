@@ -291,7 +291,8 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
   }
 
   String _scheduleServerVmKey(ScheduledJob schedule) {
-    return '${schedule.serverId}\u0000${schedule.backupAllVms || schedule.restoreAllLatestVms ? '__all_vms__' : schedule.vmName}';
+    final vmKey = schedule.backupAllVms || schedule.restoreAllLatestVms ? '__all_vms__' : schedule.vmNames.join('\u0001');
+    return '${schedule.serverId}\u0000$vmKey';
   }
 
   String _scheduleServerVmLabel(String key) {
@@ -299,7 +300,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
     if (parts.length != 2) {
       return key;
     }
-    final vmLabel = parts[1] == '__all_vms__' ? 'All VMs' : parts[1];
+    final vmLabel = parts[1] == '__all_vms__' ? 'All VMs' : _scheduleVmListLabel(parts[1].split('\u0001').where((name) => name.trim().isNotEmpty).toList());
     return '${_serverNameForId(parts[0])} - $vmLabel';
   }
 
@@ -324,15 +325,25 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
       if (schedule.backupAllVms) {
         return '$cadence • backup all VMs on $serverName to $storageName${_scheduleWaitSummary(schedule)}';
       }
-      return '$cadence • backup ${schedule.vmName} on $serverName to $storageName${_scheduleWaitSummary(schedule)}';
+      return '$cadence • backup ${_scheduleVmListLabel(schedule.vmNames)} on $serverName to $storageName${_scheduleWaitSummary(schedule)}';
     }
     if (schedule.restoreAllLatestVms) {
       return '$cadence • restore latest XML for all VMs to $serverName from $storageName${_scheduleWaitSummary(schedule)}';
     }
     if (schedule.restoreXmlPath == ScheduledJob.latestRestoreXmlPath) {
-      return '$cadence • restore latest ${schedule.vmName} XML to $serverName from $storageName${_scheduleWaitSummary(schedule)}';
+      return '$cadence • restore latest ${_scheduleVmListLabel(schedule.vmNames)} XML to $serverName from $storageName${_scheduleWaitSummary(schedule)}';
     }
     return '$cadence • restore ${schedule.restoreXmlPath} to $serverName from $storageName${_scheduleWaitSummary(schedule)}';
+  }
+
+  String _scheduleVmListLabel(List<String> vmNames) {
+    if (vmNames.isEmpty) {
+      return 'VM';
+    }
+    if (vmNames.length == 1) {
+      return vmNames.single;
+    }
+    return '${vmNames.length} VMs';
   }
 
   String _scheduleWaitSummary(ScheduledJob schedule) {
@@ -482,7 +493,10 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
     var weekdays = List<int>.from(existing?.weekdays ?? <int>[]);
     var serverId = existing?.serverId ?? _defaultScheduleServerId(type);
     var storageId = existing?.storageId ?? (_enabledStorages().isNotEmpty ? _enabledStorages().first.id : null);
-    var vmName = existing?.vmName ?? '';
+    var vmNames = List<String>.from(existing?.vmNames ?? <String>[]);
+    if (vmNames.isEmpty && existing != null && existing.vmName.trim().isNotEmpty) {
+      vmNames = <String>[existing.vmName.trim()];
+    }
     var restoreXmlPath = existing?.restoreXmlPath ?? '';
     var restoreDecision = existing?.restoreDecision ?? 'overwrite';
     String? validationError;
@@ -513,7 +527,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                   frequency: frequency,
                   weekdays: weeklyDays,
                   type: type,
-                  vmName: vmName.trim(),
+                  vmNames: vmNames,
                   backupAllVms: backupAllVms,
                   restoreAllLatestVms: restoreAllLatestVms,
                   restoreXmlPath: restoreXmlPath.trim(),
@@ -528,7 +542,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                         frequency: frequency,
                         weekdays: weeklyDays,
                         type: type,
-                        vmName: vmName.trim(),
+                        vmNames: vmNames,
                         backupAllVms: backupAllVms,
                         restoreAllLatestVms: restoreAllLatestVms,
                         restoreXmlPath: restoreXmlPath.trim(),
@@ -550,7 +564,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
               final storageOptions = type == ScheduledJobType.restore ? _enabledStorages().where((storage) => storage.driverId != 'dummy').toList() : _enabledStorages();
               final restoreEntries = storageId == _selectedBackupStorageId ? _restoreEntries : <RestoreEntry>[];
               final restoreVmOptions = restoreEntries.map((entry) => entry.vmName).toSet().toList()..sort();
-              final filteredRestoreEntries = vmName.trim().isEmpty || restoreAllLatestVms ? restoreEntries : restoreEntries.where((entry) => entry.vmName == vmName.trim()).toList();
+              final filteredRestoreEntries = vmNames.length != 1 || restoreAllLatestVms ? <RestoreEntry>[] : restoreEntries.where((entry) => entry.vmName == vmNames.single).toList();
               final selectedRestoreEntry = _restoreEntryByXmlPath(restoreEntries, restoreXmlPath);
               return AlertDialog(
                 title: Text(existing == null ? 'Add ${type.name} schedule' : 'Edit schedule'),
@@ -653,7 +667,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                           onChanged: (value) {
                             updateDialog(() {
                               serverId = value;
-                              vmName = '';
+                              vmNames = <String>[];
                             });
                             final server = value == null ? null : _serverById(value);
                             if (server != null) {
@@ -676,7 +690,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                             updateDialog(() {
                               storageId = value;
                               restoreXmlPath = '';
-                              vmName = '';
+                              vmNames = <String>[];
                             });
                             if (type == ScheduledJobType.restore && value != null) {
                               unawaited(
@@ -700,16 +714,17 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                                 onChanged: (value) => updateDialog(() {
                                   backupAllVms = value;
                                   if (value) {
-                                    vmName = '';
+                                    vmNames = <String>[];
                                   }
                                 }),
                               ),
                               if (!backupAllVms)
-                                DropdownButtonFormField<String>(
-                                  initialValue: vmOptions.any((vm) => vm.name == vmName) ? vmName : null,
-                                  decoration: _scheduleDecoration(context, labelText: 'VM', invalid: invalidFields.contains('vm')),
-                                  items: vmOptions.map((vm) => DropdownMenuItem(value: vm.name, child: Text(vm.name))).toList(),
-                                  onChanged: (value) => updateDialog(() => vmName = value ?? ''),
+                                _buildScheduleVmMultiSelect(
+                                  label: 'VMs',
+                                  options: vmOptions.map((vm) => vm.name).toList(),
+                                  selected: vmNames,
+                                  invalid: invalidFields.contains('vm'),
+                                  onChanged: (selected) => updateDialog(() => vmNames = selected),
                                 ),
                             ],
                           )
@@ -721,7 +736,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                             onChanged: (value) => updateDialog(() {
                               restoreAllLatestVms = value;
                               if (value) {
-                                vmName = '';
+                                vmNames = <String>[];
                                 restoreXmlPath = ScheduledJob.latestRestoreXmlPath;
                               } else {
                                 restoreXmlPath = '';
@@ -729,15 +744,16 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                             }),
                           ),
                           if (!restoreAllLatestVms) ...[
-                            DropdownButtonFormField<String>(
-                              initialValue: restoreVmOptions.contains(vmName) ? vmName : null,
-                              decoration: _scheduleDecoration(context, labelText: 'VM', invalid: invalidFields.contains('vm')),
-                              items: restoreVmOptions.map((name) => DropdownMenuItem(value: name, child: Text(name))).toList(),
-                              onChanged: (value) {
+                            _buildScheduleVmMultiSelect(
+                              label: 'VMs',
+                              options: restoreVmOptions,
+                              selected: vmNames,
+                              invalid: invalidFields.contains('vm'),
+                              onChanged: (selected) {
                                 updateDialog(() {
-                                  vmName = value ?? '';
+                                  vmNames = selected;
                                   backupAllVms = false;
-                                  restoreXmlPath = '';
+                                  restoreXmlPath = selected.length == 1 ? restoreXmlPath : ScheduledJob.latestRestoreXmlPath;
                                 });
                               },
                             ),
@@ -747,7 +763,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                               initialValue: restoreXmlPath == ScheduledJob.latestRestoreXmlPath || filteredRestoreEntries.any((entry) => entry.xmlPath == restoreXmlPath) ? restoreXmlPath : null,
                               decoration: _scheduleDecoration(context, labelText: 'Backup XML', invalid: invalidFields.contains('restoreXmlPath')),
                               items: [
-                                const DropdownMenuItem(value: ScheduledJob.latestRestoreXmlPath, child: Text('Latest XML for selected VM')),
+                                DropdownMenuItem(value: ScheduledJob.latestRestoreXmlPath, child: Text(vmNames.length > 1 ? 'Latest XML for each selected VM' : 'Latest XML for selected VM')),
                                 ...filteredRestoreEntries.map((entry) => DropdownMenuItem(value: entry.xmlPath, child: Text('${entry.vmName} • ${entry.timestamp}'))),
                               ],
                               onChanged: (value) => updateDialog(() => restoreXmlPath = value ?? ''),
@@ -795,15 +811,16 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                             final time = _normalizeScheduleTimeInput(rawTime, frequency);
                             final currentServerId = serverId?.trim() ?? '';
                             final currentStorageId = storageId?.trim() ?? '';
-                            final currentVmName = vmName.trim();
+                            final currentVmNames = _normalizedSelectedVmNames(vmNames);
+                            final currentVmName = currentVmNames.isEmpty ? '' : currentVmNames.first;
                             final effectiveRestoreAllLatestVms = type == ScheduledJobType.restore && restoreAllLatestVms;
-                            final currentRestoreXmlPath = effectiveRestoreAllLatestVms ? ScheduledJob.latestRestoreXmlPath : restoreXmlPath.trim();
+                            final currentRestoreXmlPath = effectiveRestoreAllLatestVms || currentVmNames.length > 1 ? ScheduledJob.latestRestoreXmlPath : restoreXmlPath.trim();
                             final effectiveBackupAllVms = type == ScheduledJobType.backup && backupAllVms;
                             final name = _generateScheduleName(
                               type: type,
                               serverId: currentServerId,
                               storageId: currentStorageId,
-                              vmName: currentVmName,
+                              vmNames: currentVmNames,
                               backupAllVms: effectiveBackupAllVms,
                               restoreAllLatestVms: effectiveRestoreAllLatestVms,
                             );
@@ -815,7 +832,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                               frequency: frequency,
                               weekdays: weeklyDays,
                               type: type,
-                              vmName: currentVmName,
+                              vmNames: currentVmNames,
                               backupAllVms: effectiveBackupAllVms,
                               restoreAllLatestVms: effectiveRestoreAllLatestVms,
                               restoreXmlPath: currentRestoreXmlPath,
@@ -827,7 +844,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                               frequency: frequency,
                               weekdays: weeklyDays,
                               type: type,
-                              vmName: currentVmName,
+                              vmNames: currentVmNames,
                               backupAllVms: effectiveBackupAllVms,
                               restoreAllLatestVms: effectiveRestoreAllLatestVms,
                               restoreXmlPath: currentRestoreXmlPath,
@@ -854,6 +871,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                                 backupAllVms: effectiveBackupAllVms,
                                 restoreAllLatestVms: effectiveRestoreAllLatestVms,
                                 vmName: effectiveBackupAllVms || effectiveRestoreAllLatestVms ? '' : currentVmName,
+                                vmNames: effectiveBackupAllVms || effectiveRestoreAllLatestVms ? <String>[] : currentVmNames,
                                 restoreXmlPath: type == ScheduledJobType.restore ? currentRestoreXmlPath : '',
                                 restoreDecision: type == ScheduledJobType.restore ? restoreDecision : '',
                               ),
@@ -918,6 +936,59 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
     );
   }
 
+  Widget _buildScheduleVmMultiSelect({required String label, required List<String> options, required List<String> selected, required bool invalid, required ValueChanged<List<String>> onChanged}) {
+    final normalizedSelected = _normalizedSelectedVmNames(selected);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: Theme.of(context).textTheme.labelLarge),
+        const SizedBox(height: 8),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            border: Border.all(color: invalid ? Theme.of(context).colorScheme.error : Colors.transparent),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: options.isEmpty
+              ? Text('No VMs available.', style: Theme.of(context).textTheme.bodyMedium)
+              : Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: options.map((name) {
+                    final selected = normalizedSelected.contains(name);
+                    return FilterChip(
+                      selected: selected,
+                      label: Text(name),
+                      onSelected: (value) {
+                        final next = List<String>.from(normalizedSelected);
+                        if (value) {
+                          next.add(name);
+                        } else {
+                          next.remove(name);
+                        }
+                        onChanged(_normalizedSelectedVmNames(next));
+                      },
+                    );
+                  }).toList(),
+                ),
+        ),
+      ],
+    );
+  }
+
+  List<String> _normalizedSelectedVmNames(List<String> vmNames) {
+    final result = <String>[];
+    for (final vmName in vmNames) {
+      final normalized = vmName.trim();
+      if (normalized.isNotEmpty && !result.contains(normalized)) {
+        result.add(normalized);
+      }
+    }
+    result.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return result;
+  }
+
   String? _scheduleValidationError({
     required String time,
     required String serverId,
@@ -925,7 +996,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
     required ScheduleFrequency frequency,
     required List<int> weekdays,
     required ScheduledJobType type,
-    required String vmName,
+    required List<String> vmNames,
     required bool backupAllVms,
     required bool restoreAllLatestVms,
     required String restoreXmlPath,
@@ -946,11 +1017,11 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
     if (storageId.isEmpty) {
       return 'Select a storage.';
     }
-    if (type == ScheduledJobType.backup && !backupAllVms && vmName.isEmpty) {
-      return 'Select a VM.';
+    if (type == ScheduledJobType.backup && !backupAllVms && vmNames.isEmpty) {
+      return 'Select at least one VM.';
     }
-    if (type == ScheduledJobType.restore && !restoreAllLatestVms && vmName.isEmpty) {
-      return 'Select a VM.';
+    if (type == ScheduledJobType.restore && !restoreAllLatestVms && vmNames.isEmpty) {
+      return 'Select at least one VM.';
     }
     if (type == ScheduledJobType.restore && !restoreAllLatestVms && restoreXmlPath.isEmpty) {
       return 'Select a backup XML option.';
@@ -965,7 +1036,7 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
     required ScheduleFrequency frequency,
     required List<int> weekdays,
     required ScheduledJobType type,
-    required String vmName,
+    required List<String> vmNames,
     required bool backupAllVms,
     required bool restoreAllLatestVms,
     required String restoreXmlPath,
@@ -987,10 +1058,10 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
     if (storageId.isEmpty) {
       fields.add('storage');
     }
-    if (type == ScheduledJobType.backup && !backupAllVms && vmName.isEmpty) {
+    if (type == ScheduledJobType.backup && !backupAllVms && vmNames.isEmpty) {
       fields.add('vm');
     }
-    if (type == ScheduledJobType.restore && !restoreAllLatestVms && vmName.isEmpty) {
+    if (type == ScheduledJobType.restore && !restoreAllLatestVms && vmNames.isEmpty) {
       fields.add('vm');
     }
     if (type == ScheduledJobType.restore && !restoreAllLatestVms && restoreXmlPath.isEmpty) {
@@ -1003,14 +1074,14 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
     required ScheduledJobType type,
     required String serverId,
     required String storageId,
-    required String vmName,
+    required List<String> vmNames,
     required bool backupAllVms,
     required bool restoreAllLatestVms,
   }) {
     final typeLabel = type == ScheduledJobType.backup ? 'Backup' : 'Restore';
     final serverName = _serverNameForId(serverId);
     final storageName = _storageNameForId(storageId);
-    final vmLabel = backupAllVms || restoreAllLatestVms ? 'all VMs' : (vmName.trim().isEmpty ? 'VM' : vmName.trim());
+    final vmLabel = backupAllVms || restoreAllLatestVms ? 'all VMs' : _scheduleVmListLabel(vmNames);
     final direction = type == ScheduledJobType.backup ? 'to' : 'from';
     return '$typeLabel $vmLabel on $serverName $direction $storageName';
   }

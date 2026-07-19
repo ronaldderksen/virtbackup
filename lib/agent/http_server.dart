@@ -311,12 +311,12 @@ class AgentHttpServer {
         if (schedule.backupAllVms) {
           return _startScheduledAllVmBackup(schedule, server, storage, scheduleRunId: scheduleRunId, allowDisabled: allowDisabled);
         }
-        return _startScheduledBackup(schedule, server, storage, scheduleRunId: scheduleRunId);
+        return _startScheduledBackup(schedule, server, storage, scheduleRunId: scheduleRunId, allowDisabled: allowDisabled);
       case ScheduledJobType.restore:
         if (schedule.restoreAllLatestVms) {
           return _startScheduledAllLatestVmRestore(schedule, server, storage, scheduleRunId: scheduleRunId, allowDisabled: allowDisabled);
         }
-        return _startScheduledRestore(schedule, server, storage, scheduleRunId: scheduleRunId);
+        return _startScheduledRestore(schedule, server, storage, scheduleRunId: scheduleRunId, allowDisabled: allowDisabled);
     }
   }
 
@@ -436,17 +436,102 @@ class AgentHttpServer {
     return entries;
   }
 
-  String _startScheduledBackup(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage, {required String scheduleRunId}) {
-    if (schedule.vmName.trim().isEmpty) {
-      throw StateError('backup schedule requires vmName');
+  String _startScheduledBackup(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage, {required String scheduleRunId, required bool allowDisabled}) {
+    final vmNames = schedule.vmNames;
+    if (vmNames.isEmpty) {
+      throw StateError('backup schedule requires vmNames');
     }
-    return _startScheduledBackupForVm(
-      schedule,
-      server,
-      storage,
-      VmEntry(id: schedule.vmName, name: schedule.vmName, powerState: VmPowerState.stopped),
-      scheduleRunId: scheduleRunId,
-    );
+    final firstVm = VmEntry(id: vmNames.first, name: vmNames.first, powerState: VmPowerState.stopped);
+    final firstJobId = _startScheduledBackupForVm(schedule, server, storage, firstVm, scheduleRunId: scheduleRunId);
+    if (vmNames.length > 1) {
+      unawaited(_continueScheduledSelectedVmBackup(schedule.id, server.id, storage.storage.id, vmNames.skip(1).toList(), firstJobId, scheduleRunId: scheduleRunId, allowDisabled: allowDisabled));
+    }
+    return firstJobId;
+  }
+
+  Future<void> _continueScheduledSelectedVmBackup(
+    String scheduleId,
+    String serverId,
+    String storageId,
+    List<String> remainingVmNames,
+    String previousJobId, {
+    required String scheduleRunId,
+    required bool allowDisabled,
+  }) async {
+    var lastJobId = previousJobId;
+    for (final vmName in remainingVmNames) {
+      final previousStatus = await _waitForJobToFinish(lastJobId);
+      if (previousStatus?.state == AgentJobState.canceled || _scheduleRunIsCanceled(scheduleRunId)) {
+        _hostLog('Selected-VM backup schedule run $scheduleRunId stopped after canceled job $lastJobId.');
+        return;
+      }
+      final schedule = _scheduleById(scheduleId);
+      if (schedule == null || (!allowDisabled && !schedule.enabled) || schedule.backupAllVms || !schedule.vmNames.contains(vmName)) {
+        _hostLog('Selected-VM backup schedule $scheduleId stopped because the schedule changed.');
+        return;
+      }
+      final server = _serverById(serverId);
+      if (server == null) {
+        _hostLog('Selected-VM backup schedule "${schedule.name}" stopped because server $serverId no longer exists.');
+        return;
+      }
+      final storage = _resolveStorageById(storageId);
+      if (storage == null) {
+        _hostLog('Selected-VM backup schedule "${schedule.name}" stopped because storage $storageId is unavailable.');
+        return;
+      }
+      final vm = VmEntry(id: vmName, name: vmName, powerState: VmPowerState.stopped);
+      try {
+        lastJobId = _startScheduledBackupForVm(schedule, server, storage, vm, scheduleRunId: scheduleRunId);
+      } on _JobGuardRejected catch (error) {
+        if (!schedule.waitForRunningJobs) {
+          _hostLog('Selected-VM backup schedule "${schedule.name}" stopped before $vmName. ${error.message}');
+          _failScheduledBackupVmStart(schedule, vmName, error.message);
+          return;
+        }
+        try {
+          lastJobId = await _waitAndStartScheduledSelectedBackupForVm(schedule, server, storage, vm, scheduleRunId: scheduleRunId, allowDisabled: allowDisabled);
+        } on _ScheduleRunCanceled {
+          _hostLog('Selected-VM backup schedule run $scheduleRunId stopped before $vmName.');
+          return;
+        }
+      } on _ScheduleRunCanceled {
+        _hostLog('Selected-VM backup schedule run $scheduleRunId stopped before $vmName.');
+        return;
+      } catch (error, stackTrace) {
+        _hostLog('Selected-VM backup schedule "${schedule.name}" failed before $vmName. $error');
+        _hostLog(stackTrace.toString());
+        _failScheduledBackupVmStart(schedule, vmName, error.toString());
+        return;
+      }
+    }
+  }
+
+  Future<String> _waitAndStartScheduledSelectedBackupForVm(
+    ScheduledJob schedule,
+    ServerConfig server,
+    _ResolvedStorage storage,
+    VmEntry vm, {
+    required String scheduleRunId,
+    required bool allowDisabled,
+  }) async {
+    while (true) {
+      await Future<void>.delayed(const Duration(seconds: 30));
+      if (_scheduleRunIsCanceled(scheduleRunId)) {
+        throw const _ScheduleRunCanceled();
+      }
+      final currentSchedule = _scheduleById(schedule.id);
+      if (currentSchedule == null ||
+          (!allowDisabled && !currentSchedule.enabled) ||
+          currentSchedule.backupAllVms ||
+          !currentSchedule.waitForRunningJobs ||
+          !currentSchedule.vmNames.contains(vm.name)) {
+        throw StateError('schedule changed while waiting for running jobs');
+      }
+      try {
+        return _startScheduledBackupForVm(currentSchedule, server, storage, vm, scheduleRunId: scheduleRunId);
+      } on _JobGuardRejected catch (_) {}
+    }
   }
 
   Future<String> _startScheduledAllVmBackup(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage, {required String scheduleRunId, required bool allowDisabled}) async {
@@ -601,10 +686,13 @@ class AgentHttpServer {
     _notifyJobCompletion(jobId, type: AgentJobType.backup, state: AgentJobState.failure, message: message);
   }
 
-  Future<String> _startScheduledRestore(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage, {required String scheduleRunId}) async {
+  Future<String> _startScheduledRestore(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage, {required String scheduleRunId, required bool allowDisabled}) async {
     final missingTools = await _host.missingRequiredRemoteTools(server);
     if (missingTools.isNotEmpty) {
       throw StateError('restore failed: server is missing required tools: ${missingTools.join(', ')}');
+    }
+    if (schedule.restoreXmlPath.trim() == ScheduledJob.latestRestoreXmlPath && schedule.vmNames.length > 1) {
+      return _startScheduledSelectedLatestVmRestore(schedule, server, storage, scheduleRunId: scheduleRunId, allowDisabled: allowDisabled);
     }
     final xmlPath = await _resolveScheduledRestoreXmlPath(schedule, storage);
     if (xmlPath.trim().isEmpty) {
@@ -622,6 +710,112 @@ class AgentHttpServer {
     _hostLog('Schedule "${schedule.name}" starting restore job $jobId.');
     _startRestoreJob(jobId, server, xmlPath, schedule.restoreDecision, storage: storage, driverIdOverride: storage.driverId);
     return jobId;
+  }
+
+  Future<String> _startScheduledSelectedLatestVmRestore(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage, {required String scheduleRunId, required bool allowDisabled}) async {
+    final vmNames = schedule.vmNames;
+    if (vmNames.isEmpty) {
+      throw StateError('latest restore schedule requires vmNames');
+    }
+    final firstXmlPath = await _resolveLatestRestoreXmlPathForVm(vmNames.first, storage);
+    final firstJobId = await _startScheduledRestoreForXmlPath(schedule, server, storage, firstXmlPath, scheduleRunId: scheduleRunId);
+    if (vmNames.length > 1) {
+      unawaited(
+        _continueScheduledSelectedLatestVmRestore(schedule.id, server.id, storage.storage.id, vmNames.skip(1).toList(), firstJobId, scheduleRunId: scheduleRunId, allowDisabled: allowDisabled),
+      );
+    }
+    return firstJobId;
+  }
+
+  Future<void> _continueScheduledSelectedLatestVmRestore(
+    String scheduleId,
+    String serverId,
+    String storageId,
+    List<String> remainingVmNames,
+    String previousJobId, {
+    required String scheduleRunId,
+    required bool allowDisabled,
+  }) async {
+    var lastJobId = previousJobId;
+    for (final vmName in remainingVmNames) {
+      final previousStatus = await _waitForJobToFinish(lastJobId);
+      if (previousStatus?.state == AgentJobState.canceled || _scheduleRunIsCanceled(scheduleRunId)) {
+        _hostLog('Selected-latest restore schedule run $scheduleRunId stopped after canceled job $lastJobId.');
+        return;
+      }
+      final schedule = _scheduleById(scheduleId);
+      if (schedule == null ||
+          (!allowDisabled && !schedule.enabled) ||
+          schedule.restoreAllLatestVms ||
+          schedule.restoreXmlPath != ScheduledJob.latestRestoreXmlPath ||
+          !schedule.vmNames.contains(vmName)) {
+        _hostLog('Selected-latest restore schedule $scheduleId stopped because the schedule changed.');
+        return;
+      }
+      final server = _serverById(serverId);
+      if (server == null) {
+        _hostLog('Selected-latest restore schedule "${schedule.name}" stopped because server $serverId no longer exists.');
+        return;
+      }
+      final storage = _resolveStorageById(storageId);
+      if (storage == null) {
+        _hostLog('Selected-latest restore schedule "${schedule.name}" stopped because storage $storageId is unavailable.');
+        return;
+      }
+      try {
+        final xmlPath = await _resolveLatestRestoreXmlPathForVm(vmName, storage);
+        lastJobId = await _startScheduledRestoreForXmlPath(schedule, server, storage, xmlPath, scheduleRunId: scheduleRunId);
+      } on _JobGuardRejected catch (error) {
+        if (!schedule.waitForRunningJobs) {
+          _hostLog('Selected-latest restore schedule "${schedule.name}" stopped before $vmName. ${error.message}');
+          _failScheduledRestoreVmStart(schedule, vmName, error.message);
+          return;
+        }
+        try {
+          lastJobId = await _waitAndStartScheduledLatestRestoreForVm(schedule, server, storage, vmName, scheduleRunId: scheduleRunId, allowDisabled: allowDisabled);
+        } on _ScheduleRunCanceled {
+          _hostLog('Selected-latest restore schedule run $scheduleRunId stopped before $vmName.');
+          return;
+        }
+      } on _ScheduleRunCanceled {
+        _hostLog('Selected-latest restore schedule run $scheduleRunId stopped before $vmName.');
+        return;
+      } catch (error, stackTrace) {
+        _hostLog('Selected-latest restore schedule "${schedule.name}" failed before $vmName. $error');
+        _hostLog(stackTrace.toString());
+        _failScheduledRestoreVmStart(schedule, vmName, error.toString());
+        return;
+      }
+    }
+  }
+
+  Future<String> _waitAndStartScheduledLatestRestoreForVm(
+    ScheduledJob schedule,
+    ServerConfig server,
+    _ResolvedStorage storage,
+    String vmName, {
+    required String scheduleRunId,
+    required bool allowDisabled,
+  }) async {
+    while (true) {
+      await Future<void>.delayed(const Duration(seconds: 30));
+      if (_scheduleRunIsCanceled(scheduleRunId)) {
+        throw const _ScheduleRunCanceled();
+      }
+      final currentSchedule = _scheduleById(schedule.id);
+      if (currentSchedule == null ||
+          (!allowDisabled && !currentSchedule.enabled) ||
+          currentSchedule.restoreAllLatestVms ||
+          currentSchedule.restoreXmlPath != ScheduledJob.latestRestoreXmlPath ||
+          !currentSchedule.waitForRunningJobs ||
+          !currentSchedule.vmNames.contains(vmName)) {
+        throw StateError('schedule changed while waiting for running jobs');
+      }
+      try {
+        final xmlPath = await _resolveLatestRestoreXmlPathForVm(vmName, storage);
+        return _startScheduledRestoreForXmlPath(currentSchedule, server, storage, xmlPath, scheduleRunId: scheduleRunId);
+      } on _JobGuardRejected catch (_) {}
+    }
   }
 
   Future<String> _startScheduledAllLatestVmRestore(ScheduledJob schedule, ServerConfig server, _ResolvedStorage storage, {required String scheduleRunId, required bool allowDisabled}) async {
@@ -790,17 +984,25 @@ class AgentHttpServer {
     if (requested != ScheduledJob.latestRestoreXmlPath) {
       return requested;
     }
-    final vmName = schedule.vmName.trim();
+    final vmName = schedule.vmNames.isEmpty ? schedule.vmName.trim() : schedule.vmNames.first;
     if (vmName.isEmpty) {
+      throw StateError('latest restore schedule requires vmName');
+    }
+    return _resolveLatestRestoreXmlPathForVm(vmName, storage);
+  }
+
+  Future<String> _resolveLatestRestoreXmlPathForVm(String vmName, _ResolvedStorage storage) async {
+    final normalizedVmName = vmName.trim();
+    if (normalizedVmName.isEmpty) {
       throw StateError('latest restore schedule requires vmName');
     }
     final entries = await _loadRestoreEntries(storageId: storage.storage.id);
     for (final entry in entries) {
-      if (entry.vmName == vmName && entry.hasAllDisks) {
+      if (entry.vmName == normalizedVmName && entry.hasAllDisks) {
         return entry.xmlPath;
       }
     }
-    throw StateError('no complete restore XML found for VM "$vmName"');
+    throw StateError('no complete restore XML found for VM "$normalizedVmName"');
   }
 
   void _failScheduledJobStart(ScheduledJob schedule, String message) {
@@ -818,8 +1020,21 @@ class AgentHttpServer {
     _notifyJobCompletion(jobId, type: type, state: AgentJobState.failure, message: message);
   }
 
+  void _failScheduledRestoreVmStart(ScheduledJob schedule, String vmName, String message) {
+    final storage = _resolveStorageById(schedule.storageId);
+    final jobId = _createJob(AgentJobType.restore, vmName: vmName, storageId: schedule.storageId, scheduleId: schedule.id);
+    final server = _serverById(schedule.serverId);
+    _setJobContext(jobId, source: server == null ? vmName : _formatJobSource(server, vmName), storageLabel: storage?.storage.name);
+    final current = _jobs[jobId];
+    if (current == null) {
+      return;
+    }
+    _updateJob(jobId, current.copyWith(state: AgentJobState.failure, message: message));
+    _notifyJobCompletion(jobId, type: AgentJobType.restore, state: AgentJobState.failure, message: message);
+  }
+
   String _scheduledJobVmName(ScheduledJob schedule) {
-    final configuredVm = schedule.vmName.trim();
+    final configuredVm = schedule.vmNames.isEmpty ? schedule.vmName.trim() : schedule.vmNames.first;
     if (configuredVm.isNotEmpty) {
       return configuredVm;
     }

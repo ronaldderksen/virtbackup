@@ -108,6 +108,65 @@ schedules:
     }
   });
 
+  test('legacy single VM schedule loads as one selected VM and saves vmNames', () async {
+    final tempDir = await Directory.systemTemp.createTemp('virtbackup_settings_store_schedule_vmnames_test_');
+    try {
+      final settingsFile = File('${tempDir.path}${Platform.pathSeparator}agent.yaml');
+      await settingsFile.writeAsString('''
+servers:
+  - id: server-main
+    name: Main server
+    type: ssh
+    sshHost: ''
+    sshPort: '22'
+    sshUser: ''
+    sshPassword: ''
+    apiBaseUrl: ''
+    apiToken: ''
+storage:
+  - id: filesystem
+    name: Filesystem
+    driverId: filesystem
+    enabled: true
+    disableFresh: false
+    params:
+      path: /tmp/virtbackup
+schedules:
+  ${Platform.localHostname}:
+    - id: schedule-main
+      name: Legacy schedule
+      enabled: true
+      waitForRunningJobs: false
+      type: backup
+      frequency: hourly
+      time: '00:10'
+      weekdays: []
+      serverId: server-main
+      storageId: filesystem
+      vmName: vm-main
+      restoreXmlPath: ''
+      restoreDecision: ''
+''');
+      final store = AppSettingsStore(file: settingsFile);
+      final loaded = await store.load();
+
+      expect(loaded.schedules.single.vmName, 'vm-main');
+      expect(loaded.schedules.single.vmNames, <String>['vm-main']);
+
+      await store.save(loaded);
+
+      final decoded = loadYaml(await settingsFile.readAsString()) as YamlMap;
+      final schedules = decoded['schedules'] as YamlMap;
+      final currentAgentSchedules = schedules[Platform.localHostname] as YamlList;
+      final savedSchedule = currentAgentSchedules.single as YamlMap;
+      expect(savedSchedule['vmName'], 'vm-main');
+      expect(savedSchedule['vmNames'], isA<YamlList>());
+      expect((savedSchedule['vmNames'] as YamlList).single, 'vm-main');
+    } finally {
+      await tempDir.delete(recursive: true);
+    }
+  });
+
   test('save preserves Virt Backup account tokens for other host groups', () async {
     final tempDir = await Directory.systemTemp.createTemp('virtbackup_settings_store_account_groups_test_');
     try {

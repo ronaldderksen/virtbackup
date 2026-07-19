@@ -234,6 +234,7 @@ Response:
       "backupAllVms":false,
       "restoreAllLatestVms":false,
       "vmName":"app01",
+      "vmNames":["app01","db01"],
       "restoreXmlPath":"",
       "restoreDecision":""
     },
@@ -251,6 +252,7 @@ Response:
       "backupAllVms":false,
       "restoreAllLatestVms":false,
       "vmName":"app01",
+      "vmNames":["app01","db01"],
       "restoreXmlPath":"__latest__",
       "restoreDecision":"overwrite"
     }
@@ -288,6 +290,9 @@ schedules:
       backupAllVms: false
       restoreAllLatestVms: false
       vmName: app01
+      vmNames:
+        - app01
+        - db01
       restoreXmlPath: ''
       restoreDecision: ''
 ```
@@ -299,16 +304,17 @@ Backup fails before creating its own snapshot when an existing snapshot or overl
 After a successful snapshot commit, the agent scans VM disk directories for `.virtbackup-` overlay files and removes only files that are no longer referenced by the VM and have no open users according to `lsof`.
 
 Fields:
-- `name`: generated from schedule type, server, storage, and VM. Clients should not expose this as an editable field.
+- `name`: generated from schedule type, server, storage, and VM selection. Clients should not expose this as an editable field.
 - `waitForRunningJobs`: when `true`, a schedule run that is blocked by a concurrency guard remains pending and starts when the guard allows it. This applies to automatic runs and manual `POST /schedules/{id}/run` starts. When `false`, the blocked run is recorded as a failed job and sends the configured job result notifications.
 - `type`: `backup` or `restore`.
 - `frequency`: `every5Minutes`, `hourly`, `daily`, or `weekly`.
 - `time`: local agent time in `HH:mm` format. Hourly schedules use the minute portion and run every hour on that minute. `every5Minutes` schedules also use the minute portion as an offset, for example `00:02` runs at `:02`, `:07`, `:12`, and so on.
 - `weekdays`: ISO weekday numbers (`1` Monday through `7` Sunday), used only for weekly schedules.
 - `serverId` and `storageId`: references to configured server and storage entries.
-- Backup schedules use `vmName`, or set `backupAllVms: true` and leave `vmName` empty. All-VM backup schedules read the VM inventory once at the beginning of the run and then start one backup job per VM sequentially; VMs added during the run are picked up by the next run.
-- Restore schedules use `restoreXmlPath` and `restoreDecision` (`overwrite`, `define`, or `auto_rename`). Set `restoreXmlPath` to `__latest__` and `vmName` to a source VM name to restore the latest complete XML for that VM at runtime.
-- Set `restoreAllLatestVms: true`, leave `vmName` empty, and set `restoreXmlPath` to `__latest__` to restore the latest complete XML for every VM found in the selected storage. The agent resolves the latest complete XML per VM at the start of the schedule run and starts one restore job per VM sequentially. `restoreDecision` still controls existing VM handling for each restore job.
+- Backup schedules use `vmNames`, or set `backupAllVms: true` and leave `vmNames` empty. Selected-VM backup schedules start one backup job per selected VM sequentially. All-VM backup schedules read the VM inventory once at the beginning of the run and then start one backup job per VM sequentially; VMs added during the run are picked up by the next run.
+- `vmName` is kept for legacy single-VM schedules and mirrors the first selected VM after saving a schedule through current clients. Opening a legacy single-VM schedule in the GUI preselects that VM in the multiselect; canceling the dialog does not rewrite the legacy schedule.
+- Restore schedules use `restoreXmlPath` and `restoreDecision` (`overwrite`, `define`, or `auto_rename`). Set `restoreXmlPath` to `__latest__` and `vmNames` to one or more source VM names to restore the latest complete XML for each selected VM sequentially at runtime. A specific `restoreXmlPath` is valid only for a single selected VM.
+- Set `restoreAllLatestVms: true`, leave `vmNames` empty, and set `restoreXmlPath` to `__latest__` to restore the latest complete XML for every VM found in the selected storage. The agent resolves the latest complete XML per VM at the start of the schedule run and starts one restore job per VM sequentially. `restoreDecision` still controls existing VM handling for each restore job.
 
 ### Run schedule now
 

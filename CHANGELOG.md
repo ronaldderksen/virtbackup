@@ -2,6 +2,7 @@
 
 ## 1.1.0 - 2026-05-21
 
+- Added multi-VM backup and restore schedules that run selected VMs sequentially.
 - Added a Job History log viewer and made incomplete history logs visible instead of silently failing.
 - Added History date presets and range shift controls for quickly moving a selected date window.
 - Improved Settings storage health checks and quick check behavior.

@@ -340,9 +340,19 @@ class AppSettings {
     final typeLabel = schedule.type == ScheduledJobType.backup ? 'Backup' : 'Restore';
     final serverName = _serverNameForId(servers, schedule.serverId);
     final storageName = _storageNameForId(storage, schedule.storageId);
-    final vmLabel = schedule.backupAllVms || schedule.restoreAllLatestVms ? 'all VMs' : (schedule.vmName.trim().isEmpty ? 'VM' : schedule.vmName.trim());
+    final vmLabel = schedule.backupAllVms || schedule.restoreAllLatestVms ? 'all VMs' : _vmListLabel(schedule.vmNames);
     final direction = schedule.type == ScheduledJobType.backup ? 'to' : 'from';
     return '$typeLabel $vmLabel on $serverName $direction $storageName';
+  }
+
+  static String _vmListLabel(List<String> vmNames) {
+    if (vmNames.isEmpty) {
+      return 'VM';
+    }
+    if (vmNames.length == 1) {
+      return vmNames.single;
+    }
+    return '${vmNames.length} VMs';
   }
 
   static String _serverNameForId(List<ServerConfig> servers, String id) {
@@ -448,6 +458,7 @@ class ScheduledJob {
     required this.backupAllVms,
     required this.restoreAllLatestVms,
     required this.vmName,
+    required this.vmNames,
     required this.restoreXmlPath,
     required this.restoreDecision,
   });
@@ -465,6 +476,7 @@ class ScheduledJob {
   final bool backupAllVms;
   final bool restoreAllLatestVms;
   final String vmName;
+  final List<String> vmNames;
   final String restoreXmlPath;
   final String restoreDecision;
 
@@ -483,6 +495,7 @@ class ScheduledJob {
       'backupAllVms': backupAllVms,
       'restoreAllLatestVms': restoreAllLatestVms,
       'vmName': vmName,
+      'vmNames': vmNames,
       'restoreXmlPath': restoreXmlPath,
       'restoreDecision': restoreDecision,
     };
@@ -502,6 +515,7 @@ class ScheduledJob {
     bool? backupAllVms,
     bool? restoreAllLatestVms,
     String? vmName,
+    List<String>? vmNames,
     String? restoreXmlPath,
     String? restoreDecision,
   }) {
@@ -519,6 +533,7 @@ class ScheduledJob {
       backupAllVms: backupAllVms ?? this.backupAllVms,
       restoreAllLatestVms: restoreAllLatestVms ?? this.restoreAllLatestVms,
       vmName: vmName ?? this.vmName,
+      vmNames: vmNames ?? this.vmNames,
       restoreXmlPath: restoreXmlPath ?? this.restoreXmlPath,
       restoreDecision: restoreDecision ?? this.restoreDecision,
     );
@@ -541,17 +556,21 @@ class ScheduledJob {
     if (frequency == ScheduleFrequency.weekly && weekdays.isEmpty) {
       return null;
     }
-    final vmName = (json['vmName'] ?? '').toString().trim();
+    final vmNames = _parseVmNames(json['vmNames'], legacyVmName: (json['vmName'] ?? '').toString());
+    final primaryVmName = vmNames.isEmpty ? '' : vmNames.first;
     final backupAllVms = json['backupAllVms'] == true;
     final restoreAllLatestVms = json['restoreAllLatestVms'] == true;
     final restoreXmlPath = (json['restoreXmlPath'] ?? '').toString().trim();
-    if (type == ScheduledJobType.backup && !backupAllVms && vmName.isEmpty) {
+    if (type == ScheduledJobType.backup && !backupAllVms && vmNames.isEmpty) {
       return null;
     }
     if (type == ScheduledJobType.restore && !restoreAllLatestVms && restoreXmlPath.isEmpty) {
       return null;
     }
-    if (type == ScheduledJobType.restore && !restoreAllLatestVms && restoreXmlPath == latestRestoreXmlPath && vmName.isEmpty) {
+    if (type == ScheduledJobType.restore && !restoreAllLatestVms && restoreXmlPath == latestRestoreXmlPath && vmNames.isEmpty) {
+      return null;
+    }
+    if (type == ScheduledJobType.restore && !restoreAllLatestVms && restoreXmlPath != latestRestoreXmlPath && vmNames.length > 1) {
       return null;
     }
     final restoreDecision = (json['restoreDecision'] ?? '').toString().trim();
@@ -574,10 +593,28 @@ class ScheduledJob {
       storageId: storageId,
       backupAllVms: type == ScheduledJobType.backup && backupAllVms,
       restoreAllLatestVms: type == ScheduledJobType.restore && restoreAllLatestVms,
-      vmName: type == ScheduledJobType.backup && backupAllVms || type == ScheduledJobType.restore && restoreAllLatestVms ? '' : vmName,
+      vmName: type == ScheduledJobType.backup && backupAllVms || type == ScheduledJobType.restore && restoreAllLatestVms ? '' : primaryVmName,
+      vmNames: type == ScheduledJobType.backup && backupAllVms || type == ScheduledJobType.restore && restoreAllLatestVms ? <String>[] : vmNames,
       restoreXmlPath: type == ScheduledJobType.restore && restoreAllLatestVms ? latestRestoreXmlPath : restoreXmlPath,
       restoreDecision: restoreDecision,
     );
+  }
+
+  static List<String> _parseVmNames(Object? raw, {required String legacyVmName}) {
+    final result = <String>[];
+    if (raw is List) {
+      for (final value in raw) {
+        final vmName = value.toString().trim();
+        if (vmName.isNotEmpty && !result.contains(vmName)) {
+          result.add(vmName);
+        }
+      }
+    }
+    final legacy = legacyVmName.trim();
+    if (result.isEmpty && legacy.isNotEmpty) {
+      result.add(legacy);
+    }
+    return result;
   }
 
   static bool _isValidTime(String value) {
