@@ -12,6 +12,8 @@ The agent is a local service that performs VM backup and restore operations over
 - Provide real-time progress via HTTP endpoints and server-sent events (SSE).
 - Support both native SFTP (FFI) and Dart-based SSH/SFTP.
 
+The agent and `tools/sftp_speed_test.dart` both use `dartssh2` 3.3.x for Dart-based SSH/SFTP. This replaces 2.14.0, whose SFTP read implementation fails AOT compilation with Dart 3.13.2. The dependency requires `pointycastle` 4.x; `dartssh3` is no longer used.
+
 ## High-Level Architecture
 
 Key modules under `lib/agent`:
@@ -43,6 +45,7 @@ Key modules under `lib/agent`:
 4. Progress is reported to job status, and summarized on completion.
 5. A backup schedule can target selected VMs or all VMs on the selected server. Selected-VM and all-VM backup schedules launch individual backup jobs sequentially; all-VM schedules capture the VM inventory once at the start of the schedule run.
 6. A restore schedule can target one XML, the latest complete XML for selected VMs, or the latest complete XML for every VM in the selected storage. Multi-VM restore schedules resolve the latest complete XML per VM at runtime and then launch individual restore jobs sequentially, using the configured existing VM handling for each job.
+   When waiting for running jobs is enabled, a restore start rejected by the job guard is retried after 30 seconds, including rejections reported asynchronously during startup.
 
 ### Restore
 

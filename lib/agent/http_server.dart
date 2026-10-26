@@ -813,7 +813,7 @@ class AgentHttpServer {
       }
       try {
         final xmlPath = await _resolveLatestRestoreXmlPathForVm(vmName, storage);
-        return _startScheduledRestoreForXmlPath(currentSchedule, server, storage, xmlPath, scheduleRunId: scheduleRunId);
+        return await _startScheduledRestoreForXmlPath(currentSchedule, server, storage, xmlPath, scheduleRunId: scheduleRunId);
       } on _JobGuardRejected catch (_) {}
     }
   }
@@ -915,7 +915,7 @@ class AgentHttpServer {
         throw StateError('schedule changed while waiting for running jobs');
       }
       try {
-        return _startScheduledRestoreForXmlPath(currentSchedule, server, storage, xmlPath, scheduleRunId: scheduleRunId);
+        return await _startScheduledRestoreForXmlPath(currentSchedule, server, storage, xmlPath, scheduleRunId: scheduleRunId);
       } on _JobGuardRejected catch (_) {}
     }
   }

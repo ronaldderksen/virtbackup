@@ -4,7 +4,7 @@ import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:dartssh3/dartssh3.dart';
+import 'package:dartssh2/dartssh2.dart';
 import 'package:ffi/ffi.dart';
 
 class _Args {

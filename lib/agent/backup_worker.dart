@@ -127,7 +127,7 @@ void backupWorkerMain(Map<String, dynamic> init) {
       }
       final result = await agent!.runVmBackup(server: server, vm: vm, driver: driver);
       mainPort.send({'type': _typeResult, 'jobId': jobId, 'result': result.toMap()});
-    } catch (error, _) {
+    } catch (error) {
       LogWriter.logAgentSync(level: 'error', message: 'Backup worker failed: $error');
       mainPort.send({'type': _typeResult, 'jobId': jobId, 'result': BackupAgentResult(success: false, message: error.toString()).toMap()});
     }
