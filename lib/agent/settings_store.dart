@@ -8,6 +8,7 @@ import 'package:pointycastle/export.dart';
 import 'package:yaml/yaml.dart';
 
 import 'package:virtbackup/common/settings.dart';
+import 'package:virtbackup/common/models.dart';
 
 const String settingsFileName = 'agent.yaml';
 const String agentTokenFileName = 'agent.token';
@@ -16,9 +17,10 @@ class AppSettingsStore {
   AppSettingsStore({File? file}) : _file = file ?? File(settingsFileName);
 
   final File _file;
+  Future<void> _pendingSave = Future<void>.value();
 
   static Future<AppSettingsStore> fromAgentDefaultPath() async {
-    final dir = _agentDefaultSettingsDirectory();
+    final dir = await _agentDefaultSettingsDirectory();
     final settingsDir = Directory('${dir.path}${Platform.pathSeparator}virtbackup');
     await settingsDir.create(recursive: true);
     final file = File('${settingsDir.path}${Platform.pathSeparator}$settingsFileName');
@@ -29,22 +31,17 @@ class AppSettingsStore {
     if (!await _file.exists()) {
       return AppSettings.empty();
     }
-    try {
-      final token = await loadAgentToken();
-      return await _loadFromYamlFile(_file, token: token);
-    } catch (error) {
-      if (error is StateError &&
-          (error.toString().contains('blockSizeMB') ||
-              error.toString().contains('maxConcurrent') ||
-              error.toString().contains('requireSimpleDisksForBackup') ||
-              error.toString().contains('agent hostname'))) {
-        rethrow;
-      }
-      return AppSettings.empty();
-    }
+    final token = await loadAgentToken();
+    return _loadFromYamlFile(_file, token: token);
   }
 
-  Future<void> save(AppSettings agentSettings) async {
+  Future<void> save(AppSettings agentSettings) {
+    final operation = _pendingSave.then((_) => _save(agentSettings));
+    _pendingSave = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  Future<void> _save(AppSettings agentSettings) async {
     final token = await _loadOrCreateToken();
     final agentName = _agentHostname();
     final data = agentSettings.toMap();
@@ -105,37 +102,46 @@ class AppSettingsStore {
     return token;
   }
 
-  static Directory _agentDefaultSettingsDirectory() {
-    final env = Platform.environment;
+  static Future<Directory> _agentDefaultSettingsDirectory() async {
+    Future<String> accountQuery(String executable, List<String> arguments) async {
+      final result = await Process.run(executable, arguments);
+      final value = result.stdout.toString().trim();
+      if (result.exitCode != 0 || value.isEmpty) throw StateError('Cannot resolve settings directory using $executable: ${result.stderr}');
+      return value;
+    }
+
     if (Platform.isWindows) {
-      final appData = env['LOCALAPPDATA'];
-      if (appData != null && appData.isNotEmpty) {
-        return Directory(appData);
-      }
-      throw StateError('LOCALAPPDATA is not set; cannot determine settings directory on Windows.');
+      final path = await accountQuery('powershell', ['-NoProfile', '-NonInteractive', '-Command', '[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)']);
+      return Directory(path);
     }
+    String homeDirectory;
     if (Platform.isMacOS) {
-      final home = env['HOME'];
-      if (home != null && home.isNotEmpty) {
-        return Directory('$home${Platform.pathSeparator}.config');
-      }
-      throw StateError('HOME is not set; cannot determine settings directory on macOS.');
+      final user = await accountQuery('/usr/bin/id', ['-un']);
+      final record = await accountQuery('/usr/bin/dscl', ['.', '-read', '/Users/$user', 'NFSHomeDirectory']);
+      const prefix = 'NFSHomeDirectory: ';
+      if (!record.startsWith(prefix)) throw StateError('Cannot resolve account home directory.');
+      homeDirectory = record.substring(prefix.length).trim();
+    } else if (Platform.isLinux) {
+      final uid = await accountQuery('id', ['-u']);
+      final record = await accountQuery('getent', ['passwd', uid]);
+      final fields = record.split(':');
+      if (fields.length != 7) throw StateError('Cannot resolve account home directory.');
+      homeDirectory = fields[5];
+    } else {
+      throw UnsupportedError('Settings directory lookup is unsupported on ${Platform.operatingSystem}.');
     }
-    final home = env['HOME'];
-    if (home != null && home.isNotEmpty) {
-      return Directory('$home${Platform.pathSeparator}.config');
-    }
-    throw StateError('HOME is not set; cannot determine settings directory on Linux.');
+    if (homeDirectory.isEmpty || !homeDirectory.startsWith('/')) throw StateError('Account home directory is not an absolute path.');
+    return Directory('$homeDirectory${Platform.pathSeparator}.config');
   }
 
   Future<AppSettings> _loadFromYamlFile(File file, {String? token}) async {
     final content = await file.readAsString();
     if (content.trim().isEmpty) {
-      return AppSettings.empty();
+      throw FormatException('Settings file is empty: ${file.path}');
     }
     final decoded = loadYaml(content);
     if (decoded is! YamlMap) {
-      return AppSettings.empty();
+      throw FormatException('Settings file must contain a YAML map: ${file.path}');
     }
     final normalized = _normalizeYaml(decoded);
     final agentName = _agentHostname();
@@ -325,7 +331,7 @@ class AppSettingsStore {
         continue;
       }
       final driverId = (storage['driverId'] ?? '').toString().trim();
-      if (driverId == 'filesystem') {
+      if (!BackupDriverCapabilities.forDriver(driverId).hasParam('downloadConcurrency')) {
         continue;
       }
       if (!storage.containsKey('storeBlobs')) {
@@ -729,7 +735,7 @@ class AppSettingsStore {
       if (entry is! Map) {
         continue;
       }
-      if ((entry['driverId'] ?? '').toString().trim() != 'gdrive') {
+      if (!BackupDriverCapabilities.forDriver((entry['driverId'] ?? '').toString().trim()).hasParam('refreshToken')) {
         continue;
       }
       final params = entry['params'];
@@ -762,7 +768,7 @@ class AppSettingsStore {
       if (entry is! Map) {
         continue;
       }
-      if ((entry['driverId'] ?? '').toString().trim() != 'gdrive') {
+      if (!BackupDriverCapabilities.forDriver((entry['driverId'] ?? '').toString().trim()).hasParam('refreshToken')) {
         continue;
       }
       final params = entry['params'];
@@ -793,7 +799,7 @@ class AppSettingsStore {
       if (entry is! Map) {
         continue;
       }
-      if ((entry['driverId'] ?? '').toString().trim() != 'sftp') {
+      if (!BackupDriverCapabilities.forDriver((entry['driverId'] ?? '').toString().trim()).hasParam('password')) {
         continue;
       }
       final params = entry['params'];
@@ -819,7 +825,7 @@ class AppSettingsStore {
       if (entry is! Map) {
         continue;
       }
-      if ((entry['driverId'] ?? '').toString().trim() != 'sftp') {
+      if (!BackupDriverCapabilities.forDriver((entry['driverId'] ?? '').toString().trim()).hasParam('password')) {
         continue;
       }
       final params = entry['params'];

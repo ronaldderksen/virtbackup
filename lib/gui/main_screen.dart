@@ -123,7 +123,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   final Map<String, List<VmEntry>> _vmCacheByServerId = {};
   int _selectedMenuIndex = 2;
   bool _isTesting = false;
-  bool _allowEmptyServerNameForTest = false;
   bool _isSavingAll = false;
   bool _isVmActionRunning = false;
   String _vmActionStatusMessage = '';
@@ -212,6 +211,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   String _storageWriteError = '';
   String? _trustedAgentCertFingerprint;
   bool _certDialogOpen = false;
+  bool _agentCertificateRejected = false;
   StreamSubscription<AgentEvent>? _eventSubscription;
   Timer? _eventReconnectTimer;
   bool _eventConnecting = false;
@@ -671,6 +671,9 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     }
     _isLoadingAgentSettings = true;
     try {
+      if (_agentCertificateRejected || !await _maybeHandleAgentCertificate()) {
+        throw StateError('Agent certificate not trusted. Connection blocked.');
+      }
       _backupDrivers
         ..clear()
         ..addAll(await _loadBackupDrivers());
@@ -681,7 +684,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       _agentReconnectTimer?.cancel();
       _agentReconnectTimer = null;
       _startEventStream();
-      await _maybeHandleAgentCertificate();
     } catch (error, stackTrace) {
       _logError('Failed to load settings from agent.', error, stackTrace);
       if (_isAuthError(error)) {
@@ -1063,18 +1065,14 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   }
 
   Future<void> _loadTrustedAgentCertificate() async {
+    _agentCertificateRejected = false;
     final uri = _agentApiClient.baseUri;
-    if (uri.scheme != 'https') {
-      _agentApiClient.setAllowUntrustedCerts(true);
-      _agentApiClient.setTrustedCertFingerprint(null);
-      return;
-    }
+    if (uri.scheme != 'https') throw StateError('Agent connections require HTTPS.');
     final prefs = await SharedPreferences.getInstance();
     final key = _agentCertPrefsKey();
     final stored = prefs.getString(key);
     _trustedAgentCertFingerprint = stored;
     _agentApiClient.setTrustedCertFingerprint(stored);
-    _agentApiClient.setAllowUntrustedCerts(true);
   }
 
   Future<bool> _loadAgentHealth() async {
@@ -1111,26 +1109,18 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     return 'agent_cert_fp_${host}_$port';
   }
 
-  Future<void> _maybeHandleAgentCertificate() async {
-    final uri = _agentApiClient.baseUri;
-    if (uri.scheme != 'https') {
-      return;
-    }
-    final fingerprint = _agentApiClient.lastSeenCertFingerprint;
-    if (fingerprint == null || fingerprint.isEmpty) {
-      return;
-    }
+  Future<bool> _maybeHandleAgentCertificate() async {
+    final fingerprint = await _agentApiClient.inspectCertificate();
     final prefs = await SharedPreferences.getInstance();
     final key = _agentCertPrefsKey();
     final stored = prefs.getString(key);
     _trustedAgentCertFingerprint ??= stored;
     if (_trustedAgentCertFingerprint == fingerprint) {
       _agentApiClient.setTrustedCertFingerprint(fingerprint);
-      _agentApiClient.setAllowUntrustedCerts(false);
-      return;
+      return true;
     }
     if (_certDialogOpen || !mounted) {
-      return;
+      return false;
     }
     _certDialogOpen = true;
     try {
@@ -1157,64 +1147,26 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
         await prefs.setString(key, fingerprint);
         _trustedAgentCertFingerprint = fingerprint;
         _agentApiClient.setTrustedCertFingerprint(fingerprint);
-        _agentApiClient.setAllowUntrustedCerts(false);
         if (mounted) {
           _showSnackBarInfo('Agent certificate trusted.');
         }
       } else {
-        _agentApiClient.setAllowUntrustedCerts(false);
+        _agentCertificateRejected = true;
         if (mounted) {
           _notifyAgentErrorOnce('Agent certificate not trusted. Connection blocked.');
           _showSnackBarError('Agent certificate not trusted. Connection blocked.');
         }
       }
+      return approved == true;
     } finally {
       _certDialogOpen = false;
     }
   }
 
   Future<List<BackupDriverInfo>> _loadBackupDrivers() async {
-    try {
-      final drivers = await _agentApiClient.fetchDrivers();
-      if (drivers.isNotEmpty) {
-        return drivers;
-      }
-    } catch (_) {}
-    return _fallbackBackupDrivers();
-  }
-
-  List<BackupDriverInfo> _fallbackBackupDrivers() {
-    return [
-      BackupDriverInfo(
-        id: 'filesystem',
-        label: 'Filesystem',
-        usesPath: true,
-        capabilities: BackupDriverCapabilities(
-          supportsRangeRead: true,
-          supportsBatchDelete: true,
-          supportsMultipartUpload: false,
-          supportsServerSideCopy: false,
-          supportsConditionalWrite: false,
-          supportsVersioning: false,
-          maxConcurrentWrites: 16,
-        ),
-      ),
-      BackupDriverInfo(
-        id: 'dummy',
-        label: 'Dummy',
-        usesPath: false,
-        capabilities: BackupDriverCapabilities(
-          supportsRangeRead: false,
-          supportsBatchDelete: false,
-          supportsMultipartUpload: false,
-          supportsServerSideCopy: false,
-          supportsConditionalWrite: false,
-          supportsVersioning: false,
-          maxConcurrentWrites: 1,
-          params: [DriverParamDefinition(key: 'throttleMbps', label: 'Dummy throttle', type: DriverParamType.number, min: 0, unit: 'MB/s', help: 'Leave empty or 0 for unlimited.')],
-        ),
-      ),
-    ];
+    final drivers = await _agentApiClient.fetchDrivers();
+    if (drivers.isEmpty) throw StateError('Agent returned no storage drivers.');
+    return drivers;
   }
 
   List<BackupStorage> _enabledStorages() {
@@ -2192,9 +2144,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                       decoration: const InputDecoration(labelText: 'Server name', hintText: 'Libvirt host', prefixIcon: Icon(Icons.badge_outlined), border: OutlineInputBorder()),
                       textInputAction: TextInputAction.next,
                       validator: (value) {
-                        if (_allowEmptyServerNameForTest) {
-                          return null;
-                        }
                         if (value == null || value.trim().isEmpty) {
                           return 'Enter a server name';
                         }
@@ -2280,7 +2229,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
             TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Cancel')),
             TextButton(
               onPressed: () async {
-                _ensureServerNameFilled();
                 if (!_connectionFormKey.currentState!.validate()) {
                   return;
                 }
@@ -2519,13 +2467,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   }
 
   Future<bool> _testConnection() async {
-    var isValid = false;
-    try {
-      _allowEmptyServerNameForTest = true;
-      isValid = _connectionFormKey.currentState!.validate();
-    } finally {
-      _allowEmptyServerNameForTest = false;
-    }
+    final isValid = _connectionFormKey.currentState!.validate();
     if (!isValid) {
       return false;
     }
@@ -2558,7 +2500,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   }
 
   Future<void> _saveConnectionAgentSettings({bool showSnackBar = true}) async {
-    _ensureServerNameFilled();
     if (!_connectionFormKey.currentState!.validate()) {
       return;
     }
@@ -2649,7 +2590,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
           name: AppSettings.filesystemStorageName,
           driverId: 'filesystem',
           enabled: true,
-          disableFresh: current.disableFresh,
           params: <String, dynamic>{'path': trimmedPath},
         );
         if (current.params['path']?.toString().trim() != trimmedPath) {
@@ -2975,7 +2915,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       var savedSomething = false;
 
       if (needsConnectionSave) {
-        _ensureServerNameFilled();
         if (!_connectionFormKey.currentState!.validate()) {
           return;
         }
@@ -3075,7 +3014,8 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
           builder: (context, setStateDialog) {
             Future<bool> editStorage({BackupStorage? existing}) async {
               final nameController = TextEditingController(text: existing?.name ?? '');
-              var driverId = existing?.driverId ?? (_backupDrivers.isNotEmpty ? _backupDrivers.first.id : 'filesystem');
+              if (_backupDrivers.isEmpty) throw StateError('Load storage drivers before editing storage.');
+              var driverId = existing?.driverId ?? _backupDrivers.first.id;
               var enabled = existing?.enabled ?? true;
               final params = Map<String, dynamic>.from(existing?.params ?? const <String, dynamic>{});
               final pathController = TextEditingController(text: params['path']?.toString() ?? '');
@@ -3096,6 +3036,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                 builder: (context) {
                   return StatefulBuilder(
                     builder: (context, setStateStorage) {
+                      final selectedCapabilities = _backupDrivers.firstWhere((driver) => driver.id == driverId).capabilities;
                       final hasStoredGdriveRefreshToken = (params['refreshTokenEnc']?.toString().trim().isNotEmpty ?? false) && !gdriveDisconnected;
                       final gdriveConnected = _isStorageGdriveConnected(gdriveRefreshController.text) || hasStoredGdriveRefreshToken;
                       return AlertDialog(
@@ -3158,7 +3099,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                   ),
                                   const SizedBox(height: 12),
                                   SwitchListTile(value: enabled, onChanged: (value) => setStateStorage(() => enabled = value), title: const Text('Enabled')),
-                                  if (driverId == 'filesystem') ...[
+                                  if (selectedCapabilities.hasParam('path')) ...[
                                     const SizedBox(height: 12),
                                     TextFormField(
                                       controller: pathController,
@@ -3166,7 +3107,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                       validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a path' : null,
                                     ),
                                   ],
-                                  if (driverId == 'sftp') ...[
+                                  if (selectedCapabilities.hasParam('host')) ...[
                                     const SizedBox(height: 12),
                                     TextFormField(
                                       controller: sftpHostController,
@@ -3177,6 +3118,10 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                     TextFormField(
                                       controller: sftpPortController,
                                       decoration: const InputDecoration(labelText: 'Port'),
+                                      validator: (value) {
+                                        final port = int.tryParse(value?.trim() ?? '');
+                                        return port == null || port <= 0 || port > 65535 ? 'Enter a port from 1 to 65535' : null;
+                                      },
                                     ),
                                     const SizedBox(height: 12),
                                     TextFormField(
@@ -3198,7 +3143,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                       validator: (value) => (value == null || value.trim().isEmpty) ? 'Enter a base path' : null,
                                     ),
                                   ],
-                                  if (driverId == 'gdrive') ...[
+                                  if (selectedCapabilities.hasParam('refreshToken')) ...[
                                     const SizedBox(height: 12),
                                     TextFormField(
                                       controller: gdriveRootController,
@@ -3271,11 +3216,11 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                 return;
                               }
                               final storageParams = <String, dynamic>{};
-                              if (driverId == 'filesystem') {
+                              if (selectedCapabilities.hasParam('path')) {
                                 storageParams['path'] = pathController.text.trim();
-                              } else if (driverId == 'sftp') {
+                              } else if (selectedCapabilities.hasParam('host')) {
                                 storageParams['host'] = sftpHostController.text.trim();
-                                storageParams['port'] = int.tryParse(sftpPortController.text.trim()) ?? 22;
+                                storageParams['port'] = int.parse(sftpPortController.text.trim());
                                 storageParams['username'] = sftpUserController.text.trim();
                                 final sftpPassword = sftpPasswordController.text;
                                 storageParams['password'] = sftpPassword;
@@ -3286,7 +3231,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                   }
                                 }
                                 storageParams['basePath'] = sftpBasePathController.text.trim();
-                              } else if (driverId == 'gdrive') {
+                              } else if (selectedCapabilities.hasParam('refreshToken')) {
                                 final accessToken = gdriveAccessController.text.trim();
                                 final refreshToken = gdriveRefreshController.text.trim();
                                 storageParams['rootPath'] = gdriveRootController.text.trim();
@@ -3312,16 +3257,9 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                   }
                                 }
                               }
-                              Navigator.of(context).pop(
-                                BackupStorage(
-                                  id: existing?.id ?? _generateStorageId(driverId),
-                                  name: nameController.text.trim(),
-                                  driverId: driverId,
-                                  enabled: enabled,
-                                  disableFresh: existing?.disableFresh ?? false,
-                                  params: storageParams,
-                                ),
-                              );
+                              Navigator.of(
+                                context,
+                              ).pop(BackupStorage(id: existing?.id ?? _generateStorageId(driverId), name: nameController.text.trim(), driverId: driverId, enabled: enabled, params: storageParams));
                             },
                             child: const Text('Save'),
                           ),
@@ -3701,14 +3639,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     });
   }
 
-  void _ensureServerNameFilled() {
-    if (_serverNameController.text.trim().isNotEmpty) {
-      return;
-    }
-    final fallbackName = _sshHostController.text.trim();
-    _serverNameController.text = fallbackName.isEmpty ? 'Server' : fallbackName;
-  }
-
   Widget _buildRailItem({
     required int index,
     required IconData icon,
@@ -3948,7 +3878,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
                                   const SizedBox(width: 12),
                                   Expanded(
                                     child: Text(
-                                      'Native SCP/SFTP library not available. Backup and restore will use the slower Dart fallback.',
+                                      'Native SFTP library not available. Backup and restore require this library.',
                                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: colorScheme.onTertiaryContainer),
                                     ),
                                   ),

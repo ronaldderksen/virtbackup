@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.0 - 2026-10-27
+
+- Preserve the original directory-scan error when aborting background requests also fails or times out.
+- Prevent completed backups from remaining at 100% while redundant Google Drive directory requests are still pending, and report storage shutdown failures clearly.
+- Stop backups when snapshot creation or disk-chain inspection fails, and report storage failures reliably.
+- Prevent failed transfers from leaving backups waiting indefinitely.
+- Report failed VM definitions, restore rebases, and integrity checks as failed jobs.
+- Restore original disk names when a multi-disk VM rename fails partway through.
+- Verify agent certificates before sending credentials, and block untrusted or changed certificates.
+- Preserve storage edits made while Google Drive jobs refresh their access tokens.
+- Report invalid settings files and unavailable driver catalogs instead of silently replacing them.
+- Require an explicit server name and reject invalid SFTP ports when saving settings.
+
 ## 1.1.0 - 2026-05-21
 
 - Added multi-VM backup and restore schedules that run selected VMs sequentially.

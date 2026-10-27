@@ -3,6 +3,7 @@ part of '../backup.dart';
 class _WriterWorker {
   _WriterWorker({
     required this.maxConcurrentWrites,
+    required this.onFailure,
     required this.logInterval,
     required this.maxRetryAttempts,
     required this.retryBaseDelay,
@@ -17,6 +18,7 @@ class _WriterWorker {
     this.waitForWriteReady,
   });
 
+  final void Function(Object error, StackTrace stackTrace) onFailure;
   final int maxConcurrentWrites;
   final Duration logInterval;
   final int maxRetryAttempts;
@@ -172,6 +174,7 @@ class _WriterWorker {
 
       while (!_done || _queuedBlocks > 0 || writeFutures.isNotEmpty) {
         await _maybeYieldEventLoop();
+        if (_done && _queuedBlocks == 0 && writeFutures.isEmpty) break;
         _maybeRecoverConcurrency();
         if (!isWriteReady()) {
           if (waitForWriteReady != null) {
@@ -219,6 +222,7 @@ class _WriterWorker {
           _inFlightBytes += entry.bytes.length;
           _reportMetrics();
           final future = scheduleWrite(entry.hash, entry.bytes);
+          unawaited(future.catchError((Object _) {}));
           writeFutures.add(_InFlightWrite(block: entry, future: future));
           scheduled = true;
           if (bucket.isNotEmpty) {
@@ -258,6 +262,7 @@ class _WriterWorker {
       _writerError = error;
       _writerStack = stackTrace;
       LogWriter.logAgentSync(level: 'error', message: 'worker=writer error: $error');
+      if (!_canceled) onFailure(error, stackTrace);
       if (_wakeWriter != null && !_wakeWriter!.isCompleted) {
         _wakeWriter!.complete();
       }

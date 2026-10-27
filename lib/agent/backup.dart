@@ -6,12 +6,12 @@ import 'dart:typed_data';
 
 import 'package:virtbackup/agent/drv/backup_storage.dart';
 import 'package:virtbackup/agent/logging_config.dart';
+import 'package:virtbackup/agent/workers/blob_cache_worker.dart';
 import 'package:virtbackup/common/models.dart';
 import 'package:virtbackup/common/log_writer.dart';
 
 part 'backup_models.dart';
 part 'backup_types.dart';
-part 'workers/blob_cache_worker.dart';
 part 'workers/exists_worker.dart';
 part 'workers/hashblocks_worker.dart';
 part 'workers/sftp_worker.dart';
@@ -105,14 +105,12 @@ class BackupAgent {
   static const Duration _writerRetryBaseDelay = Duration(seconds: 2);
   static const Duration _writerRetryMaxDelay = Duration(seconds: 30);
   static const Duration _writerRetryConcurrencyCooldown = Duration(minutes: 2);
-  final Set<Future<void>> _inFlightWrites = {};
   final int? _writerConcurrencyOverride;
   BackupDriver? _activeDriver;
   final Set<_ExistsWorker> _activeExistsWorkers = <_ExistsWorker>{};
   final Set<_WriterWorker> _activeWriterWorkers = <_WriterWorker>{};
   BlobDirectoryCache? _blobDirectoryCache;
-  _BlobCacheWorker? _blobCacheWorker;
-  Future<void>? _blobCacheWorkerFuture;
+  BlobCacheWorker? _blobCacheWorker;
 
   void dispose() {
     _isDisposed = true;
@@ -289,11 +287,10 @@ class BackupAgent {
           } catch (_) {}
         }
         if (chainItems.isEmpty) {
-          _logInfo('Backup chain empty for ${vm.name} target ${entry.key}; falling back to $sourcePath');
-          chainItems.add(_DiskChainItem(sourcePath: sourcePath, diskId: topDiskId));
+          throw StateError('Backup chain is empty for ${vm.name} target ${entry.key}.');
         }
         totalDisks += chainItems.length;
-        backupPlans.add(_DiskBackupPlan(topDiskId: topDiskId, target: entry.key, chain: chainItems));
+        backupPlans.add(_DiskBackupPlan(chain: chainItems));
       }
       if (totalBytes > 0) {
         _setProgress(_progress.copyWith(totalBytes: totalBytes));
@@ -366,29 +363,41 @@ class BackupAgent {
       }
       return BackupAgentResult(success: false, message: error.toString());
     } finally {
+      Object? cleanupError;
+      StackTrace? cleanupStack;
+      void recordCleanupError(String message, Object error, StackTrace stackTrace) {
+        _logInfo('$message: $error');
+        if (runError == null && cleanupError == null) {
+          cleanupError = error;
+          cleanupStack = stackTrace;
+        }
+      }
+
       try {
         await _stopBlobCacheWorker();
       } catch (error, stackTrace) {
-        if (runError == null) {
-          Error.throwWithStackTrace(error, stackTrace);
-        }
-        _logInfo('blob-cache worker cleanup failed: $error');
+        recordCleanupError('blob-cache worker cleanup failed', error, stackTrace);
       }
       try {
-        await driver.closeConnections();
+        _logInfo('Closing storage connections...');
+        await driver.closeConnections().timeout(const Duration(seconds: 30));
+        _logInfo('Storage connections closed.');
       } catch (error, stackTrace) {
-        if (runError == null) {
-          Error.throwWithStackTrace(error, stackTrace);
-        }
-        _logInfo('driver connection cleanup failed: $error');
+        recordCleanupError('driver connection cleanup failed', error, stackTrace);
       }
-      await _dependencies.endLargeTransfer?.call(server);
-      _stopSpeedTimer();
-      _stopProgressLogTimer();
-      _activeDriver = null;
-      _blobDirectoryCache = null;
-      _setProgress(_progress.copyWith(isRunning: false, statusMessage: '', speedBytesPerSec: 0, physicalSpeedBytesPerSec: 0, sanitySpeedBytesPerSec: 0));
-      _isRunning = false;
+      try {
+        await _dependencies.endLargeTransfer?.call(server);
+      } catch (error, stackTrace) {
+        recordCleanupError('transfer session cleanup failed', error, stackTrace);
+      } finally {
+        _stopSpeedTimer();
+        _stopProgressLogTimer();
+        _activeDriver = null;
+        _blobDirectoryCache = null;
+        _setProgress(_progress.copyWith(isRunning: false, statusMessage: '', speedBytesPerSec: 0, physicalSpeedBytesPerSec: 0, sanitySpeedBytesPerSec: 0));
+        _isRunning = false;
+      }
+      if (cleanupError != null) Error.throwWithStackTrace(cleanupError!, cleanupStack!);
     }
   }
 
@@ -471,27 +480,23 @@ class BackupAgent {
     if (cache == null) {
       return;
     }
-    _blobCacheWorker = _BlobCacheWorker(initialize: cache.initialize, processHash: cache.prefetchHash);
-    _blobCacheWorkerFuture = _blobCacheWorker!.run();
+    _blobCacheWorker = BlobCacheWorker(initialize: cache.initialize, processHash: cache.prefetchHash);
+    unawaited(_blobCacheWorker!.run());
   }
 
   Future<void> _stopBlobCacheWorker() async {
     final worker = _blobCacheWorker;
-    if (worker == null) {
-      return;
+    if (worker == null) return;
+    final driver = _activeDriver;
+    if (driver == null) throw StateError('Blob-cache shutdown requires the active driver.');
+    if (_cancelRequested) worker.cancel();
+    _logInfo('Stopping blob-cache worker...');
+    try {
+      await worker.finish(timeout: const Duration(seconds: 30), abortPendingRequests: driver.closeConnections);
+      _logInfo('Blob-cache worker stopped.');
+    } finally {
+      _blobCacheWorker = null;
     }
-    if (_cancelRequested) {
-      worker.cancel();
-    } else {
-      worker.signalDone();
-    }
-    final future = _blobCacheWorkerFuture;
-    _blobCacheWorker = null;
-    _blobCacheWorkerFuture = null;
-    if (future != null) {
-      await future;
-    }
-    worker.throwIfError();
   }
 
   void _prefetchBlobCache(String hash) {
@@ -794,8 +799,8 @@ class BackupAgent {
       hashblocksLastTick = now;
     }
 
-    Object? missingError;
-    StackTrace? missingStack;
+    Object? pipelineError;
+    StackTrace? pipelineStack;
     HashblocksController? controller;
     const limitUpdateInterval = Duration(seconds: 1);
     const limitStepBytes = 1024 * 1024 * 1024;
@@ -886,6 +891,31 @@ class BackupAgent {
     var writerAwaited = false;
     var missingRunLogged = false;
     var sftpStartLogged = false;
+    final failureSignal = Completer<void>();
+    unawaited(failureSignal.future.catchError((Object _) {}));
+
+    void failPipeline(Object error, StackTrace stackTrace) {
+      if (pipelineError != null) return;
+      pipelineError = error;
+      pipelineStack = stackTrace;
+      existsWorker.cancel();
+      writerWorker.cancel();
+      missingDone = true;
+      missingQueue.clear();
+      if (wakeMissingWorker != null && !wakeMissingWorker!.isCompleted) wakeMissingWorker!.complete();
+      if (wakeSftpReadResume != null && !wakeSftpReadResume!.isCompleted) wakeSftpReadResume!.complete();
+      failureSignal.completeError(error, stackTrace);
+      try {
+        controller?.stop();
+      } catch (_) {
+        // Preserve the pipeline error if the failed SSH connection cannot receive STOP.
+      }
+    }
+
+    void ensurePipelineActive() {
+      if (pipelineError != null) Error.throwWithStackTrace(pipelineError!, pipelineStack!);
+      _ensureNotCanceled();
+    }
 
     void enqueueMissingRun(int startIndex, List<String> hashes) {
       if (hashes.isEmpty) {
@@ -904,6 +934,7 @@ class BackupAgent {
 
     final cache = _blobDirectoryCache;
     writerWorker = _WriterWorker(
+      onFailure: failPipeline,
       maxConcurrentWrites: _writerConcurrencyOverride ?? max(1, driver.capabilities.maxConcurrentWrites),
       logInterval: agentLogInterval,
       maxRetryAttempts: _writerMaxRetryAttempts,
@@ -948,7 +979,7 @@ class BackupAgent {
         _blobDirectoryCache?.markHashKnown(hash);
         writerWorker.enqueue(hash, bytes);
       },
-      ensureNotCanceled: _ensureNotCanceled,
+      ensureNotCanceled: ensurePipelineActive,
       shouldPauseRead: () => _writerQueuedBytes > sftpReadPauseThresholdBytes,
       waitForReadResume: () async {
         wakeSftpReadResume ??= Completer<void>();
@@ -965,11 +996,12 @@ class BackupAgent {
     const maxMissingRun = 1;
 
     existsWorker = _ExistsWorker(
+      onFailure: failPipeline,
       maxMissingRun: maxMissingRun,
       blobExists: _blobExists,
       enqueueMissingRun: enqueueMissingRun,
       handleBytes: _handleBytes,
-      ensureNotCanceled: _ensureNotCanceled,
+      ensureNotCanceled: ensurePipelineActive,
       onExisting: () {
         resolvedZeroOrExistingBlocks += 1;
         hashblocksWorker.markExisting();
@@ -984,7 +1016,7 @@ class BackupAgent {
     hashblocksWorker = _HashblocksWorker(
       sink: sink,
       fileSize: fileSize,
-      ensureNotCanceled: _ensureNotCanceled,
+      ensureNotCanceled: ensurePipelineActive,
       writeZeroRun: (start, end) => _writeZeroRun(sink, start, end),
       parseZeroRange: _parseZeroRange,
       parseHashEntry: _parseHashEntry,
@@ -1017,11 +1049,10 @@ class BackupAgent {
               }
             }
           }().catchError((Object error, StackTrace stackTrace) {
-            missingError = error;
-            missingStack = stackTrace;
+            failPipeline(error, stackTrace);
           });
 
-      await _dependencies.streamHashblocks(
+      final hashblocksFuture = _dependencies.streamHashblocks(
         server,
         remoteHashblocksPath,
         sourcePath,
@@ -1044,6 +1075,7 @@ class BackupAgent {
         },
         onLine: (line) async {
           try {
+            if (pipelineError != null) return;
             _ensureNotCanceled();
             final trimmed = line.trim();
             if (trimmed.isEmpty) {
@@ -1066,9 +1098,8 @@ class BackupAgent {
         },
       );
 
-      if (_cancelRequested) {
-        throw const _BackupCanceled();
-      }
+      await Future.any<void>([hashblocksFuture, failureSignal.future]);
+      ensurePipelineActive();
       if (hashblocksTotalSha256 == null) {
         throw StateError('Hashblocks SHA256 line missing.');
       }
@@ -1086,8 +1117,8 @@ class BackupAgent {
       writerWorker.signalDone();
       await writerFuture;
       writerAwaited = true;
-      if (missingError != null) {
-        Error.throwWithStackTrace(missingError!, missingStack ?? StackTrace.current);
+      if (pipelineError != null) {
+        Error.throwWithStackTrace(pipelineError!, pipelineStack ?? StackTrace.current);
       }
       writerWorker.throwIfError();
 
@@ -1117,7 +1148,7 @@ class BackupAgent {
         wakeSftpReadResume!.complete();
         wakeSftpReadResume = null;
       }
-      if (_cancelRequested) {
+      if (_cancelRequested || pipelineError != null) {
         existsWorker.cancel();
         writerWorker.cancel();
         try {
@@ -1127,11 +1158,10 @@ class BackupAgent {
         existsWorker.signalDone();
         writerWorker.signalDone();
       }
+      missingDone = true;
+      if (wakeMissingWorker != null && !wakeMissingWorker!.isCompleted) wakeMissingWorker!.complete();
       if (!_cancelRequested && writerFutureRef != null && !writerAwaited) {
         await writerFutureRef;
-      }
-      if (!_cancelRequested) {
-        await _drainPendingWrites();
       }
       if (!manifestFlushed) {
         await sink.flush();
@@ -1223,14 +1253,6 @@ class BackupAgent {
     await driver.writeBlob(hash, bytes);
   }
 
-  Future<void> _drainPendingWrites() async {
-    if (_inFlightWrites.isEmpty) {
-      return;
-    }
-    await Future.wait(_inFlightWrites);
-    _inFlightWrites.clear();
-  }
-
   Future<bool> _blobExists(String hash) async {
     final cache = _blobDirectoryCache;
     if (cache == null) {
@@ -1314,15 +1336,9 @@ class BackupAgent {
   }
 
   Future<List<String>> _loadBackingChain(ServerConfig server, String sourcePath) async {
-    try {
-      final result = await _dependencies.runSshCommand(server, 'qemu-img info --backing-chain --force-share "$sourcePath"');
-      if ((result.exitCode ?? 0) != 0) {
-        return [sourcePath];
-      }
-      return _parseBackingChainPaths(result.stdout, sourcePath: sourcePath);
-    } catch (_) {
-      return [sourcePath];
-    }
+    final result = await _dependencies.runSshCommand(server, 'qemu-img info --backing-chain --force-share "$sourcePath"');
+    if (result.exitCode != 0) throw StateError('Cannot inspect disk chain for $sourcePath: ${result.stderr.trim()}');
+    return _parseBackingChainPaths(result.stdout, sourcePath: sourcePath);
   }
 
   Future<List<String>> _loadBackingChainForSimpleDiskGuard(ServerConfig server, String sourcePath) async {
@@ -1361,9 +1377,7 @@ class BackupAgent {
         paths.add(backing);
       }
     }
-    if (paths.isEmpty) {
-      return [sourcePath];
-    }
+    if (paths.isEmpty) throw StateError('Disk chain output contains no image paths for $sourcePath.');
     if (!paths.contains(sourcePath)) {
       paths.insert(0, sourcePath);
     }
@@ -1492,6 +1506,7 @@ class BlobDirectoryCache {
   Set<String>? _shardNames;
   Future<void>? _shardsInFlight;
   final Map<String, Set<String>> _blobNamesByShardKey = {};
+  final Map<String, Future<Set<String>>> _blobNamesInFlightByShardKey = {};
   Future<void>? _blobDirectoryLoadInFlight;
   final Map<String, Future<void>> _shardCreateInFlight = {};
   final List<Completer<void>> _writeReadyWaiters = <Completer<void>>[];
@@ -1662,16 +1677,24 @@ class BlobDirectoryCache {
   }
 
   Future<Set<String>> _loadBlobNames(String shardKey) async {
+    final pending = _blobNamesInFlightByShardKey[shardKey];
+    if (pending != null) return pending;
     final cached = _blobNamesByShardKey[shardKey];
-    if (cached != null) {
-      return cached;
-    }
+    if (cached != null) return cached;
     final lister = _blobDirectoryLister;
     if (lister != null) {
-      final names = await lister.listBlobNames(shardKey);
-      (_shardNames ??= <String>{}).add(shardKey);
-      _blobNamesByShardKey[shardKey] = names;
-      return names;
+      final request = () async {
+        final names = await lister.listBlobNames(shardKey);
+        (_shardNames ??= <String>{}).add(shardKey);
+        // Writes may have registered additional hashes while the directory listing was in flight.
+        return (_blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{})..addAll(names));
+      }();
+      _blobNamesInFlightByShardKey[shardKey] = request;
+      try {
+        return await request;
+      } finally {
+        _blobNamesInFlightByShardKey.remove(shardKey);
+      }
     }
     final inFlight = _blobDirectoryLoadInFlight;
     if (inFlight != null) {

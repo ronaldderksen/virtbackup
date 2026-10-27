@@ -39,9 +39,7 @@ class _DiskChainItem {
 }
 
 class _DiskBackupPlan {
-  const _DiskBackupPlan({required this.topDiskId, required this.target, required this.chain});
+  const _DiskBackupPlan({required this.chain});
 
-  final String topDiskId;
-  final String target;
   final List<_DiskChainItem> chain;
 }

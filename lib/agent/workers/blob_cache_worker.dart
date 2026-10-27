@@ -1,7 +1,9 @@
-part of '../backup.dart';
+import 'dart:async';
 
-class _BlobCacheWorker {
-  _BlobCacheWorker({required this.initialize, required this.processHash});
+import 'package:virtbackup/common/log_writer.dart';
+
+class BlobCacheWorker {
+  BlobCacheWorker({required this.initialize, required this.processHash});
 
   final Future<void> Function() initialize;
   final Future<void> Function(String hash) processHash;
@@ -13,6 +15,8 @@ class _BlobCacheWorker {
   Object? _error;
   StackTrace? _errorStack;
   var _inFlightTasks = 0;
+  Future<void>? _running;
+  final Completer<void> _cancelSignal = Completer<void>();
 
   void enqueue(String hash) {
     if (_done || _canceled) {
@@ -40,6 +44,7 @@ class _BlobCacheWorker {
     _canceled = true;
     _done = true;
     _queue.clear();
+    if (!_cancelSignal.isCompleted) _cancelSignal.complete();
     if (_wakeWorker != null && !_wakeWorker!.isCompleted) {
       _wakeWorker!.complete();
       _wakeWorker = null;
@@ -56,13 +61,44 @@ class _BlobCacheWorker {
     }
   }
 
-  Future<void> run() async {
+  Future<void> run() => _running ??= _run();
+
+  Future<void> finish({required Duration timeout, required Future<void> Function() abortPendingRequests}) async {
+    signalDone();
+    try {
+      await run().timeout(timeout);
+    } on TimeoutException {
+      // Only background prefetch work remains here; required existence checks and writes have already finished.
+      // Preserve errors observed before shutdown instead of disguising them as cancellation.
+      final error = _canceled ? null : _error;
+      final stackTrace = _errorStack;
+      LogWriter.logAgentSync(level: 'warn', message: 'blob-cache shutdown exceeded ${timeout.inMilliseconds}ms; aborting pending directory requests.');
+      cancel();
+      Object? abortError;
+      StackTrace? abortStack;
+      try {
+        await abortPendingRequests().timeout(timeout);
+      } catch (closeError, closeStack) {
+        abortError = closeError;
+        abortStack = closeStack;
+        LogWriter.logAgentSync(level: 'error', message: 'blob-cache request abort failed: $closeError');
+      } finally {
+        await run();
+      }
+      if (error != null) Error.throwWithStackTrace(error, stackTrace!);
+      if (abortError != null) Error.throwWithStackTrace(abortError, abortStack!);
+    }
+    throwIfError();
+  }
+
+  Future<void> _run() async {
     try {
       LogWriter.logAgentSync(level: 'info', message: 'worker=blob_cache started');
-      await initialize();
+      await Future.any<void>([initialize(), _cancelSignal.future]);
+      if (_canceled) return;
       LogWriter.logAgentSync(level: 'info', message: 'worker=blob_cache initial scan done');
 
-      while (!_done || _queue.isNotEmpty || _inFlightTasks > 0) {
+      while (!_canceled && (!_done || _queue.isNotEmpty || _inFlightTasks > 0)) {
         while (_queue.isNotEmpty) {
           if (_canceled) {
             _queue.clear();

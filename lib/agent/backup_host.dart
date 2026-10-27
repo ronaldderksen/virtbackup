@@ -53,7 +53,7 @@ class BackupAgentHost {
 
   BackupAgentDependencies buildDependencies() {
     return BackupAgentDependencies(
-      runSshCommand: _runSshCommandForServer,
+      runSshCommand: runSshCommand,
       loadVmDiskPaths: _loadVmDiskPaths,
       downloadRemoteFile: _downloadRemoteFileViaSftp,
       streamRemoteFile: _streamRemoteFileViaSftp,
@@ -659,8 +659,8 @@ class BackupAgentHost {
   }
 
   Future<void> _createVmSnapshot(ServerConfig server, VmEntry vm, String snapshotName) async {
-    final command = 'virsh snapshot-create-as --domain "${vm.name}" --name "$snapshotName" --disk-only --atomic --no-metadata';
-    await _runSshCommandForServer(server, command);
+    final command = 'virsh snapshot-create-as --domain ${_shellQuote(vm.name)} --name ${_shellQuote(snapshotName)} --disk-only --atomic --no-metadata';
+    await runCheckedSshCommand(server, command, 'Snapshot creation failed for ${vm.name}.');
   }
 
   Future<void> _cleanupActiveOverlays(ServerConfig server, VmEntry vm, List<MapEntry<String, String>> activeDisks, List<MapEntry<String, String>> inactiveDisks) async {
@@ -680,12 +680,12 @@ class BackupAgentHost {
           continue;
         }
         final command = await _blockCommitCommand(server, vm, target, verbose: false, top: activeIsVirtbackup ? activeSource : null, base: activeIsVirtbackup ? inactiveSource : null);
-        await _runCheckedSshCommand(server, command, 'Cleanup blockcommit failed for ${vm.name} target $target.');
+        await runCheckedSshCommand(server, command, 'Cleanup blockcommit failed for ${vm.name} target $target.');
         continue;
       }
       if (_sourcePathLooksLikeOverlay(activeSource)) {
         final command = await _blockCommitCommand(server, vm, target, verbose: false, top: activeSource, base: inactiveSource);
-        await _runCheckedSshCommand(server, command, 'Cleanup blockcommit failed for ${vm.name} target $target.');
+        await runCheckedSshCommand(server, command, 'Cleanup blockcommit failed for ${vm.name} target $target.');
       }
     }
   }
@@ -695,7 +695,7 @@ class BackupAgentHost {
     for (final entry in disks) {
       final target = entry.key;
       final command = await _blockCommitCommand(server, vm, target, verbose: true);
-      await _runCheckedSshCommand(server, command, 'Blockcommit failed for ${vm.name} target $target.');
+      await runCheckedSshCommand(server, command, 'Blockcommit failed for ${vm.name} target $target.');
     }
     final activeDisks = await _loadVmDiskPaths(server, vm);
     final inactiveDisks = await _loadVmDiskPaths(server, vm, inactive: true);
@@ -764,7 +764,7 @@ class BackupAgentHost {
           throw 'Refusing to blockcommit: base equals top for ${vm.name} target $target ($baseSource).';
         }
         final command = await _blockCommitCommand(server, vm, target, verbose: false, top: activeSource, base: baseSource);
-        await _runCheckedSshCommand(server, command, 'Blockcommit failed for ${vm.name} target $target.');
+        await runCheckedSshCommand(server, command, 'Blockcommit failed for ${vm.name} target $target.');
         overlaysToDelete.add(activeSource);
         continue;
       }
@@ -773,7 +773,7 @@ class BackupAgentHost {
         continue;
       }
       final command = await _blockCommitCommand(server, vm, target, verbose: false);
-      await _runCheckedSshCommand(server, command, 'Blockcommit failed for ${vm.name} target $target.');
+      await runCheckedSshCommand(server, command, 'Blockcommit failed for ${vm.name} target $target.');
     }
     await _deleteUnusedVirtBackupOverlays(server, vm, [
       ...overlaysToDelete,
@@ -796,7 +796,7 @@ class BackupAgentHost {
         continue;
       }
       LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: commit $overlayPath -> $backingPath');
-      await _runCheckedSshCommand(server, 'qemu-img commit ${_shellQuote(overlayPath)}', 'Cleanup ${vm.name}: qemu-img commit failed for $overlayPath.');
+      await runCheckedSshCommand(server, 'qemu-img commit ${_shellQuote(overlayPath)}', 'Cleanup ${vm.name}: qemu-img commit failed for $overlayPath.');
       updatedXml = updatedXml.replaceAll(overlayPath, backingPath);
       overlaysToDelete.add(overlayPath);
     }
@@ -808,7 +808,7 @@ class BackupAgentHost {
       await _runSshCommandForServer(server, 'mkdir -p "/var/tmp/virtbackup"');
       await _uploadLocalFileViaSftp(server, localXml.path, remoteXml);
       LogWriter.logAgentSync(level: 'info', message: 'Cleanup ${vm.name}: redefining domain using $remoteXml');
-      await _runCheckedSshCommand(server, 'virsh define ${_shellQuote(remoteXml)}', 'Cleanup ${vm.name}: virsh define failed for $remoteXml.');
+      await runCheckedSshCommand(server, 'virsh define ${_shellQuote(remoteXml)}', 'Cleanup ${vm.name}: virsh define failed for $remoteXml.');
       try {
         await localXml.delete();
       } catch (_) {}
@@ -893,10 +893,10 @@ class BackupAgentHost {
     return 'virsh blockcommit "${vm.name}" "$target"$flags';
   }
 
-  Future<void> _runCheckedSshCommand(ServerConfig server, String command, String failureMessage) async {
-    final result = await _runSshCommandForServer(server, command);
-    if ((result.exitCode ?? 0) != 0) {
-      throw result.stderr.trim().isEmpty ? failureMessage : result.stderr.trim();
+  Future<void> runCheckedSshCommand(ServerConfig server, String command, String failureMessage) async {
+    final result = await runSshCommand(server, command);
+    if (result.exitCode != 0) {
+      throw StateError(result.stderr.trim().isEmpty ? failureMessage : '$failureMessage ${result.stderr.trim()}');
     }
   }
 

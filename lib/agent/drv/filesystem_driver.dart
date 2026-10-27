@@ -10,16 +10,7 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
   static const String _appFolderName = 'VirtBackup';
 
   @override
-  BackupDriverCapabilities get capabilities => const BackupDriverCapabilities(
-    supportsRangeRead: true,
-    supportsBatchDelete: true,
-    supportsMultipartUpload: false,
-    supportsServerSideCopy: false,
-    supportsConditionalWrite: false,
-    supportsVersioning: false,
-    maxConcurrentWrites: 16,
-    maxConcurrentDirectoryListings: 1,
-  );
+  BackupDriverCapabilities get capabilities => BackupDriverCapabilities.forDriver('filesystem');
 
   @override
   String get storage => _rootDir().path;
@@ -167,11 +158,6 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
   }
 
   @override
-  Future<void> freshCleanup() async {
-    await _deleteDirIfExists(Directory('${_rootDir().path}${Platform.pathSeparator}manifests'));
-  }
-
-  @override
   Future<void> ensureBlobDir(String hash) async {
     if (hash.length < 2) {
       return;
@@ -196,6 +182,7 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
       try {
         await tempFile.delete();
       } catch (_) {}
+      rethrow;
     }
   }
 
@@ -243,13 +230,6 @@ class FilesystemBackupDriver implements BackupDriver, BlobDirectoryLister {
   @override
   void setReadConcurrencyLimit(int concurrency) {
     return;
-  }
-
-  Future<void> _deleteDirIfExists(Directory dir) async {
-    if (!await dir.exists()) {
-      return;
-    }
-    await dir.delete(recursive: true);
   }
 
   Future<void> _deleteInProgressInDir(Directory dir) async {

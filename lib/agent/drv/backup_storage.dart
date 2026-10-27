@@ -1,44 +1,8 @@
 import 'dart:io';
 
-class BackupDriverCapabilities {
-  const BackupDriverCapabilities({
-    required this.supportsRangeRead,
-    required this.supportsBatchDelete,
-    required this.supportsMultipartUpload,
-    required this.supportsServerSideCopy,
-    required this.supportsConditionalWrite,
-    required this.supportsVersioning,
-    required this.maxConcurrentWrites,
-    required this.maxConcurrentDirectoryListings,
-    this.params = const <DriverParamDefinition>[],
-  });
+import 'package:virtbackup/common/models.dart' show BackupDriverCapabilities;
 
-  final bool supportsRangeRead;
-  final bool supportsBatchDelete;
-  final bool supportsMultipartUpload;
-  final bool supportsServerSideCopy;
-  final bool supportsConditionalWrite;
-  final bool supportsVersioning;
-  final int maxConcurrentWrites;
-  final int maxConcurrentDirectoryListings;
-  final List<DriverParamDefinition> params;
-}
-
-enum DriverParamType { number, text, boolean }
-
-class DriverParamDefinition {
-  const DriverParamDefinition({required this.key, required this.label, required this.type, this.defaultValue, this.min, this.max, this.step, this.unit, this.help});
-
-  final String key;
-  final String label;
-  final DriverParamType type;
-  final dynamic defaultValue;
-  final num? min;
-  final num? max;
-  final num? step;
-  final String? unit;
-  final String? help;
-}
+export 'package:virtbackup/common/models.dart' show BackupDriverCapabilities, DriverParamDefinition, DriverParamType;
 
 abstract class BackupDriver {
   BackupDriverCapabilities get capabilities;
@@ -52,7 +16,6 @@ abstract class BackupDriver {
   Future<bool> deleteFile(String relativePath);
   Future<List<String>> listRelativeFiles(String relativeDir);
   Future<List<int>?> readFileBytes(String relativePath);
-  Future<void> freshCleanup();
   Future<void> ensureBlobDir(String hash);
   // Hard rule: always blind-write in every driver implementation.
   // No exists/list/stat/mkdir checks are allowed in this write path.

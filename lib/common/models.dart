@@ -3,7 +3,7 @@ enum ConnectionType { ssh, api }
 enum DriverParamType { number, text, boolean }
 
 class DriverParamDefinition {
-  DriverParamDefinition({required this.key, required this.label, required this.type, this.defaultValue, this.min, this.max, this.step, this.unit, this.help});
+  const DriverParamDefinition({required this.key, required this.label, required this.type, this.defaultValue, this.min, this.max, this.step, this.unit, this.help});
 
   final String key;
   final String label;
@@ -37,7 +37,7 @@ class DriverParamDefinition {
 }
 
 class BackupDriverCapabilities {
-  BackupDriverCapabilities({
+  const BackupDriverCapabilities({
     required this.supportsRangeRead,
     required this.supportsBatchDelete,
     required this.supportsMultipartUpload,
@@ -45,6 +45,7 @@ class BackupDriverCapabilities {
     required this.supportsConditionalWrite,
     required this.supportsVersioning,
     required this.maxConcurrentWrites,
+    required this.maxConcurrentDirectoryListings,
     this.params = const <DriverParamDefinition>[],
   });
 
@@ -55,7 +56,14 @@ class BackupDriverCapabilities {
   final bool supportsConditionalWrite;
   final bool supportsVersioning;
   final int maxConcurrentWrites;
+  final int maxConcurrentDirectoryListings;
   final List<DriverParamDefinition> params;
+
+  bool hasParam(String key) => params.any((param) => param.key == key);
+
+  static BackupDriverCapabilities forDriver(String driverId) {
+    return _driverProfiles[driverId] ?? (throw StateError('Unknown driverId: $driverId'));
+  }
 
   Map<String, dynamic> toMap() {
     return {
@@ -66,6 +74,7 @@ class BackupDriverCapabilities {
       'supportsConditionalWrite': supportsConditionalWrite,
       'supportsVersioning': supportsVersioning,
       'maxConcurrentWrites': maxConcurrentWrites,
+      'maxConcurrentDirectoryListings': maxConcurrentDirectoryListings,
       'params': params.map((param) => param.toMap()).toList(),
     };
   }
@@ -78,11 +87,80 @@ class BackupDriverCapabilities {
       supportsServerSideCopy: json['supportsServerSideCopy'] == true,
       supportsConditionalWrite: json['supportsConditionalWrite'] == true,
       supportsVersioning: json['supportsVersioning'] == true,
-      maxConcurrentWrites: (json['maxConcurrentWrites'] as num?)?.toInt() ?? 16,
+      maxConcurrentWrites: (json['maxConcurrentWrites'] as num).toInt(),
+      maxConcurrentDirectoryListings: (json['maxConcurrentDirectoryListings'] as num).toInt(),
       params: (json['params'] as List? ?? const <dynamic>[]).whereType<Map>().map((entry) => DriverParamDefinition.fromMap(Map<String, dynamic>.from(entry))).toList(),
     );
   }
 }
+
+const _concurrencyParams = [
+  DriverParamDefinition(key: 'uploadConcurrency', label: 'Concurrent uploads', type: DriverParamType.number, defaultValue: 8, min: 1),
+  DriverParamDefinition(key: 'downloadConcurrency', label: 'Concurrent downloads', type: DriverParamType.number, defaultValue: 8, min: 1),
+  DriverParamDefinition(key: 'storeBlobs', label: 'Store downloaded blobs', type: DriverParamType.boolean),
+  DriverParamDefinition(key: 'useBlobs', label: 'Use stored blobs', type: DriverParamType.boolean),
+];
+
+const _driverProfiles = <String, BackupDriverCapabilities>{
+  'filesystem': BackupDriverCapabilities(
+    supportsRangeRead: true,
+    supportsBatchDelete: true,
+    supportsMultipartUpload: false,
+    supportsServerSideCopy: false,
+    supportsConditionalWrite: false,
+    supportsVersioning: false,
+    maxConcurrentWrites: 16,
+    maxConcurrentDirectoryListings: 1,
+    params: [DriverParamDefinition(key: 'path', label: 'Path', type: DriverParamType.text)],
+  ),
+  'sftp': BackupDriverCapabilities(
+    supportsRangeRead: true,
+    supportsBatchDelete: false,
+    supportsMultipartUpload: false,
+    supportsServerSideCopy: false,
+    supportsConditionalWrite: false,
+    supportsVersioning: false,
+    maxConcurrentWrites: 8,
+    maxConcurrentDirectoryListings: 1,
+    params: [
+      DriverParamDefinition(key: 'host', label: 'Host', type: DriverParamType.text),
+      DriverParamDefinition(key: 'port', label: 'Port', type: DriverParamType.number, defaultValue: 22, min: 1, max: 65535),
+      DriverParamDefinition(key: 'username', label: 'Username', type: DriverParamType.text),
+      DriverParamDefinition(key: 'password', label: 'Password', type: DriverParamType.text),
+      DriverParamDefinition(key: 'basePath', label: 'Base path', type: DriverParamType.text),
+      ..._concurrencyParams,
+    ],
+  ),
+  'gdrive': BackupDriverCapabilities(
+    supportsRangeRead: true,
+    supportsBatchDelete: true,
+    supportsMultipartUpload: false,
+    supportsServerSideCopy: false,
+    supportsConditionalWrite: false,
+    supportsVersioning: false,
+    maxConcurrentWrites: 4,
+    maxConcurrentDirectoryListings: 8,
+    params: [
+      DriverParamDefinition(key: 'rootPath', label: 'Root path', type: DriverParamType.text, defaultValue: '/'),
+      DriverParamDefinition(key: 'refreshToken', label: 'Google Drive account', type: DriverParamType.text),
+      ..._concurrencyParams,
+    ],
+  ),
+  'dummy': BackupDriverCapabilities(
+    supportsRangeRead: true,
+    supportsBatchDelete: true,
+    supportsMultipartUpload: false,
+    supportsServerSideCopy: false,
+    supportsConditionalWrite: false,
+    supportsVersioning: false,
+    maxConcurrentWrites: 1,
+    maxConcurrentDirectoryListings: 1,
+    params: [
+      DriverParamDefinition(key: 'throttleMbps', label: 'Dummy throttle (MB/s)', type: DriverParamType.number, min: 0, unit: 'MB/s', help: 'Leave empty or 0 for unlimited.'),
+      ..._concurrencyParams,
+    ],
+  ),
+};
 
 class BackupDriverInfo {
   BackupDriverInfo({required this.id, required this.label, required this.usesPath, required this.capabilities});
@@ -113,7 +191,6 @@ class BackupStorage {
     required this.driverId,
     required this.enabled,
     required this.params,
-    this.disableFresh = false,
     this.storeBlobs = false,
     this.useBlobs = false,
     this.uploadConcurrency,
@@ -124,7 +201,6 @@ class BackupStorage {
   final String name;
   final String driverId;
   final bool enabled;
-  final bool disableFresh;
   final bool storeBlobs;
   final bool useBlobs;
   final int? uploadConcurrency;
@@ -132,8 +208,8 @@ class BackupStorage {
   final Map<String, dynamic> params;
 
   Map<String, dynamic> toMap() {
-    final map = <String, dynamic>{'id': id, 'name': name, 'driverId': driverId, 'enabled': enabled, 'disableFresh': disableFresh, 'params': Map<String, dynamic>.from(params)};
-    if (driverId.trim() != 'filesystem') {
+    final map = <String, dynamic>{'id': id, 'name': name, 'driverId': driverId, 'enabled': enabled, 'params': Map<String, dynamic>.from(params)};
+    if (BackupDriverCapabilities.forDriver(driverId.trim()).hasParam('downloadConcurrency')) {
       map['storeBlobs'] = storeBlobs;
       map['useBlobs'] = useBlobs;
       if (uploadConcurrency != null) {
@@ -154,7 +230,6 @@ class BackupStorage {
       name: (json['name'] ?? '').toString(),
       driverId: (json['driverId'] ?? '').toString(),
       enabled: json['enabled'] != false,
-      disableFresh: json['disableFresh'] == true,
       storeBlobs: json['storeBlobs'] == true,
       useBlobs: json['useBlobs'] == true,
       uploadConcurrency: _parsePositiveIntOrNull(json['uploadConcurrency'], field: 'uploadConcurrency'),

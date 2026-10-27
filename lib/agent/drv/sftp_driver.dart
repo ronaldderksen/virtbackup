@@ -108,7 +108,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
     supportsVersioning: false,
     maxConcurrentWrites: _maxConcurrentWrites,
     maxConcurrentDirectoryListings: 1,
-    params: [],
+    params: BackupDriverCapabilities.forDriver('sftp').params,
   );
 
   @override
@@ -258,26 +258,6 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       await localFile.delete();
     }
     return deletedRemote;
-  }
-
-  @override
-  Future<void> freshCleanup() async {
-    _validateConfig();
-    final base = _normalizeRemotePath(_basePath);
-    final current = _remoteRoot();
-    final stamp = sanitizeFileName(DateTime.now().toUtc().toIso8601String());
-    final renamed = _remoteJoin(base, '${_remoteAppFolderName}__fresh_$stamp');
-    try {
-      await _remoteRename(current, renamed);
-    } on _NativeSftpStatusException catch (error) {
-      if (error.isMissing) {
-        return;
-      }
-      if (!await _remoteExists(current)) {
-        return;
-      }
-      rethrow;
-    }
   }
 
   @override

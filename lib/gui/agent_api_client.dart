@@ -24,25 +24,32 @@ class AgentApiClient {
   AgentApiClient({Uri? baseUri}) : _baseUri = baseUri ?? Uri.parse('https://127.0.0.1:33551');
 
   Uri _baseUri;
-  String? _lastSeenCertFingerprint;
   String? _trustedCertFingerprint;
-  bool _allowUntrustedCerts = true;
   String? _authToken;
 
   Uri get baseUri => _baseUri;
 
   void setBaseUri(Uri uri) {
     _baseUri = uri;
+    _trustedCertFingerprint = null;
   }
-
-  String? get lastSeenCertFingerprint => _lastSeenCertFingerprint;
 
   void setTrustedCertFingerprint(String? fingerprint) {
     _trustedCertFingerprint = fingerprint;
   }
 
-  void setAllowUntrustedCerts(bool allow) {
-    _allowUntrustedCerts = allow;
+  Future<String> inspectCertificate() async {
+    if (_baseUri.scheme != 'https') throw StateError('Agent connections require HTTPS.');
+    final uri = _baseUri;
+    final socket = await SecureSocket.connect(uri.host, uri.port, context: SecurityContext(withTrustedRoots: false), onBadCertificate: (_) => true, timeout: const Duration(seconds: 10));
+    try {
+      final certificate = socket.peerCertificate;
+      if (certificate == null) throw StateError('Agent did not present a TLS certificate.');
+      if (_baseUri != uri) throw StateError('Agent changed during certificate inspection.');
+      return _fingerprintFromCert(certificate);
+    } finally {
+      socket.destroy();
+    }
   }
 
   void setAuthToken(String? token) {
@@ -621,20 +628,17 @@ class AgentApiClient {
   }
 
   HttpClient _createHttpClient() {
-    final client = HttpClient();
+    final client = HttpClient(context: SecurityContext(withTrustedRoots: false));
     if (_baseUri.scheme == 'https') {
       client.badCertificateCallback = (cert, host, port) {
-        _lastSeenCertFingerprint = _fingerprintFromCert(cert);
-        if (_allowUntrustedCerts) {
-          return true;
-        }
-        return _trustedCertFingerprint != null && _trustedCertFingerprint == _lastSeenCertFingerprint;
+        return _trustedCertFingerprint != null && _trustedCertFingerprint == _fingerprintFromCert(cert);
       };
     }
     return client;
   }
 
   void _applyAuthHeaders(HttpHeaders headers) {
+    if (_baseUri.scheme != 'https') throw StateError('Agent connections require HTTPS.');
     final token = _authToken;
     if (token == null || token.isEmpty) {
       return;

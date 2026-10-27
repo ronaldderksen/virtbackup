@@ -16,17 +16,7 @@ class DummyBackupDriver implements BackupDriver {
   int _throttleBytes = 0;
 
   @override
-  BackupDriverCapabilities get capabilities => const BackupDriverCapabilities(
-    supportsRangeRead: true,
-    supportsBatchDelete: true,
-    supportsMultipartUpload: false,
-    supportsServerSideCopy: false,
-    supportsConditionalWrite: false,
-    supportsVersioning: false,
-    maxConcurrentWrites: 1,
-    maxConcurrentDirectoryListings: 1,
-    params: [DriverParamDefinition(key: 'throttleMbps', label: 'Dummy throttle (MB/s)', type: DriverParamType.number, min: 0, unit: 'MB/s', help: 'Leave empty or 0 for unlimited.')],
-  );
+  BackupDriverCapabilities get capabilities => BackupDriverCapabilities.forDriver('dummy');
 
   @override
   String get storage => _rootDir().path;
@@ -113,12 +103,6 @@ class DummyBackupDriver implements BackupDriver {
     }
     await file.delete();
     return true;
-  }
-
-  @override
-  Future<void> freshCleanup() async {
-    await _deleteDirIfExists(Directory('${_rootDir().path}${Platform.pathSeparator}manifests'));
-    await _deleteDirIfExists(blobsDir());
   }
 
   @override
@@ -211,13 +195,6 @@ class DummyBackupDriver implements BackupDriver {
   @override
   void setReadConcurrencyLimit(int concurrency) {
     return;
-  }
-
-  Future<void> _deleteDirIfExists(Directory dir) async {
-    if (!await dir.exists()) {
-      return;
-    }
-    await dir.delete(recursive: true);
   }
 
   Future<void> _deleteInProgressInDir(Directory dir) async {

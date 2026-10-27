@@ -23,7 +23,6 @@ class _Args {
     required this.skipRestore,
     required this.skipBackup,
     required this.cancelAfterRandom,
-    required this.fresh,
     required this.driverParams,
     required this.blockSizeMBOverride,
     required this.checkMode,
@@ -46,7 +45,6 @@ class _Args {
   final bool skipRestore;
   final bool skipBackup;
   final bool cancelAfterRandom;
-  final bool fresh;
   final Map<String, dynamic> driverParams;
   final int? blockSizeMBOverride;
   final String? checkMode;
@@ -69,7 +67,6 @@ class _Args {
     bool? skipRestore,
     bool? skipBackup,
     bool? cancelAfterRandom,
-    bool? fresh,
     Map<String, dynamic>? driverParams,
     int? blockSizeMBOverride,
     String? checkMode,
@@ -92,7 +89,6 @@ class _Args {
       skipRestore: skipRestore ?? this.skipRestore,
       skipBackup: skipBackup ?? this.skipBackup,
       cancelAfterRandom: cancelAfterRandom ?? this.cancelAfterRandom,
-      fresh: fresh ?? this.fresh,
       driverParams: driverParams ?? this.driverParams,
       blockSizeMBOverride: blockSizeMBOverride ?? this.blockSizeMBOverride,
       checkMode: checkMode ?? this.checkMode,
@@ -207,9 +203,6 @@ void main(List<String> args) async {
     signalSubs = registerCancelHandler(resolved);
     stdout.writeln('Backup base path: $backupPath');
 
-    if (resolved.fresh) {
-      stdout.writeln('Fresh cleanup requested: agent will handle cleanup (debug only).');
-    }
     if (resolved.blockSizeMBOverride != null) {
       stdout.writeln('Backup block size override for this run: ${resolved.blockSizeMBOverride} MiB');
     }
@@ -432,7 +425,6 @@ _Args? _parseArgs(List<String> args) {
   var skipRestore = false;
   var skipBackup = false;
   var cancelAfterRandom = false;
-  var fresh = false;
   int? blockSizeMBOverride;
   String? checkMode;
   final driverParams = <String, dynamic>{};
@@ -481,9 +473,6 @@ _Args? _parseArgs(List<String> args) {
       case '--cancel':
         cancelAfterRandom = true;
         break;
-      case '--fresh':
-        fresh = true;
-        break;
       case '--storage':
         storageId = _readValue(args, ++i, arg);
         break;
@@ -531,7 +520,6 @@ _Args? _parseArgs(List<String> args) {
     skipRestore: skipRestore,
     skipBackup: skipBackup,
     cancelAfterRandom: cancelAfterRandom,
-    fresh: fresh,
     blockSizeMBOverride: blockSizeMBOverride,
     checkMode: checkMode,
     driverParams: driverParams,
@@ -769,9 +757,6 @@ String _resolveHost(Map<String, dynamic> payload, String serverId, String fallba
 Future<String> _startBackup(http.Client client, _Args args) async {
   final uri = args.agentUrl.replace(path: '/servers/${args.sourceServerId}/backup');
   final payload = <String, dynamic>{'vmName': args.vmName};
-  if (args.fresh) {
-    payload['fresh'] = true;
-  }
   final storageId = args.storageId;
   if (storageId != null && storageId.trim().isNotEmpty) {
     payload['storageId'] = storageId.trim();
@@ -1164,6 +1149,5 @@ void _printUsage() {
   stdout.writeln('  --no-restore              Skip restore + md5 compare');
   stdout.writeln('  --no-backup               Skip backup and restore latest backup');
   stdout.writeln('  --cancel                  Auto-cancel backup after 60-80s');
-  stdout.writeln('  --fresh                   Request agent cleanup before backup (debug builds only)');
   stdout.writeln('  --poll-interval <sec>     Default 5');
 }

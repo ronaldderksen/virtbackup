@@ -346,7 +346,6 @@ AppSettings _withUpdatedGdriveTokens({required AppSettings settings, required St
       driverId: entry.driverId,
       enabled: entry.enabled,
       params: params,
-      disableFresh: entry.disableFresh,
       storeBlobs: entry.storeBlobs,
       useBlobs: entry.useBlobs,
       uploadConcurrency: entry.uploadConcurrency,

@@ -35,6 +35,10 @@ double _averageBytesPerSecond(DateTime startedAt, int bytes) {
 }
 
 void restoreWorkerMain(Map<String, dynamic> init) {
+  runRestoreWorker(init, host: BackupAgentHost(), onFinished: Isolate.exit);
+}
+
+void runRestoreWorker(Map<String, dynamic> init, {required BackupAgentHost host, required void Function() onFinished}) {
   final mainPort = init['sendPort'] as SendPort;
   final commandPort = ReceivePort();
   mainPort.send({'type': _typeReady, 'sendPort': commandPort.sendPort});
@@ -64,7 +68,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
 
   Future<void> defineOnly(String jobId, BackupAgentHost host, ServerConfig server, File xmlFile, String xmlContent, String timestamp, String vmName, {Future<void> Function()? beforeDefine}) async {
     final remoteXmlPath = '/var/tmp/virtbackup/restore-${_sanitizeFileName(timestamp)}-${_sanitizeFileName(vmName)}.xml';
-    await host.runSshCommand(server, 'mkdir -p "/var/tmp/virtbackup"');
+    await host.runCheckedSshCommand(server, 'mkdir -p /var/tmp/virtbackup', 'Cannot create restore XML directory.');
     final xmlTempFile = File('${xmlFile.path}.restore_tmp');
     final defineXmlContent = _removeLibvirtBackingStores(xmlContent);
     await xmlTempFile.writeAsString(defineXmlContent);
@@ -129,7 +133,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         sanitySpeedBytesPerSec: 0,
       ),
     );
-    await host.runSshCommand(server, 'virsh define "$remoteXmlPath"');
+    await host.runCheckedSshCommand(server, 'virsh define ${_shellQuote(remoteXmlPath)}', 'Cannot define restored VM $vmName.');
   }
 
   Future<void> runRestore(Map<String, dynamic> payload) async {
@@ -165,7 +169,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         }
       }
     }
-    final isFilesystemStorage = driverId == 'filesystem';
+    final isFilesystemStorage = !BackupDriverCapabilities.forDriver(driverId).hasParam('downloadConcurrency');
     final useStoredBlobs = !isFilesystemStorage && selectedStorage?.useBlobs == true;
     final storeDownloadedBlobs = !isFilesystemStorage && selectedStorage?.storeBlobs == true;
     final downloadConcurrency = isFilesystemStorage ? 1 : settingsStorage?.downloadConcurrency ?? selectedStorage?.downloadConcurrency;
@@ -179,7 +183,6 @@ void restoreWorkerMain(Map<String, dynamic> init) {
     );
     LogWriter.configureSourceLevel(source: 'agent', level: settings.logLevel);
 
-    final host = BackupAgentHost();
     if (!fullCheckOnly) {
       final missingTools = await host.missingRequiredRemoteTools(server);
       if (missingTools.isNotEmpty) {
@@ -192,7 +195,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         'dummy': () => DummyBackupDriver(backupPath.trim(), tmpWritesEnabled: driverSettings.dummyDriverTmpWrites, blockSizeMB: driverSettings.blockSizeMB),
         'gdrive': () => GdriveBackupDriver(
           settings: driverSettings,
-          persistSettings: (updated) async => mainPort.send({'type': _typeSettings, 'settings': updated.toMap()}),
+          persistSettings: (previous, updated) async => mainPort.send({'type': _typeSettings, 'settings': updated.toMap(), 'previousSettings': previous.toMap()}),
           logInfo: (message) => LogWriter.logAgentSync(level: 'info', message: message),
         ),
         'filesystem': () => FilesystemBackupDriver(backupPath.trim(), blockSizeMB: driverSettings.blockSizeMB),
@@ -299,8 +302,16 @@ void restoreWorkerMain(Map<String, dynamic> init) {
 
       if (!fullCheckOnly && decision == 'overwrite') {
         ensureNotCanceled();
-        await host.runSshCommand(server, 'virsh destroy "$vmName" || true');
-        await host.runSshCommand(server, 'virsh undefine "$vmName" --nvram || true');
+        if (await _remoteVmExists(host, server, vmName)) {
+          final state = await host.runSshCommand(server, 'virsh domstate ${_shellQuote(vmName)}');
+          if (state.exitCode != 0) {
+            throw StateError('Cannot inspect VM state before overwrite: ${state.stderr.trim()}');
+          }
+          if (state.stdout.trim().toLowerCase() != 'shut off') {
+            await host.runCheckedSshCommand(server, 'virsh destroy ${_shellQuote(vmName)}', 'Cannot stop VM $vmName before overwrite.');
+          }
+          await host.runCheckedSshCommand(server, 'virsh undefine ${_shellQuote(vmName)} --nvram', 'Cannot undefine VM $vmName before overwrite.');
+        }
       }
 
       if (!fullCheckOnly && decision == 'auto_rename') {
@@ -490,10 +501,10 @@ void restoreWorkerMain(Map<String, dynamic> init) {
         final parts = uploadPath.split('/');
         final remoteDir = parts.length > 1 ? parts.sublist(0, parts.length - 1).join('/') : '';
         if (remoteDir.isNotEmpty) {
-          await host.runSshCommand(server, 'mkdir -p ${_shellQuote(remoteDir)}');
+          await host.runCheckedSshCommand(server, 'mkdir -p ${_shellQuote(remoteDir)}', 'Cannot create restore disk directory.');
         }
-        await host.runSshCommand(server, 'rm -f ${_shellQuote(remotePath)}');
-        await host.runSshCommand(server, 'rm -f ${_shellQuote(uploadPath)}');
+        await host.runCheckedSshCommand(server, 'rm -f -- ${_shellQuote(remotePath)}', 'Cannot remove restore target $remotePath.');
+        await host.runCheckedSshCommand(server, 'rm -f -- ${_shellQuote(uploadPath)}', 'Cannot remove temporary restore target $uploadPath.');
         final uploadedSha256 = await host.uploadRemoteStream(
           server,
           uploadPath,
@@ -549,7 +560,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           AgentJobStatus(
             id: jobId,
             type: AgentJobType.restore,
-            state: AgentJobState.success,
+            state: mismatches == 0 ? AgentJobState.success : AgentJobState.failure,
             message: resultMessage,
             totalUnits: totalCheckBlocks,
             completedUnits: checkedBlocks,
@@ -600,7 +611,7 @@ void restoreWorkerMain(Map<String, dynamic> init) {
               ensureNotCanceled();
               final overlayPath = restorePathMap[rebase.overlayPath] ?? rebase.overlayPath;
               final backingPath = restorePathMap[rebase.backingPath] ?? rebase.backingPath;
-              await host.runSshCommand(server, 'qemu-img rebase -u -b ${_shellQuote(backingPath)} ${_shellQuote(overlayPath)}');
+              await host.runCheckedSshCommand(server, 'qemu-img rebase -u -b ${_shellQuote(backingPath)} ${_shellQuote(overlayPath)}', 'Cannot rebase restored overlay $overlayPath.');
             }
           }
         },
@@ -704,7 +715,8 @@ void restoreWorkerMain(Map<String, dynamic> init) {
           });
         },
       );
-      Isolate.exit();
+      commandPort.close();
+      onFinished();
     } else if (type == _typeCancel) {
       canceled = true;
       closeActiveDrivers();

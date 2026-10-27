@@ -21,7 +21,6 @@ DESTINATONS=(
 )
 
 EXTRA_PARAMS=( )
-#EXTRA_PARAMS=( --fresh )
 
 echodo() {
   echo "+ ${@}"

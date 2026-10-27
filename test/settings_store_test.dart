@@ -7,6 +7,33 @@ import 'package:virtbackup/common/models.dart';
 import 'package:virtbackup/common/settings.dart';
 
 void main() {
+  for (final content in ['servers: [invalid YAML', '', '[]']) {
+    test('invalid existing YAML is rejected without replacing configuration: $content', () async {
+      final directory = await Directory.systemTemp.createTemp('virtbackup-invalid-settings-');
+      try {
+        final file = File('${directory.path}/agent.yaml');
+        await file.writeAsString(content);
+        await expectLater(AppSettingsStore(file: file).load(), throwsA(isA<FormatException>()));
+        expect(await file.readAsString(), content);
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    });
+  }
+
+  test('concurrent settings saves complete in order without sharing a staging file', () async {
+    final directory = await Directory.systemTemp.createTemp('virtbackup-concurrent-settings-');
+    try {
+      final file = File('${directory.path}/agent.yaml');
+      final store = AppSettingsStore(file: file);
+      await Future.wait(List.generate(5, (index) => store.save(AppSettings.empty().copyWith(notificationEmail: 'user$index@example.com'))));
+      expect((await store.load()).notificationEmail, 'user4@example.com');
+      expect(await File('${file.path}.tmp').exists(), isFalse);
+    } finally {
+      await directory.delete(recursive: true);
+    }
+  });
+
   test('save does not mutate in-memory Google Drive tokens', () async {
     final tempDir = await Directory.systemTemp.createTemp('virtbackup_settings_store_test_');
     try {
@@ -128,7 +155,6 @@ storage:
     name: Filesystem
     driverId: filesystem
     enabled: true
-    disableFresh: false
     params:
       path: /tmp/virtbackup
 schedules:

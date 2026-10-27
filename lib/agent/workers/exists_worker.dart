@@ -3,6 +3,7 @@ part of '../backup.dart';
 class _ExistsWorker {
   _ExistsWorker({
     required this.maxMissingRun,
+    required this.onFailure,
     required this.blobExists,
     required this.enqueueMissingRun,
     required this.handleBytes,
@@ -11,6 +12,7 @@ class _ExistsWorker {
     required this.onMissing,
   });
 
+  final void Function(Object error, StackTrace stackTrace) onFailure;
   final int maxMissingRun;
   final Future<bool> Function(String hash) blobExists;
   final void Function(int startIndex, List<String> hashes) enqueueMissingRun;
@@ -109,6 +111,7 @@ class _ExistsWorker {
         _error = error;
         _errorStack = stackTrace;
         LogWriter.logAgentSync(level: 'error', message: 'worker=exists failed: $error');
+        onFailure(error, stackTrace);
       }
     }
   }

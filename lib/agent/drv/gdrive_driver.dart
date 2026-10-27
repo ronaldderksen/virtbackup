@@ -46,12 +46,16 @@ class _DriveApiException implements Exception {
 }
 
 class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryLister {
-  GdriveBackupDriver({required AppSettings settings, required Future<void> Function(AppSettings) persistSettings, Directory? settingsDir, void Function(String message)? logInfo})
-    : _settings = settings,
-      _persistSettings = persistSettings,
-      _settingsDir = settingsDir,
-      _cacheRoot = _cacheRootForSettings(settings),
-      _logInfo = ((message) => (logInfo ?? ((_) {}))('driver=gdrive $message'));
+  GdriveBackupDriver({
+    required AppSettings settings,
+    required Future<void> Function(AppSettings previous, AppSettings updated) persistSettings,
+    Directory? settingsDir,
+    void Function(String message)? logInfo,
+  }) : _settings = settings,
+       _persistSettings = persistSettings,
+       _settingsDir = settingsDir,
+       _cacheRoot = _cacheRootForSettings(settings),
+       _logInfo = ((message) => (logInfo ?? ((_) {}))('driver=gdrive $message'));
 
   final Directory? _settingsDir;
   GoogleOAuthInstalledClient? _oauthClient;
@@ -60,7 +64,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   static const String _driveRootId = 'root';
 
   AppSettings _settings;
-  final Future<void> Function(AppSettings) _persistSettings;
+  final Future<void> Function(AppSettings previous, AppSettings updated) _persistSettings;
   final Directory _cacheRoot;
   final void Function(String message) _logInfo;
   final Map<String, String> _folderCache = {};
@@ -120,16 +124,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }
 
   @override
-  BackupDriverCapabilities get capabilities => const BackupDriverCapabilities(
-    supportsRangeRead: true,
-    supportsBatchDelete: true,
-    supportsMultipartUpload: false,
-    supportsServerSideCopy: false,
-    supportsConditionalWrite: false,
-    supportsVersioning: false,
-    maxConcurrentWrites: 4,
-    maxConcurrentDirectoryListings: 8,
-  );
+  BackupDriverCapabilities get capabilities => BackupDriverCapabilities.forDriver('gdrive');
 
   @override
   String get storage => _cacheRoot.path;
@@ -140,7 +135,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   @override
   int get bufferedBytes => 0;
 
-  GdrivePrefillStats _prefillStats = const GdrivePrefillStats(shardCount: 0, blobCount: 0, durationMs: 0);
+  final GdrivePrefillStats _prefillStats = const GdrivePrefillStats(shardCount: 0, blobCount: 0, durationMs: 0);
 
   GdrivePrefillStats get prefillStats => _prefillStats;
 
@@ -300,18 +295,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       await localFile.delete();
     }
     return true;
-  }
-
-  @override
-  Future<void> freshCleanup() async {
-    _logInfo('gdrive: fresh cleanup clearing local cache and in-memory state');
-    _folderCache.clear();
-    _folderChildrenLoaded.clear();
-    _blobsRootId = null;
-    _resolvedDriveRootId = null;
-    _prefillStats = const GdrivePrefillStats(shardCount: 0, blobCount: 0, durationMs: 0);
-    await _deleteDirIfExists(Directory('${_cacheRoot.path}${Platform.pathSeparator}manifests'));
-    await _deleteDirIfExists(Directory('${_cacheRoot.path}${Platform.pathSeparator}blobs'));
   }
 
   @override
@@ -745,13 +728,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return path;
   }
 
-  Future<void> _deleteDirIfExists(Directory dir) async {
-    if (!await dir.exists()) {
-      return;
-    }
-    await dir.delete(recursive: true);
-  }
-
   Future<_DriveFileRef> _uploadSimple({required String name, required String parentId, required List<int> bytes, required String contentType}) async {
     final stopwatch = Stopwatch()..start();
     _inFlightUploads += 1;
@@ -997,7 +973,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
           driverId: candidate.driverId,
           enabled: candidate.enabled,
           params: updatedParams,
-          disableFresh: candidate.disableFresh,
           storeBlobs: candidate.storeBlobs,
           useBlobs: candidate.useBlobs,
           uploadConcurrency: candidate.uploadConcurrency,
@@ -1006,8 +981,9 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       );
     }
 
+    final previous = _settings;
     _settings = _settings.copyWith(storage: updatedStorages);
-    await _persistSettings(_settings);
+    await _persistSettings(previous, _settings);
   }
 
   Map<String, String> _authHeaders(String token) {

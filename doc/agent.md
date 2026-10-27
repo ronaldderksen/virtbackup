@@ -38,7 +38,7 @@ Key modules under `lib/agent`:
    - Ensure storage driver readiness.
    - Capture VM XML via `virsh dumpxml`.
    - Resolve disk chain information using `qemu-img info --backing-chain`.
-   - If VM is running, create a snapshot and operate on overlays.
+   - If VM is running, create a snapshot and operate on overlays. A failed or missing SSH exit status rejects snapshot creation before disk backup starts.
    - Stream disk data with deduplication.
    - Commit snapshot if applicable.
    - Remove unused `.virtbackup-` overlay files after commit only after verifying the VM no longer references them and `lsof` reports no open users.
@@ -59,7 +59,8 @@ Key modules under `lib/agent`:
 8. Restore requires an explicit known `driverId` and `decision`; unknown restore drivers fail instead of falling back to filesystem.
 9. Restore fails when manifest blocks emit fewer bytes than `file_size`; missing trailing data is never padded with zeroes. A final partial block is truncated to `file_size`.
 10. Restore decision `auto_rename` keeps original names when there is no conflict. If the target VM or any restored disk path already exists, restore rewrites the VM name, removes the XML UUID, rewrites file-based disk paths for every restored disk/chain item, and searches the first free restore-date suffix. Restore definitions remove libvirt `backingStore` metadata from the embedded domain XML so restored standalone qcow2 files are not defined with stale backing references. If that candidate exists it tries `-1`, `-2`, and so on. Unsupported or ambiguous XML/path input still fails hard.
-11. Restore writes disks to `<target>.inprogress` paths first. After upload, hash/size checks, and any chain rebase, the worker renames all restored disks to their final XML paths immediately before `virsh define`.
+11. Restore writes disks to `<target>.inprogress` paths first. After upload and size checks, the worker renames the restored disks to their final XML paths, rebases restored chains, and defines the VM. Directory creation, file removal, VM stop/undefine, rebase, and define commands must report a successful SSH exit status; failures stop the job.
+12. Full checks report job state `failure` when any blob hash differs from its manifest. Quick checks report `failure` when blobs are missing.
 
 ### Events
 
@@ -176,9 +177,11 @@ The hashblocks path is divided into logical workers:
   - Sets `writeReady=true` only after all missing shard creates completed successfully.
   - Prefetches shard directory listings based on incoming hashes.
   - Hash parsing does not wait for dirlist scans.
-  - Each shard (`aa`) is scanned at most once per backup run.
+  - Prefetches and required existence checks for a shard (`aa`) share one in-flight directory request. Successful listings are cached for the backup run; failures propagate to all waiters and are not cached as empty directories. Hashes registered during a listing are merged into the result.
   - Queue dequeue is immediate and independent: incoming hashes are dispatched fire-and-forget.
   - Worker wait is bounded (short timeout polling) to avoid missed wake stalls while queue work is pending.
+  - At shutdown the worker has a 30-second grace period to drain background prefetches. If that expires, remaining prefetches are canceled and driver connections are closed to abort their requests. Closing connections is also limited to 30 seconds; failure to close is reported as a job failure. Earlier scan errors retain their original error and stack trace even if closing connections also fails or times out; secondary shutdown errors are logged separately. Required existence checks and writes must finish before successful shutdown is entered; their errors are never replaced with missing-blob results or successful completion.
+  - Cancellation wakes the worker without waiting forever for an outstanding prefetch. Late errors from deliberately aborted requests are consumed. Cleanup continues after errors and always stops the backup progress timers. Logs identify cache-worker shutdown and storage-connection closure.
 
 - `ExistsWorker` (in `workers/exists_worker.dart`)
   - Receives all hashes through a dedicated queue.
@@ -272,6 +275,8 @@ The agent supports optional native SFTP via FFI:
 
 ## Error Handling and Cancellation
 
+- SFTP, existence-check, and writer failures stop the hashblocks pipeline immediately, release waiting workers, and enter normal backup failure/snapshot cleanup. Worker errors do not wait for hashblocks to reach EOF or for the next LIMIT window. Filesystem blob rename failures propagate to the writer retry policy.
+- VM rename includes disk moves in its rollback scope. If a later disk move fails, previously moved disks are restored to their original paths before the failure is returned.
 - Jobs can be canceled via API. Checks and restore jobs before finalization stop immediately; backup jobs let the worker check and finish VM snapshot cleanup before closing; restores that have entered finalization finish that protected phase before closing.
 - When the agent process receives Ctrl-C (`SIGINT`) or `SIGTERM`, it stops schedule dispatch, requests cancellation for all running jobs through the normal job cancel path, waits until those jobs leave the running state, and then shuts down the HTTP server.
 - Cancel is disabled during backup snapshot commit and restore final define/rebase/upload phases.
@@ -301,13 +306,16 @@ The agent supports optional native SFTP via FFI:
 - The HTTP server runs over HTTPS with a self-signed certificate.
 - The certificate and key are stored next to `agent.yaml` as `agent.crt` and `agent.key`.
 - Certificates are generated for 10 years if missing; clients must trust or allow self-signed certs.
-- The GUI prompts to trust and save the certificate fingerprint on first use, and warns if it changes.
+- Before sending any HTTP request, the GUI inspects the agent certificate over a separate TLS connection without sending an auth token. It prompts to trust and save the fingerprint on first use and asks again when it changes. All authenticated connections pin the approved fingerprint, including certificates signed by a public CA. Rejecting the certificate blocks access.
 - The HTTP API requires an auth token for every request via `Authorization: Bearer <token>` or `x-agent-token: <token>`.
 - The token is generated on first run and stored next to `agent.yaml` as `agent.token` with owner-only permissions.
 - The GUI reads the token from disk and attaches it to all agent requests.
 - SSH passwords are encrypted at rest in `agent.yaml` using AES-GCM with a key derived from the token.
 - Virt Backup account access and refresh tokens are stored in `agent.yaml` under the local agent hostname with the same AES-GCM encryption. Access tokens are valid for 7 days, or 15 minutes when login was started from a debug GUI; refresh tokens are valid for 30 days and rotate when the agent refreshes them.
 - Virt Backup account tokens are managed only through the account endpoints. General `POST /config` saves preserve the current account tokens so a stale GUI or worker settings snapshot cannot roll tokens back.
+- Existing empty, malformed, or non-map YAML settings fail visibly; they are never replaced with an empty configuration after a load failure. A missing settings file remains the explicit first-start case. Saves on one settings store are serialized so they cannot collide on the staging file.
+- Settings directories are resolved from the operating system account record, not environment variables: Linux uses `id` and `getent passwd`, macOS uses `id` and `dscl`, and Windows queries the OS LocalApplicationData special folder. Lookup errors stop initialization.
+- Storage token refreshes carry their previous settings snapshot. The agent merges only the selected storage access token and expiry, preserving current names, enabled state, concurrency, other parameters, and other storages. Results from changed/deleted storages, changed credentials, or an already refreshed token are discarded.
 - Settings writes are staged to `agent.yaml.tmp`, read back with the normal settings loader, and only then promoted to `agent.yaml`.
 - Encrypted values are stored as `sshPasswordEnc` and decrypted into memory on load.
 - Job result notifications are sent by the agent when backup/restore jobs finish (success or failure).
@@ -362,11 +370,11 @@ The agent supports optional native SFTP via FFI:
 - Google Drive folder creation is guarded by a local folder lock and checks for existing folders before creating; when duplicate folder names are detected, the driver performs a strict merge into a primary folder and fails the operation if duplicates cannot be fully resolved.
 - Quick check uses the same generic blob directory cache implementation as backup, in read-only mode, and preloads blob listings per shard through `BackupDriver.listRelativeFiles('blobs/<blockSize>/<shard>')` before the block loop so cache build progress is visible; drivers do not expose quick-check-specific blob listing APIs.
 - Quick check yields after blob cache progress updates so drivers with blocking native calls, including SFTP, can expose intermediate job status to the GUI while the cache is being built.
+- Agent and GUI share one `BackupDriverCapabilities` model. Storage fields, local path selection, encryption fields, and configurable concurrency are selected through `params`; unknown drivers fail. The GUI requires the agent driver catalog instead of inventing a local catalog when loading fails. Invalid SFTP ports are rejected rather than replaced with port 22. Server names must be entered explicitly before saving or testing.
 - Drivers expose `maxConcurrentDirectoryListings` for generic directory-listing workloads; SFTP sets this to `1` because native listdir calls block the agent isolate, while Google Drive can keep concurrent listings.
 - Storage storage are configured at root-level `storage` in `agent.yaml` (not under `backup`), each with its own `id`, `driverId`, and `params`.
 - In the GUI Storage editor, `driverId: gdrive` supports OAuth connect via browser (PKCE); the OAuth request always uses `https://www.googleapis.com/auth/drive.file` plus `openid email`, does not request previously granted Google scopes, token fields are not shown in the editor, and the returned tokens are stored in that storage's `params`.
-- Storage option `disableFresh: true` forces `fresh` off for that storage; backup requests with `fresh: true` continue and are logged.
-- `fresh` cleanup never deletes filesystem storage blobs (`storage[id=filesystem].params.path/VirtBackup/blobs`).
+- Backup jobs preserve existing manifests and blobs and reuse blobs for deduplication.
 - Blob storage is block-size scoped: `.../VirtBackup/blobs/<blockSizeMB>/`.
 - On agent startup, missing `blockSizeMB` is auto-added as `1` and written back immediately.
 - The hidden root setting `requireSimpleDisksForBackup` is stored in `agent.yaml`, defaults to `true`, and blocks backups of disks with backing chains. Set it to `false` only to bypass the backing-chain guard; backups with snapshots or overlays that require cleanup still fail.

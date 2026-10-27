@@ -97,6 +97,57 @@ class AppSettings {
     );
   }
 
+  AppSettings mergeStorageTokenRefresh({required AppSettings previous, required AppSettings updated}) {
+    final storageId = updated.backupStorageId;
+    if (storageId == null || storageId != previous.backupStorageId) {
+      throw StateError('Storage token refresh requires the original selected storage.');
+    }
+    BackupStorage? findStorage(AppSettings settings) {
+      for (final candidate in settings.storage) {
+        if (candidate.id == storageId) return candidate;
+      }
+      return null;
+    }
+
+    final original = findStorage(previous);
+    final refreshed = findStorage(updated);
+    final current = findStorage(this);
+    if (original == null || refreshed == null) throw StateError('Storage token refresh is missing storage $storageId.');
+    if (current == null || current.driverId != original.driverId || refreshed.driverId != original.driverId) return this;
+    const tokenFields = {'accessToken', 'expiresAt'};
+    final configurationKeys = {...original.params.keys, ...current.params.keys}.difference(tokenFields);
+    if (configurationKeys.any((key) => original.params[key] != current.params[key])) return this;
+    // A second refresh must not roll back tokens already refreshed by another worker.
+    if (current.params['accessToken'] != original.params['accessToken'] || current.params['expiresAt'] != original.params['expiresAt']) return this;
+    final params = Map<String, dynamic>.from(current.params);
+    for (final field in tokenFields) {
+      if (refreshed.params.containsKey(field)) {
+        params[field] = refreshed.params[field];
+      } else {
+        params.remove(field);
+      }
+    }
+    return copyWith(
+      storage: storage
+          .map(
+            (item) => item.id == storageId
+                ? BackupStorage(
+                    id: item.id,
+                    name: item.name,
+                    driverId: item.driverId,
+                    enabled: item.enabled,
+                    params: params,
+                    storeBlobs: item.storeBlobs,
+                    useBlobs: item.useBlobs,
+                    uploadConcurrency: item.uploadConcurrency,
+                    downloadConcurrency: item.downloadConcurrency,
+                  )
+                : item,
+          )
+          .toList(),
+    );
+  }
+
   Map<String, dynamic> toMap() {
     return {
       'backupPath': backupPath,
@@ -218,7 +269,7 @@ class AppSettings {
   }
 
   static BackupStorage _normalizeStorageDefaults(BackupStorage storage) {
-    if (storage.driverId.trim() == 'filesystem') {
+    if (!BackupDriverCapabilities.forDriver(storage.driverId.trim()).hasParam('downloadConcurrency')) {
       return storage;
     }
     return BackupStorage(
@@ -227,7 +278,6 @@ class AppSettings {
       driverId: storage.driverId,
       enabled: storage.enabled,
       params: storage.params,
-      disableFresh: storage.disableFresh,
       storeBlobs: storage.storeBlobs,
       useBlobs: storage.useBlobs,
       uploadConcurrency: storage.uploadConcurrency ?? 8,
@@ -259,12 +309,10 @@ class AppSettings {
     final storage = List<BackupStorage>.from(input);
     var filesystemIndex = -1;
     String? existingPath;
-    var existingDisableFresh = false;
     for (var index = 0; index < storage.length; index++) {
       final entry = storage[index];
       if (entry.id == filesystemStorageId) {
         filesystemIndex = index;
-        existingDisableFresh = entry.disableFresh;
         final value = entry.params['path']?.toString().trim();
         if (value != null && value.isNotEmpty) {
           existingPath = value;
@@ -274,14 +322,7 @@ class AppSettings {
     }
 
     final normalizedPath = existingPath ?? '';
-    final filesystemStorage = BackupStorage(
-      id: filesystemStorageId,
-      name: filesystemStorageName,
-      driverId: 'filesystem',
-      enabled: true,
-      disableFresh: existingDisableFresh,
-      params: <String, dynamic>{'path': normalizedPath},
-    );
+    final filesystemStorage = BackupStorage(id: filesystemStorageId, name: filesystemStorageName, driverId: 'filesystem', enabled: true, params: <String, dynamic>{'path': normalizedPath});
     if (filesystemIndex >= 0) {
       storage[filesystemIndex] = filesystemStorage;
     } else {

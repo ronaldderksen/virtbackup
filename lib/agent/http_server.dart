@@ -655,7 +655,7 @@ class AgentHttpServer {
     }
     final backupPath = storage.backupPath;
     final registry = _buildDriverRegistry(backupPath: backupPath, settings: storage.settings);
-    final descriptor = registry[storage.driverId] ?? registry['filesystem']!;
+    final descriptor = registry[storage.driverId] ?? (throw StateError('Unknown backup driverId: ${storage.driverId}'));
     if (descriptor.usesPath && backupPath.isEmpty) {
       throw StateError('backup path is empty');
     }
@@ -1219,10 +1219,8 @@ class AgentHttpServer {
     }
   }
 
-  AppSettings _settingsFromWorkerUpdate(AppSettings workerSettings) {
-    final workerStorageById = {for (final storage in workerSettings.storage) storage.id: storage};
-    final mergedStorage = _agentSettings.storage.map((storage) => workerStorageById[storage.id] ?? storage).toList();
-    return _agentSettings.copyWith(storage: mergedStorage);
+  AppSettings _settingsFromWorkerUpdate(AppSettings workerSettings, AppSettings previous) {
+    return _agentSettings.mergeStorageTokenRefresh(previous: previous, updated: workerSettings);
   }
 
   Future<void> _safeStartEventListener(ServerConfig server) async {
@@ -1816,7 +1814,7 @@ class AgentHttpServer {
           }
         }
         try {
-          await _applyVmRename(server: server, vmName: vmName, newVmName: newVmName, diskFileNamesByTarget: diskFileNames);
+          await renameVm(server: server, vmName: vmName, newVmName: newVmName, diskFileNamesByTarget: diskFileNames);
           await _refreshServer(server, reason: 'rename', refreshRequiredTools: false);
           _json(request, 200, {'success': true});
         } catch (error, stackTrace) {
@@ -1865,7 +1863,6 @@ class AgentHttpServer {
           _json(request, 400, {'error': 'Invalid blockSizeMB. Allowed values: 1, 2, 4, 8.'});
           return;
         }
-        final freshRequested = body['fresh'] == true;
         if (vmName.isEmpty) {
           _json(request, 400, {'error': 'missing params'});
           return;
@@ -1883,14 +1880,10 @@ class AgentHttpServer {
           _json(request, 400, {'error': 'storage not found or unavailable'});
           return;
         }
-        final effectiveFreshRequested = freshRequested && !resolvedStorage.storage.disableFresh;
-        if (freshRequested && !effectiveFreshRequested) {
-          _hostLog('backup: fresh requested but disabled for storage "${resolvedStorage.storage.name}" (id=${resolvedStorage.storage.id}); continuing without fresh');
-        }
         final resolvedDriverId = requestedDriver.isNotEmpty ? requestedDriver : resolvedStorage.driverId;
         final backupPath = resolvedStorage.backupPath;
         final registry = _buildDriverRegistry(backupPath: backupPath, settings: resolvedStorage.settings);
-        final descriptor = registry[resolvedDriverId] ?? registry['filesystem']!;
+        final descriptor = registry[resolvedDriverId] ?? (throw StateError('Unknown backup driverId: $resolvedDriverId'));
         if (descriptor.usesPath && backupPath.isEmpty) {
           _json(request, 400, {'error': 'missing backup.base_path'});
           return;
@@ -1916,7 +1909,6 @@ class AgentHttpServer {
           driverParams: driverParams.isNotEmpty ? driverParams : resolvedStorage.driverParams,
           blockSizeMBOverride: blockSizeMBOverride,
           storage: resolvedStorage,
-          freshRequested: effectiveFreshRequested,
         );
         return;
       }
@@ -2698,7 +2690,6 @@ class AgentHttpServer {
         driverId: storage.driverId,
         enabled: storage.enabled,
         params: params,
-        disableFresh: storage.disableFresh,
         storeBlobs: storage.storeBlobs,
         useBlobs: storage.useBlobs,
         uploadConcurrency: storage.uploadConcurrency,
@@ -2727,7 +2718,7 @@ class AgentHttpServer {
   }
 
   String _backupPathForStorage(BackupStorage storage) {
-    if (storage.driverId == 'filesystem') {
+    if (BackupDriverCapabilities.forDriver(storage.driverId).hasParam('path')) {
       final path = storage.params['path']?.toString().trim() ?? '';
       return path;
     }
@@ -2751,7 +2742,7 @@ class AgentHttpServer {
   Map<String, BackupDriverInfo> _buildDriverCatalog() {
     final registry = _buildDriverRegistry(backupPath: _filesystemBackupPath(), settings: _agentSettings);
     return registry.map((key, descriptor) {
-      return MapEntry(key, BackupDriverInfo(id: descriptor.id, label: descriptor.label, usesPath: descriptor.usesPath, capabilities: _mapCapabilities(descriptor.capabilities)));
+      return MapEntry(key, BackupDriverInfo(id: descriptor.id, label: descriptor.label, usesPath: descriptor.usesPath, capabilities: descriptor.capabilities));
     });
   }
 
@@ -2796,13 +2787,13 @@ class AgentHttpServer {
         create: (_) => identical(sourceSettings, _agentSettings)
             ? (_cachedGdriveDriver ??= GdriveBackupDriver(
                 settings: sourceSettings,
-                persistSettings: (updated) => _applyAgentSettings(updated, reason: 'gdrive', forceRestartSshListeners: false),
+                persistSettings: (previous, updated) => _applyAgentSettings(_settingsFromWorkerUpdate(updated, previous), reason: 'gdrive', forceRestartSshListeners: false),
                 settingsDir: _agentSettingsStore.file.parent,
                 logInfo: _hostLog,
               ))
             : GdriveBackupDriver(
                 settings: sourceSettings,
-                persistSettings: (updated) => _applyAgentSettings(updated, reason: 'gdrive', forceRestartSshListeners: false),
+                persistSettings: (previous, updated) => _applyAgentSettings(_settingsFromWorkerUpdate(updated, previous), reason: 'gdrive', forceRestartSshListeners: false),
                 settingsDir: _agentSettingsStore.file.parent,
                 logInfo: _hostLog,
               ),
@@ -2858,21 +2849,12 @@ class AgentHttpServer {
       supportsVersioning: false,
       maxConcurrentWrites: maxConcurrentWrites,
       maxConcurrentDirectoryListings: 1,
-      params: const <drv.DriverParamDefinition>[],
+      params: BackupDriverCapabilities.forDriver('sftp').params,
     );
   }
 
   drv.BackupDriverCapabilities _gdriveCapabilities() {
-    return const drv.BackupDriverCapabilities(
-      supportsRangeRead: true,
-      supportsBatchDelete: true,
-      supportsMultipartUpload: false,
-      supportsServerSideCopy: false,
-      supportsConditionalWrite: false,
-      supportsVersioning: false,
-      maxConcurrentWrites: 4,
-      maxConcurrentDirectoryListings: 8,
-    );
+    return BackupDriverCapabilities.forDriver('gdrive');
   }
 
   Map<String, dynamic> _requireSelectedStorageParams({required AppSettings settings, required String expectedDriverId}) {
@@ -2890,33 +2872,6 @@ class AgentHttpServer {
       return storage.params;
     }
     throw StateError('Storage "$selectedId" not found.');
-  }
-
-  BackupDriverCapabilities _mapCapabilities(drv.BackupDriverCapabilities caps) {
-    return BackupDriverCapabilities(
-      supportsRangeRead: caps.supportsRangeRead,
-      supportsBatchDelete: caps.supportsBatchDelete,
-      supportsMultipartUpload: caps.supportsMultipartUpload,
-      supportsServerSideCopy: caps.supportsServerSideCopy,
-      supportsConditionalWrite: caps.supportsConditionalWrite,
-      supportsVersioning: caps.supportsVersioning,
-      maxConcurrentWrites: caps.maxConcurrentWrites,
-      params: caps.params.map(_mapParamDefinition).toList(),
-    );
-  }
-
-  DriverParamDefinition _mapParamDefinition(drv.DriverParamDefinition def) {
-    return DriverParamDefinition(
-      key: def.key,
-      label: def.label,
-      type: DriverParamType.values.firstWhere((value) => value.name == def.type.name, orElse: () => DriverParamType.text),
-      defaultValue: def.defaultValue,
-      min: def.min,
-      max: def.max,
-      step: def.step,
-      unit: def.unit,
-      help: def.help,
-    );
   }
 
   String? _commandForAction(String action, String vmName) {
@@ -2958,7 +2913,7 @@ class AgentHttpServer {
         message.startsWith('Cannot inspect VM checkpoints.');
   }
 
-  Future<void> _applyVmRename({required ServerConfig server, required String vmName, required String newVmName, required Map<String, String> diskFileNamesByTarget}) async {
+  Future<void> renameVm({required ServerConfig server, required String vmName, required String newVmName, required Map<String, String> diskFileNamesByTarget}) async {
     _validateVmRenameName(vmName);
     _validateVmRenameName(newVmName);
     final state = await _remoteVmState(server, vmName);
@@ -3020,9 +2975,7 @@ class AgentHttpServer {
         moves.add(MapEntry(disk.value, newPath));
       }
     }
-    for (final move in moves) {
-      await _runChecked(server, 'mv -- ${_shellQuote(move.key)} ${_shellQuote(move.value)}', 'Move failed: ${move.key} -> ${move.value}');
-    }
+    final completedMoves = <MapEntry<String, String>>[];
     final tempDir = Directory.systemTemp.createTempSync('virtbackup-vm-rename-');
     final localXml = File('${tempDir.path}${Platform.pathSeparator}${_sanitizeFileName(newVmName)}.xml');
     final localOldXml = File('${tempDir.path}${Platform.pathSeparator}${_sanitizeFileName(vmName)}-rollback.xml');
@@ -3031,6 +2984,10 @@ class AgentHttpServer {
     final undefineCommand = oldXml.contains(RegExp(r'<nvram(?:\s|>)')) ? 'virsh undefine ${_shellQuote(vmName)} --nvram' : 'virsh undefine ${_shellQuote(vmName)}';
     var oldVmUndefined = false;
     try {
+      for (final move in moves) {
+        await _runChecked(server, 'mv -- ${_shellQuote(move.key)} ${_shellQuote(move.value)}', 'Move failed: ${move.key} -> ${move.value}');
+        completedMoves.add(move);
+      }
       await localXml.writeAsString(xml);
       await localOldXml.writeAsString(oldXml);
       await _runChecked(server, 'mkdir -p /var/tmp/virtbackup', 'Cannot create remote temp directory.');
@@ -3047,7 +3004,7 @@ class AgentHttpServer {
           _hostLogError('VM rename rollback define failed for $vmName.', rollbackError, rollbackStackTrace);
         }
       }
-      for (final move in moves.reversed) {
+      for (final move in completedMoves.reversed) {
         if (await _remotePathExists(server, move.value) && !await _remotePathExists(server, move.key)) {
           try {
             await _runChecked(server, 'mv -- ${_shellQuote(move.value)} ${_shellQuote(move.key)}', 'Rollback move failed: ${move.value} -> ${move.key}');
@@ -3801,11 +3758,10 @@ class AgentHttpServer {
     Map<String, dynamic>? driverParams,
     int? blockSizeMBOverride,
     _ResolvedStorage? storage,
-    bool freshRequested = false,
   }) {
-    final defaultDriverId = storage?.driverId ?? 'filesystem';
+    final defaultDriverId = storage?.driverId ?? (throw StateError('Backup requires storage.'));
     final driverId = (driverIdOverride != null && driverIdOverride.trim().isNotEmpty) ? driverIdOverride.trim() : defaultDriverId;
-    final driverInfo = _driverCatalog[driverId] ?? _driverCatalog['filesystem']!;
+    final driverInfo = _driverCatalog[driverId] ?? (throw StateError('Unknown backup driverId: $driverId'));
     _setJobContext(
       jobId,
       source: _formatJobSource(server, vm.name),
@@ -3851,7 +3807,6 @@ class AgentHttpServer {
           'backupPath': backupPath,
           'driverParams': driverParams ?? const <String, dynamic>{},
           'blockSizeMB': blockSizeMBOverride,
-          'fresh': freshRequested,
           'settings': (storage?.settings ?? _agentSettings).toMap(),
           'storage': storage?.storage.toMap(),
           'server': server.toMap(),
@@ -3900,7 +3855,13 @@ class AgentHttpServer {
       }
       if (type == 'settings') {
         final updated = AppSettings.fromMap(Map<String, dynamic>.from(payload['settings'] as Map));
-        unawaited(_applyAgentSettings(_settingsFromWorkerUpdate(updated), reason: 'worker', forceRestartSshListeners: false));
+        unawaited(
+          _applyAgentSettings(
+            _settingsFromWorkerUpdate(updated, AppSettings.fromMap(Map<String, dynamic>.from(payload['previousSettings'] as Map))),
+            reason: 'worker',
+            forceRestartSshListeners: false,
+          ),
+        );
         return;
       }
       if (type == 'result') {
@@ -4027,7 +3988,13 @@ class AgentHttpServer {
       }
       if (type == 'settings') {
         final updated = AppSettings.fromMap(Map<String, dynamic>.from(payload['settings'] as Map));
-        unawaited(_applyAgentSettings(_settingsFromWorkerUpdate(updated), reason: 'worker', forceRestartSshListeners: false));
+        unawaited(
+          _applyAgentSettings(
+            _settingsFromWorkerUpdate(updated, AppSettings.fromMap(Map<String, dynamic>.from(payload['previousSettings'] as Map))),
+            reason: 'worker',
+            forceRestartSshListeners: false,
+          ),
+        );
         return;
       }
       if (type == 'result') {
@@ -4184,7 +4151,7 @@ class AgentHttpServer {
           var checked = 0;
           var presentBlocks = 0;
           var missingBlocks = 0;
-          final maxConcurrentDownloads = storage.driverId == 'filesystem' ? 1 : storage.storage.downloadConcurrency;
+          final maxConcurrentDownloads = BackupDriverCapabilities.forDriver(storage.driverId).hasParam('downloadConcurrency') ? storage.storage.downloadConcurrency : 1;
           if (maxConcurrentDownloads == null) {
             throw '$checkLabel requires downloadConcurrency for storage ${storage.storage.id}.';
           }
@@ -4359,7 +4326,7 @@ class AgentHttpServer {
               }
               final driverForBlockSize = checkDriverForBlockSize(blockSizeMB);
               final remote = driverForBlockSize is drv.RemoteBlobDriver ? driverForBlockSize as drv.RemoteBlobDriver : null;
-              if (driverInfo.id != 'filesystem' && remote == null) {
+              if (!driverInfo.capabilities.hasParam('path') && remote == null) {
                 throw '$checkLabel requires remote blob reads for driver ${driverInfo.id}.';
               }
 
@@ -4369,7 +4336,7 @@ class AgentHttpServer {
                   return _CheckBlockFetchResult(position: position, block: block, bytes: const <int>[], missing: false, canceled: true);
                 }
                 try {
-                  if (driverInfo.id == 'filesystem') {
+                  if (driverInfo.capabilities.hasParam('path')) {
                     final blobFile = driverForBlockSize.blobFile(block.hash);
                     try {
                       final bytes = await blobFile.readAsBytes();
@@ -4483,7 +4450,7 @@ class AgentHttpServer {
           _updateJob(
             jobId,
             _jobs[jobId]!.copyWith(
-              state: AgentJobState.success,
+              state: mismatches == 0 ? AgentJobState.success : AgentJobState.failure,
               message: resultMessage,
               totalUnits: totalBlocks,
               completedUnits: checked,
@@ -4710,7 +4677,13 @@ class AgentHttpServer {
       }
       if (type == 'settings') {
         final updated = AppSettings.fromMap(Map<String, dynamic>.from(payload['settings'] as Map));
-        unawaited(_applyAgentSettings(_settingsFromWorkerUpdate(updated), reason: 'worker', forceRestartSshListeners: false));
+        unawaited(
+          _applyAgentSettings(
+            _settingsFromWorkerUpdate(updated, AppSettings.fromMap(Map<String, dynamic>.from(payload['previousSettings'] as Map))),
+            reason: 'worker',
+            forceRestartSshListeners: false,
+          ),
+        );
         return;
       }
       if (type == 'result') {

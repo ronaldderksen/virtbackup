@@ -103,7 +103,10 @@ extension _BackupServerSetupManageSection on _BackupServerSetupScreenState {
                                     if (isActiveVmAction)
                                       Tooltip(
                                         message: _vmActionStatusMessage,
-                                        child: const Padding(padding: EdgeInsets.symmetric(horizontal: 8, vertical: 8), child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))),
+                                        child: const Padding(
+                                          padding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                                          child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
+                                        ),
                                       ),
                                     if (!isRunning) TextButton(onPressed: _isVmActionRunning || server == null ? null : () => _renameVm(server, vm), child: const Text('Rename')),
                                     if (!isRunning) TextButton(onPressed: _isVmActionRunning || server == null ? null : () => _runVmAction(server, vm, VmAction.start), child: const Text('Run')),

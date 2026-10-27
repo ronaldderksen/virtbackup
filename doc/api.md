@@ -10,6 +10,8 @@ Notes:
 
 ## Authentication
 
+The GUI first probes TLS without sending HTTP or credentials, obtains approval for the certificate fingerprint, and pins that fingerprint on authenticated connections. Changed or unapproved certificates receive no agent token.
+
 Every request must include the agent token, either as:
 - `Authorization: Bearer <token>`
 - `x-agent-token: <token>`
@@ -166,11 +168,16 @@ Response: array of available storage drivers and their capabilities/params.
       "supportsConditionalWrite": false,
       "supportsVersioning": false,
       "maxConcurrentWrites": 16,
-      "params": []
+      "maxConcurrentDirectoryListings": 1,
+      "params": [{"key":"path","label":"Path","type":"text","defaultValue":null,"min":null,"max":null,"step":null,"unit":null,"help":null}]
     }
   }
 ]
 ```
+
+Storage options are described in `capabilities.params`; clients must use the returned parameter keys instead of branching on driver IDs. Driver catalogs and unknown IDs are not replaced with filesystem defaults.
+
+Full checks return job state `failure` when hash mismatches are found; quick checks return `failure` when blobs are missing. Restore reports `failure` when snapshot-related prerequisite commands, disk finalization commands, rebase, or `virsh define` fail.
 
 ## Config
 
@@ -209,7 +216,6 @@ Response:
       "name":"Remote SFTP",
       "driverId":"sftp",
       "enabled":true,
-      "disableFresh":true,
       "params":{
         "host":"my-sftp.example.com",
         "port":22,
@@ -634,8 +640,7 @@ Body:
 {
   "vmName":"my-vm",
   "storageId":"dest_filesystem_1739440000000000",
-  "blockSizeMB":4,
-  "fresh":false
+  "blockSizeMB":4
 }
 ```
 
@@ -644,8 +649,6 @@ Notes:
 - `blockSizeMB` is optional and overrides dedup block size for this backup job only (`1`, `2`, `4`, `8`).
 - For backward compatibility, `driverId` and `driverParams` are still accepted when present.
 - The filesystem storage path is resolved from `storage[id=filesystem].params.path`.
-- `fresh: true` triggers a driver "fresh cleanup" (driver-specific behavior). This is only executed when the agent runs in debug mode.
-- `disableFresh: true` on a storage forces `fresh` off for that storage; the backup still starts and the agent logs that `fresh` was ignored.
 
 Response:
 ```json
