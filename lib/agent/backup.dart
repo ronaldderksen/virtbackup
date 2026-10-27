@@ -809,6 +809,7 @@ class BackupAgent {
     final sftpReadLeadBlocks = max(1, (sftpReadLeadBytes + _blockSize - 1) ~/ _blockSize);
     final maxFileLimitIndex = max(0, ((fileSize + _blockSize - 1) ~/ _blockSize) - 1);
     Timer? limitUpdateTimer;
+    Timer? pipelineLogTimer;
     var lastLimitSent = -1;
     var sftpReadBytes = 0;
     var resolvedZeroOrExistingBlocks = 0;
@@ -1032,6 +1033,16 @@ class BackupAgent {
     var manifestFlushed = false;
 
     try {
+      pipelineLogTimer = Timer.periodic(agentLogInterval, (_) {
+        LogWriter.logAgentSync(
+          level: 'debug',
+          message:
+              'backup pipeline disk=$diskId lastHashIndex=${hashblocksWorker.lastHashblocksIndex} limit=$lastLimitSent unlimited=$unlimitedLimitSent '
+              'readBytes=$sftpReadBytes resolvedBlocks=$resolvedZeroOrExistingBlocks missingRuns=${missingQueue.length} '
+              'writerQueuedBytes=$_writerQueuedBytes writerInFlightBytes=$_writerInFlightBytes driverBufferedBytes=${driver.bufferedBytes} '
+              'exists={${existsWorker.diagnosticState}} cache={${cache?.diagnosticState}} prefetch={${_blobCacheWorker?.diagnosticState}}',
+        );
+      });
       final writerFuture = writerWorker.run();
       writerFutureRef = writerFuture;
       final existsWorkerFuture = existsWorker.run();
@@ -1144,6 +1155,7 @@ class BackupAgent {
         _activeHashblocksController = null;
       }
       limitUpdateTimer?.cancel();
+      pipelineLogTimer?.cancel();
       if (wakeSftpReadResume != null && !wakeSftpReadResume!.isCompleted) {
         wakeSftpReadResume!.complete();
         wakeSftpReadResume = null;
@@ -1507,6 +1519,8 @@ class BlobDirectoryCache {
   Future<void>? _shardsInFlight;
   final Map<String, Set<String>> _blobNamesByShardKey = {};
   final Map<String, Future<Set<String>>> _blobNamesInFlightByShardKey = {};
+  final List<Completer<void>> _directoryListingWaiters = [];
+  var _activeDirectoryListings = 0;
   Future<void>? _blobDirectoryLoadInFlight;
   final Map<String, Future<void>> _shardCreateInFlight = {};
   final List<Completer<void>> _writeReadyWaiters = <Completer<void>>[];
@@ -1676,6 +1690,33 @@ class BlobDirectoryCache {
     }
   }
 
+  String get diagnosticState =>
+      'writeReady=$_writeReady loadedShards=${_blobNamesByShardKey.length} activeListings=$_activeDirectoryListings queuedListings=${_directoryListingWaiters.length} pendingListings=${_blobNamesInFlightByShardKey.length} pendingShards=${_blobNamesInFlightByShardKey.keys.take(8).join(',')}';
+
+  Future<Set<String>> _listBlobNames(BlobDirectoryLister lister, String shardKey) async {
+    final concurrency = _driver.capabilities.maxConcurrentDirectoryListings;
+    if (concurrency < 1) throw StateError('maxConcurrentDirectoryListings must be positive.');
+    if (_activeDirectoryListings < concurrency) {
+      _activeDirectoryListings += 1;
+    } else {
+      final waiter = Completer<void>();
+      _directoryListingWaiters.add(waiter);
+      await waiter.future;
+    }
+    try {
+      ensureNotCanceled();
+      LogWriter.logAgentSync(level: 'debug', message: 'blob-cache listing started shard=$shardKey active=$_activeDirectoryListings queued=${_directoryListingWaiters.length}');
+      return await lister.listBlobNames(shardKey);
+    } finally {
+      if (_directoryListingWaiters.isNotEmpty) {
+        // Hand the slot directly to the next waiter so new requests cannot overtake it.
+        _directoryListingWaiters.removeAt(0).complete();
+      } else {
+        _activeDirectoryListings -= 1;
+      }
+    }
+  }
+
   Future<Set<String>> _loadBlobNames(String shardKey) async {
     final pending = _blobNamesInFlightByShardKey[shardKey];
     if (pending != null) return pending;
@@ -1683,16 +1724,24 @@ class BlobDirectoryCache {
     if (cached != null) return cached;
     final lister = _blobDirectoryLister;
     if (lister != null) {
+      final stopwatch = Stopwatch()..start();
+      LogWriter.logAgentSync(level: 'debug', message: 'blob-cache listing queued shard=$shardKey pending=${_blobNamesInFlightByShardKey.length + 1} active=$_activeDirectoryListings');
       final request = () async {
-        final names = await lister.listBlobNames(shardKey);
+        final names = await _listBlobNames(lister, shardKey);
         (_shardNames ??= <String>{}).add(shardKey);
         // Writes may have registered additional hashes while the directory listing was in flight.
         return (_blobNamesByShardKey.putIfAbsent(shardKey, () => <String>{})..addAll(names));
       }();
       _blobNamesInFlightByShardKey[shardKey] = request;
       try {
-        return await request;
+        final names = await request;
+        LogWriter.logAgentSync(level: 'debug', message: 'blob-cache listing completed shard=$shardKey durationMs=${stopwatch.elapsedMilliseconds} names=${names.length}');
+        return names;
+      } catch (error) {
+        LogWriter.logAgentSync(level: 'debug', message: 'blob-cache listing failed shard=$shardKey durationMs=${stopwatch.elapsedMilliseconds} error=$error');
+        rethrow;
       } finally {
+        stopwatch.stop();
         _blobNamesInFlightByShardKey.remove(shardKey);
       }
     }
@@ -1793,7 +1842,7 @@ class BlobDirectoryCache {
     }
     final lister = _blobDirectoryLister;
     if (lister != null) {
-      final names = await lister.listBlobNames(shardKey);
+      final names = await _listBlobNames(lister, shardKey);
       (_shardNames ??= <String>{}).add(shardKey);
       _blobNamesByShardKey[shardKey] = names;
       return names;

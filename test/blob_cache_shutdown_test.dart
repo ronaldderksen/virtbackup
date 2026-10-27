@@ -19,6 +19,9 @@ class _ListingDriver extends FilesystemBackupDriver {
   final started = <String, Completer<void>>{'aa': Completer<void>(), 'bb': Completer<void>()};
 
   @override
+  BackupDriverCapabilities get capabilities => BackupDriverCapabilities.forDriver('gdrive');
+
+  @override
   Future<Set<String>> listBlobShards() async => {'aa', 'bb'};
 
   @override
@@ -27,6 +30,39 @@ class _ListingDriver extends FilesystemBackupDriver {
     if (!started[shard]!.isCompleted) started[shard]!.complete();
     return responses[shard]!.future;
   }
+}
+
+class _BoundedListingDriver extends FilesystemBackupDriver {
+  _BoundedListingDriver() : super('/unused', blockSizeMB: 1);
+  final responses = <String, Completer<Set<String>>>{};
+  final firstWave = Completer<void>();
+  var active = 0;
+  var peak = 0;
+
+  @override
+  BackupDriverCapabilities get capabilities => BackupDriverCapabilities.forDriver('gdrive');
+
+  @override
+  Future<Set<String>> listBlobShards() async => Set.from(List.generate(12, (i) => i.toRadixString(16).padLeft(2, '0')));
+
+  @override
+  Future<Set<String>> listBlobNames(String shard) async {
+    active++;
+    if (active > peak) peak = active;
+    final response = Completer<Set<String>>();
+    responses[shard] = response;
+    if (responses.length == 8) firstWave.complete();
+    try {
+      return await response.future;
+    } finally {
+      active--;
+    }
+  }
+}
+
+class _SerialListingDriver extends _ListingDriver {
+  @override
+  BackupDriverCapabilities get capabilities => BackupDriverCapabilities.forDriver('filesystem');
 }
 
 class _CachedBackupDriver extends FilesystemBackupDriver {
@@ -133,6 +169,45 @@ void main() {
     expect(await checks, everyElement(isTrue));
     expect(await cache.blobExists(_firstHash), isTrue);
     expect(driver.calls, {'aa': 1});
+  });
+
+  test('prefetches and required checks share the driver listing limit', () async {
+    final driver = _BoundedListingDriver();
+    final cache = BlobDirectoryCache(driver: driver, createShard: (_) async => fail('Unexpected directory creation'), ensureNotCanceled: () {}, ensureMissingShards: false);
+    final hashes = List.generate(12, (i) => '${i.toRadixString(16).padLeft(2, '0')}${'1' * 62}');
+    final prefetches = hashes.take(10).map(cache.prefetchHash).toList();
+    final checks = hashes.skip(10).map(cache.blobExists).toList();
+    await driver.firstWave.future;
+    await Future<void>.delayed(Duration.zero);
+    expect(driver.responses, hasLength(8));
+    expect(cache.diagnosticState, contains('queuedListings=4'));
+    for (final response in driver.responses.values.toList()) {
+      response.complete({});
+    }
+    await Future<void>.delayed(Duration.zero);
+    expect(driver.responses, hasLength(12));
+    for (final response in driver.responses.values) {
+      if (!response.isCompleted) response.complete({});
+    }
+    await Future.wait(prefetches);
+    expect(await Future.wait(checks), everyElement(isFalse));
+    expect(driver.peak, 8);
+    expect(driver.active, 0);
+  });
+
+  test('a failed listing releases its slot for a queued shard', () async {
+    final driver = _SerialListingDriver();
+    final cache = cacheFor(driver);
+    final first = cache.blobExists(_firstHash);
+    final failure = expectLater(first, throwsStateError);
+    final second = cache.blobExists(_otherShardHash);
+    await driver.started['aa']!.future;
+    expect(driver.started['bb']!.isCompleted, isFalse);
+    driver.responses['aa']!.completeError(StateError('listing failed'));
+    await failure;
+    await driver.started['bb']!.future;
+    driver.responses['bb']!.complete({_otherShardHash});
+    expect(await second, isTrue);
   });
 
   test('different shards can list concurrently without blocking each other', () async {

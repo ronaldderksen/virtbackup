@@ -1,3 +1,6 @@
+#include <errno.h>
+#include <limits.h>
+#include <time.h>
 #include <libssh2.h>
 #include <libssh2_sftp.h>
 #include <openssl/evp.h>
@@ -109,7 +112,9 @@ static int wait_socket_ready_for(vb_sftp_session *sess, int timeout_ms) {
   timeout.tv_sec = timeout_ms / 1000;
   timeout.tv_usec = (timeout_ms % 1000) * 1000;
   int rc = select(sess->sock + 1, &readfds, &writefds, NULL, &timeout);
-  return rc > 0 ? 0 : -1;
+  if (rc > 0) return 0;
+  if (rc == 0) return LIBSSH2_ERROR_TIMEOUT;
+  return errno == EINTR ? LIBSSH2_ERROR_EAGAIN : LIBSSH2_ERROR_SOCKET_RECV;
 }
 
 static int transfer_remaining_ms(double deadline) {
@@ -473,81 +478,206 @@ int vb_sftp_remove(void *session_ptr, const char *path) {
   return rc == 0 ? 0 : sftp_last_error(sess);
 }
 
-void *vb_sftp_listdir(void *session_ptr, const char *path) {
-  if (!session_ptr || !path) {
+void vb_sftp_free_dir_list(void *list_ptr);
+
+static long long directory_now_ms(void) {
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+    return -1;
+  }
+  return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static int directory_check_deadline(long long deadline, int *status) {
+  long long now = directory_now_ms();
+  if (now < 0) {
+    *status = LIBSSH2_ERROR_INVAL;
+    return 0;
+  }
+  if (now >= deadline) {
+    *status = LIBSSH2_ERROR_TIMEOUT;
+    return 0;
+  }
+  return 1;
+}
+
+static int directory_wait(vb_sftp_session *sess, long long deadline, int *status) {
+  while (1) {
+    if (!directory_check_deadline(deadline, status)) {
+      return 0;
+    }
+    long long now = directory_now_ms();
+    if (now < 0) {
+      *status = LIBSSH2_ERROR_INVAL;
+      return 0;
+    }
+    long long remaining = deadline - now;
+    if (remaining <= 0) {
+      *status = LIBSSH2_ERROR_TIMEOUT;
+      return 0;
+    }
+    int wait_ms = remaining > VB_SFTP_TIMEOUT_MS ? VB_SFTP_TIMEOUT_MS : (int)remaining;
+    int rc = wait_socket_ready_for(sess, wait_ms);
+    if (rc == LIBSSH2_ERROR_EAGAIN) {
+      continue;
+    }
+    if (rc != 0) {
+      *status = rc;
+      return 0;
+    }
+    return directory_check_deadline(deadline, status);
+  }
+}
+
+static int directory_error(vb_sftp_session *sess, int error) {
+  return error == LIBSSH2_ERROR_SFTP_PROTOCOL ? sftp_last_error(sess) : error;
+}
+
+/* The explicit timed symbol prevents older libraries from being called with
+   an incompatible FFI signature. Never return a partial listing on failure. */
+void *vb_sftp_listdir_timed(void *session_ptr, const char *path, int timeout_ms, int *status) {
+  if (!status) {
     return NULL;
   }
+  *status = LIBSSH2_ERROR_INVAL;
+  if (!session_ptr || !path || timeout_ms <= 0) {
+    return NULL;
+  }
+  long long started = directory_now_ms();
+  if (started < 0) {
+    return NULL;
+  }
+  long long deadline = started + timeout_ms;
   vb_sftp_session *sess = (vb_sftp_session *)session_ptr;
-  LIBSSH2_SFTP_HANDLE *dir = libssh2_sftp_opendir(sess->sftp, path);
-  if (!dir) {
-    return NULL;
-  }
-
-  vb_sftp_dir_list *list = (vb_sftp_dir_list *)calloc(1, sizeof(vb_sftp_dir_list));
-  if (!list) {
-    libssh2_sftp_closedir(dir);
-    return NULL;
-  }
-
+  int original_blocking = libssh2_session_get_blocking(sess->session);
+  LIBSSH2_SFTP_HANDLE *dir = NULL;
+  vb_sftp_dir_list *list = NULL;
   int capacity = 32;
+  int directory_opened = 0;
+  libssh2_session_set_blocking(sess->session, 0);
+
+  while (1) {
+    if (!directory_check_deadline(deadline, status)) {
+      goto failed;
+    }
+    dir = libssh2_sftp_opendir(sess->sftp, path);
+    if (dir) {
+      directory_opened = 1;
+      break;
+    }
+    int error = libssh2_session_last_errno(sess->session);
+    if (error != LIBSSH2_ERROR_EAGAIN) {
+      *status = directory_error(sess, error);
+      goto failed;
+    }
+    if (!directory_wait(sess, deadline, status)) {
+      goto failed;
+    }
+  }
+
+  list = (vb_sftp_dir_list *)calloc(1, sizeof(vb_sftp_dir_list));
+  if (!list) {
+    *status = LIBSSH2_ERROR_ALLOC;
+    goto failed;
+  }
   list->entries = (vb_sftp_dir_entry *)calloc((size_t)capacity, sizeof(vb_sftp_dir_entry));
   if (!list->entries) {
-    libssh2_sftp_closedir(dir);
-    free(list);
-    return NULL;
+    *status = LIBSSH2_ERROR_ALLOC;
+    goto failed;
   }
 
   while (1) {
+    if (!directory_check_deadline(deadline, status)) {
+      goto failed;
+    }
     char name[1024];
     LIBSSH2_SFTP_ATTRIBUTES attrs;
     memset(&attrs, 0, sizeof(attrs));
     int rc = libssh2_sftp_readdir_ex(dir, name, sizeof(name), NULL, 0, &attrs);
+    if (rc == LIBSSH2_ERROR_EAGAIN) {
+      if (!directory_wait(sess, deadline, status)) {
+        goto failed;
+      }
+      continue;
+    }
     if (rc == 0) {
       break;
     }
     if (rc < 0) {
-      for (int i = 0; i < list->count; i++) {
-        free(list->entries[i].name);
-      }
-      free(list->entries);
-      free(list);
-      libssh2_sftp_closedir(dir);
-      return NULL;
+      *status = directory_error(sess, rc);
+      goto failed;
     }
     if (list->count >= capacity) {
+      if (capacity > INT_MAX / 2) {
+        *status = LIBSSH2_ERROR_ALLOC;
+        goto failed;
+      }
       capacity *= 2;
       vb_sftp_dir_entry *expanded = (vb_sftp_dir_entry *)realloc(list->entries, (size_t)capacity * sizeof(vb_sftp_dir_entry));
       if (!expanded) {
-        for (int i = 0; i < list->count; i++) {
-          free(list->entries[i].name);
-        }
-        free(list->entries);
-        free(list);
-        libssh2_sftp_closedir(dir);
-        return NULL;
+        *status = LIBSSH2_ERROR_ALLOC;
+        goto failed;
       }
       list->entries = expanded;
     }
     char *copy = (char *)calloc((size_t)rc + 1, sizeof(char));
     if (!copy) {
-      for (int i = 0; i < list->count; i++) {
-        free(list->entries[i].name);
-      }
-      free(list->entries);
-      free(list);
-      libssh2_sftp_closedir(dir);
-      return NULL;
+      *status = LIBSSH2_ERROR_ALLOC;
+      goto failed;
     }
     memcpy(copy, name, (size_t)rc);
-    copy[rc] = '\0';
     list->entries[list->count].name = copy;
     list->entries[list->count].is_dir = (attrs.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) && S_ISDIR(attrs.permissions) ? 1 : 0;
     list->entries[list->count].size = (long long)attrs.filesize;
     list->count += 1;
   }
 
-  libssh2_sftp_closedir(dir);
-  return (void *)list;
+  while (1) {
+    if (!directory_check_deadline(deadline, status)) {
+      goto failed;
+    }
+    int rc = libssh2_sftp_closedir(dir);
+    if (rc == LIBSSH2_ERROR_EAGAIN) {
+      if (!directory_wait(sess, deadline, status)) {
+        goto failed;
+      }
+      continue;
+    }
+    // A non-EAGAIN close result consumes the handle, including protocol errors.
+    dir = NULL;
+    if (rc != 0) {
+      *status = directory_error(sess, rc);
+      goto failed;
+    }
+    if (!directory_check_deadline(deadline, status)) {
+      goto failed;
+    }
+    break;
+  }
+
+  libssh2_session_set_blocking(sess->session, original_blocking);
+  *status = 0;
+  return list;
+
+failed:
+  // A read/close failure after opening must not turn a partial listing into
+  // a missing-directory result, or release its aborted session back to the pool.
+  if (directory_opened && *status == LIBSSH2_FX_NO_SUCH_FILE) {
+    *status = LIBSSH2_ERROR_SFTP_PROTOCOL;
+  }
+  // Preserve status before cleanup can replace libssh2's last error. A missing
+  // directory is safe to reuse; other failures invalidate the leased session.
+  if (*status == LIBSSH2_FX_NO_SUCH_FILE && !dir) {
+    libssh2_session_set_blocking(sess->session, original_blocking);
+  } else {
+    // Abort the transport before cleanup; all cleanup calls remain nonblocking.
+    shutdown(sess->sock, SHUT_RDWR);
+    if (dir) {
+      libssh2_sftp_closedir(dir);
+    }
+  }
+  vb_sftp_free_dir_list(list);
+  return NULL;
 }
 
 void vb_sftp_free_dir_list(void *list_ptr) {

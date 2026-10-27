@@ -53,3 +53,6 @@ app.*.map.json
 /tools/loop.sh
 /TODO/
 /tmp
+
+/native/linux/sftp_listing_deadline_test
+/native/macos/sftp_listing_deadline_test

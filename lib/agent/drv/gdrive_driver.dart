@@ -51,12 +51,22 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     required Future<void> Function(AppSettings previous, AppSettings updated) persistSettings,
     Directory? settingsDir,
     void Function(String message)? logInfo,
+    http.Client Function() createApiClient = _createDefaultApiClient,
+    Duration directoryRequestTimeout = const Duration(seconds: 30),
+    Duration retryBaseDelay = const Duration(seconds: 2),
   }) : _settings = settings,
+       _createApiClient = createApiClient,
+       _client = createApiClient(),
+       _directoryRequestTimeout = directoryRequestTimeout,
+       _retryBaseDelay = retryBaseDelay,
        _persistSettings = persistSettings,
        _settingsDir = settingsDir,
        _cacheRoot = _cacheRootForSettings(settings),
        _logInfo = ((message) => (logInfo ?? ((_) {}))('driver=gdrive $message'));
 
+  final http.Client Function() _createApiClient;
+  final Duration _directoryRequestTimeout;
+  final Duration _retryBaseDelay;
   final Directory? _settingsDir;
   GoogleOAuthInstalledClient? _oauthClient;
   static const int _uploadConcurrency = 8;
@@ -76,7 +86,10 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   bool _closingConnections = false;
   final Completer<void> _connectionsClosed = Completer<void>();
   Future<String>? _tokenRefreshInFlight;
-  http.Client _client = IOClient(_createHttpClient());
+  var _nextDirectoryRequestId = 0;
+  var _activeDirectoryRequests = 0;
+  final Set<Timer> _directoryRequestLogTimers = {};
+  http.Client _client;
   final _HttpClientPool _uploadClientPool = _HttpClientPool(maxClients: _uploadConcurrency);
   int _inFlightUploads = 0;
   String? _blobsRootId;
@@ -397,6 +410,10 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   @override
   Future<void> closeConnections() async {
     _closingConnections = true;
+    for (final timer in _directoryRequestLogTimers) {
+      timer.cancel();
+    }
+    _directoryRequestLogTimers.clear();
     if (!_connectionsClosed.isCompleted) {
       _connectionsClosed.complete();
     }
@@ -660,7 +677,9 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     final listTarget = _listTargetFromQuery(query);
     final isFolderQuery = query.contains("mimeType='$_driveFolderMime'");
     String? pageToken;
+    var page = 0;
     do {
+      page += 1;
       final params = <String, String>{'q': query, 'fields': fields, 'pageSize': '1000'};
       if (pageToken != null && pageToken.isNotEmpty) {
         params['pageToken'] = pageToken;
@@ -671,15 +690,16 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         final response = await _requestWithApiLog(
           action: 'list',
           target: listTarget,
+          detail: 'page=$page',
           method: 'GET',
           uri: uri,
-          send: () => _client.get(uri, headers: _authHeaders(token)),
+          send: () => _sendDirectoryRequest(uri, headers: _authHeaders(token)),
         );
         if (response.statusCode >= 300) {
           throw _driveApiException(action: 'list', response: response);
         }
         return response;
-      });
+      }, resetClientOnRetry: false);
       final decoded = jsonDecode(response.body);
       final files = decoded['files'];
       if (files is List) {
@@ -1092,8 +1112,8 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     }
   }
 
-  Future<T> _withRetry<T>(String label, Future<T> Function() action, {void Function()? onRetry}) async {
-    var delaySeconds = 2;
+  Future<T> _withRetry<T>(String label, Future<T> Function() action, {void Function()? onRetry, bool resetClientOnRetry = true}) async {
+    var backoff = _retryBaseDelay;
     var attempt = 0;
     const maxRetries = 5;
     const maxTransientRetries = 10;
@@ -1125,22 +1145,23 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         attempt += 1;
         _logInfo('gdrive: $label failed: $error');
         _logInfo(stackTrace.toString());
-        _logInfo('gdrive: $label retrying after error: $error');
+        final retryAfter = error is _DriveApiException ? error.retryAfter : null;
+        final delay = retryAfter ?? backoff;
+        final retryMessage = 'gdrive: $label retrying after error: $error retry=$attempt/$retryLimit delayMs=${delay.inMilliseconds}';
+        _logInfo(retryMessage);
         await _logGdriveError('gdrive: $label failed: $error', stackTrace: stackTrace);
-        await _logGdriveWarning('gdrive: $label retrying after error: $error');
+        await _logGdriveWarning(retryMessage);
         if (onRetry != null) {
           onRetry();
-        } else {
+        } else if (resetClientOnRetry) {
           _resetHttpClient();
         }
-        final retryAfter = error is _DriveApiException ? error.retryAfter : null;
-        final delay = retryAfter ?? Duration(seconds: delaySeconds);
         await Future.any(<Future<void>>[Future.delayed(delay), _connectionsClosed.future]);
         if (_closingConnections) {
           throw 'gdrive $label stopped because the storage connection was closed';
         }
         if (retryAfter == null) {
-          delaySeconds = min(delaySeconds * 2, 300);
+          backoff = Duration(microseconds: min(backoff.inMicroseconds * 2, const Duration(seconds: 300).inMicroseconds));
         }
       }
     }
@@ -1190,27 +1211,76 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return delay;
   }
 
+  Future<http.Response> _sendDirectoryRequest(Uri uri, {required Map<String, String> headers}) async {
+    final abort = Completer<void>();
+    final request = http.AbortableRequest('GET', uri, abortTrigger: abort.future)..headers.addAll(headers);
+    final response = () async {
+      final streamed = await _client.send(request);
+      return http.Response.fromStream(streamed);
+    }();
+    return response.timeout(
+      _directoryRequestTimeout,
+      onTimeout: () {
+        abort.complete();
+        throw TimeoutException('Google Drive directory request exceeded ${_directoryRequestTimeout.inMilliseconds}ms; request aborted', _directoryRequestTimeout);
+      },
+    );
+  }
+
   Future<http.Response> _requestWithApiLog({required String action, required String method, required Uri uri, required Future<http.Response> Function() send, String? target, String? detail}) async {
     final stopwatch = Stopwatch()..start();
     final targetText = target == null || target.isEmpty ? '' : ' target=$target';
     final detailText = detail == null || detail.isEmpty ? '' : ' detail=$detail';
+    int? requestId;
+    Timer? pendingLogTimer;
     try {
       if (_closingConnections) {
         throw 'gdrive $action stopped because the storage connection was closed';
       }
+      if (action == 'list') {
+        requestId = ++_nextDirectoryRequestId;
+        _activeDirectoryRequests += 1;
+        LogWriter.logAgentSync(
+          level: 'debug',
+          message: 'driver=gdrive directory request started requestId=$requestId active=$_activeDirectoryRequests$targetText$detailText method=${method.toUpperCase()}',
+        );
+        pendingLogTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+          LogWriter.logAgentSync(
+            level: 'debug',
+            message: 'driver=gdrive directory request still pending requestId=$requestId durationMs=${stopwatch.elapsedMilliseconds} active=$_activeDirectoryRequests$targetText$detailText',
+          );
+        });
+        _directoryRequestLogTimers.add(pendingLogTimer);
+      }
       final response = await send();
       stopwatch.stop();
+      if (requestId != null) {
+        LogWriter.logAgentSync(
+          level: 'debug',
+          message:
+              'driver=gdrive directory request completed requestId=$requestId durationMs=${stopwatch.elapsedMilliseconds} statusCode=${response.statusCode} bytes=${response.bodyBytes.length} remaining=${_activeDirectoryRequests - 1}$targetText$detailText',
+        );
+      }
       return response;
     } catch (error, stackTrace) {
       stopwatch.stop();
+      final requestText = requestId == null ? '' : ' requestId=$requestId';
       if (_closingConnections) {
+        if (requestId != null) {
+          LogWriter.logAgentSync(level: 'debug', message: 'driver=gdrive directory request canceled$requestText durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText');
+        }
         throw 'gdrive $action stopped because the storage connection was closed';
       }
       await _logGdriveError(
-        'gdrive: api request failed action=$action durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()} error=$error',
+        'gdrive: api request failed action=$action$requestText durationMs=${stopwatch.elapsedMilliseconds}$targetText$detailText method=${method.toUpperCase()} error=$error',
         stackTrace: stackTrace,
       );
       rethrow;
+    } finally {
+      pendingLogTimer?.cancel();
+      _directoryRequestLogTimers.remove(pendingLogTimer);
+      stopwatch.stop();
+      if (requestId != null) _activeDirectoryRequests -= 1;
     }
   }
 
@@ -1226,6 +1296,8 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     _agentLogConfigured = true;
   }
 
+  static http.Client _createDefaultApiClient() => IOClient(_createHttpClient());
+
   static HttpClient _createHttpClient() {
     final client = HttpClient();
     client.connectionTimeout = const Duration(seconds: 10);
@@ -1237,7 +1309,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
       return;
     }
     _client.close();
-    _client = IOClient(_createHttpClient());
+    _client = _createApiClient();
   }
 
   Future<_UploadClientLease> _leaseUploadClient() async {

@@ -18,6 +18,8 @@ class BlobCacheWorker {
   Future<void>? _running;
   final Completer<void> _cancelSignal = Completer<void>();
 
+  String get diagnosticState => 'queued=${_queue.length} inFlight=$_inFlightTasks done=$_done canceled=$_canceled';
+
   void enqueue(String hash) {
     if (_done || _canceled) {
       return;

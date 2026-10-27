@@ -28,6 +28,28 @@ class _ExistsWorker {
   Object? _error;
   StackTrace? _errorStack;
 
+  _MissingEntry? _checkingEntry;
+  final Stopwatch _checkStopwatch = Stopwatch();
+
+  String get diagnosticState {
+    final entry = _checkingEntry;
+    final shard = entry == null ? 'none' : entry.hash.substring(0, 2);
+    return 'queued=${_queue.length} checkingIndex=${entry?.index} checkingShard=$shard checkMs=${_checkStopwatch.elapsedMilliseconds} pendingMissing=${_pendingMissingHashes.length}';
+  }
+
+  Future<bool> _checkBlob(_MissingEntry entry) async {
+    _checkingEntry = entry;
+    _checkStopwatch
+      ..reset()
+      ..start();
+    try {
+      return await blobExists(entry.hash);
+    } finally {
+      _checkStopwatch.stop();
+      _checkingEntry = null;
+    }
+  }
+
   var _pendingMissingStart = -1;
   final List<String> _pendingMissingHashes = <String>[];
 
@@ -78,7 +100,7 @@ class _ExistsWorker {
         while (_queue.isNotEmpty) {
           ensureNotCanceled();
           final entry = _queue.removeAt(0);
-          final exists = await blobExists(entry.hash);
+          final exists = await _checkBlob(entry);
           if (exists) {
             onExisting();
             handleBytes(entry.blockLength);

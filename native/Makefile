@@ -38,7 +38,7 @@ endif
 
 SRC := virtbackup_native.c
 
-.PHONY: all clean
+.PHONY: all clean test test-fixture
 
 all: $(OUT)
 
@@ -49,9 +49,24 @@ $(OUT): $(SRC)
 
 clean:
 ifeq ($(UNAME_S),Darwin)
-	rm -f macos/libvirtbackup_native.dylib
+	rm -f macos/libvirtbackup_native.dylib macos/sftp_listing_deadline_test
 	rmdir macos 2>/dev/null || true
 else
-	rm -f linux/libvirtbackup_native.so
+	rm -f linux/libvirtbackup_native.so linux/sftp_listing_deadline_test
 	rmdir linux 2>/dev/null || true
 endif
+
+TEST_OUT := $(OUT_DIR)/sftp_listing_deadline_test
+
+test: $(TEST_OUT)
+	"$(TEST_OUT)"
+
+$(TEST_OUT): tests/sftp_listing_deadline_test.c $(SRC)
+	mkdir -p $(OUT_DIR)
+	$(CC) $(CFLAGS) $(SSH2_CFLAGS) $(BREW_CFLAGS) $(OPENSSL_CFLAGS) -o $@ $< \
+		$(LDFLAGS) $(BREW_LDFLAGS) $(OPENSSL_LDFLAGS) $(SSH2_LIBS) $(LIBS)
+
+test-fixture:
+	test -n "$(TEST_FIXTURE_OUT)"
+	$(CC) $(CFLAGS) $(SSH2_CFLAGS) $(BREW_CFLAGS) $(OPENSSL_CFLAGS) $(SHARED_FLAG) -DVB_SFTP_TEST_SHARED -o "$(TEST_FIXTURE_OUT)" tests/sftp_listing_deadline_test.c \
+		$(LDFLAGS) $(BREW_LDFLAGS) $(OPENSSL_LDFLAGS) $(SSH2_LIBS) $(LIBS)

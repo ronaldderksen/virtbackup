@@ -496,7 +496,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   }
 
   void _logTimeout(String label, Duration duration) {
-    LogWriter.logAgentSync(level: 'warn', message: 'driver=sftp timeout label="$label" durationMs=${duration.inMilliseconds}');
+    LogWriter.logAgentSync(level: 'error', message: 'driver=sftp timeout label="$label" durationMs=${duration.inMilliseconds}');
   }
 
   String _formatLeaseMetrics(_NativeSftpLeaseMetrics metrics) {
@@ -511,10 +511,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
   Future<List<_NativeSftpEntry>> _remoteListDir(String remotePath, {bool useBlobCachePool = false}) {
     final label = 'listdir $remotePath';
     return _withNativeSession(label, (lease, bindings) {
-      final listPtr = bindings.listdir(lease.session, remotePath);
-      if (listPtr == nullptr) {
-        throw _NativeSftpStatusException(label: label, status: bindings.lastError(lease.session), path: remotePath);
-      }
+      final listPtr = bindings.listdir(lease.session, remotePath, timeoutMs: _callTimeout.inMilliseconds);
       try {
         final list = listPtr.ref;
         final result = <_NativeSftpEntry>[];
@@ -1037,6 +1034,9 @@ class _NativeSftpStatusException implements Exception {
 }
 
 class _NativeSftpBindings {
+  static const int _libssh2ErrorTimeout = -9;
+  static const int _libssh2ErrorSocketTimeout = -30;
+
   _NativeSftpBindings(DynamicLibrary lib)
     : _connect = lib.lookupFunction<_SftpConnectC, _SftpConnectDart>('vb_sftp_connect'),
       _disconnect = lib.lookupFunction<_SftpDisconnectC, _SftpDisconnectDart>('vb_sftp_disconnect'),
@@ -1047,7 +1047,7 @@ class _NativeSftpBindings {
       _mkdir = lib.lookupFunction<_SftpMkdirC, _SftpMkdirDart>('vb_sftp_mkdir'),
       _rename = lib.lookupFunction<_SftpRenameC, _SftpRenameDart>('vb_sftp_rename'),
       _remove = lib.lookupFunction<_SftpRemoveC, _SftpRemoveDart>('vb_sftp_remove'),
-      _listdir = lib.lookupFunction<_SftpListDirC, _SftpListDirDart>('vb_sftp_listdir'),
+      _listdir = lib.lookupFunction<_SftpListDirC, _SftpListDirDart>('vb_sftp_listdir_timed'),
       _freeDirList = lib.lookupFunction<_SftpFreeDirListC, _SftpFreeDirListDart>('vb_sftp_free_dir_list'),
       _read = lib.lookupFunction<_SftpReadC, _SftpReadDart>('vb_sftp_read'),
       _write = lib.lookupFunction<_SftpWriteC, _SftpWriteDart>('vb_sftp_write'),
@@ -1156,11 +1156,24 @@ class _NativeSftpBindings {
     return result;
   }
 
-  Pointer<_NativeSftpDirList> listdir(Pointer<Void> session, String path) {
+  Pointer<_NativeSftpDirList> listdir(Pointer<Void> session, String path, {required int timeoutMs}) {
     final pathPtr = path.toNativeUtf8();
-    final result = _listdir(session, pathPtr);
-    calloc.free(pathPtr);
-    return result;
+    final status = calloc<Int32>();
+    try {
+      final result = _listdir(session, pathPtr, timeoutMs, status);
+      if (result == nullptr) {
+        // libssh2 transport timeouts are negative and must never be confused
+        // with positive SFTP statuses such as "no such file" (2).
+        if (status.value == _libssh2ErrorTimeout || status.value == _libssh2ErrorSocketTimeout) {
+          throw TimeoutException('Native SFTP directory listing timed out path="$path" timeoutMs=$timeoutMs status=${status.value}');
+        }
+        throw _NativeSftpStatusException(label: 'listdir $path', status: status.value, path: path);
+      }
+      return result;
+    } finally {
+      calloc.free(pathPtr);
+      calloc.free(status);
+    }
   }
 
   void freeDirList(Pointer<Void> list) {
@@ -1451,8 +1464,8 @@ typedef _SftpRenameC = Int32 Function(Pointer<Void> session, Pointer<Utf8> fromP
 typedef _SftpRenameDart = int Function(Pointer<Void> session, Pointer<Utf8> fromPath, Pointer<Utf8> toPath);
 typedef _SftpRemoveC = Int32 Function(Pointer<Void> session, Pointer<Utf8> path);
 typedef _SftpRemoveDart = int Function(Pointer<Void> session, Pointer<Utf8> path);
-typedef _SftpListDirC = Pointer<_NativeSftpDirList> Function(Pointer<Void> session, Pointer<Utf8> path);
-typedef _SftpListDirDart = Pointer<_NativeSftpDirList> Function(Pointer<Void> session, Pointer<Utf8> path);
+typedef _SftpListDirC = Pointer<_NativeSftpDirList> Function(Pointer<Void> session, Pointer<Utf8> path, Int32 timeoutMs, Pointer<Int32> status);
+typedef _SftpListDirDart = Pointer<_NativeSftpDirList> Function(Pointer<Void> session, Pointer<Utf8> path, int timeoutMs, Pointer<Int32> status);
 typedef _SftpFreeDirListC = Void Function(Pointer<Void> list);
 typedef _SftpFreeDirListDart = void Function(Pointer<Void> list);
 typedef _SftpReadC = Int32 Function(Pointer<Void> file, Int64 offset, Pointer<Uint8> buffer, Int32 length, Int32 timeoutMs);
