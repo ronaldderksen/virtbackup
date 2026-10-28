@@ -26,3 +26,17 @@ The top-level directory inside the archive remains `virtbackup-<version>`.
 ## Excluded
 
 - Top-level `assets/` in the project root is not included in the distribution.
+
+## User service host binding
+
+The Linux and macOS user-service installers bind startup to the full hostname
+reported by `hostname` when installing. Re-run the installer on the intended
+host after changing its hostname or intentionally moving the installation.
+Manual execution of `virtbackup-agent` is independent of this service binding.
+
+Linux uses systemd `ConditionHost` (requires systemd 244 or newer), so a mismatched
+host skips the service before log rotation or agent startup. macOS generates a
+host-checking shell launcher beside the LaunchAgent plist. A mismatched host
+exits successfully; `KeepAlive.SuccessfulExit=false` restarts failures without
+restarting the rejected launch. A clean agent exit is also not restarted.
+The macOS uninstaller removes the generated launcher as well as the plist.

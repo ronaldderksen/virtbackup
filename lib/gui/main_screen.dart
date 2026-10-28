@@ -19,6 +19,7 @@ import 'package:virtbackup/common/settings.dart';
 import 'package:virtbackup/common/virtbackup_account_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:virtbackup/gui/agent_api_client.dart';
+import 'package:virtbackup/gui/storage_dropdown.dart';
 
 part 'settings_tab.dart';
 part 'manage_tab.dart';
@@ -718,7 +719,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       _isLoadingAgentSettings = false;
     }
     _selectedBackupStorageId = (await _loadSelectedStorageIdFromPrefs()) ?? _agentSettings.backupStorageId;
-    _ensureBackupStorageSelection();
     unawaited(_persistSelectedStorageIdToPrefs());
     _backupPathController.text = _agentSettings.backupPath;
     _savedBackupPath = _backupPathController.text.trim();
@@ -1184,32 +1184,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
       result.add(storage);
     }
     return result;
-  }
-
-  void _ensureBackupStorageSelection() {
-    final enabled = _enabledStorages();
-    if (enabled.isEmpty) {
-      _selectedBackupStorageId = null;
-      return;
-    }
-    final currentId = _selectedBackupStorageId?.trim() ?? '';
-    if (currentId.isNotEmpty) {
-      for (final storage in enabled) {
-        if (storage.id == currentId) {
-          return;
-        }
-      }
-    }
-    final preferredId = _agentSettings.backupStorageId?.trim() ?? '';
-    if (preferredId.isNotEmpty) {
-      for (final storage in enabled) {
-        if (storage.id == preferredId) {
-          _selectedBackupStorageId = storage.id;
-          return;
-        }
-      }
-    }
-    _selectedBackupStorageId = enabled.first.id;
   }
 
   void _scheduleAgentReconnect() {
@@ -2957,7 +2931,7 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
   }
 
   Future<void> _saveStorageSettings(List<BackupStorage> storage, {String successMessage = 'Storages saved'}) async {
-    final nextBackupId = _selectedBackupStorageId != null && storage.any((item) => item.id == _selectedBackupStorageId) ? _selectedBackupStorageId : (storage.isEmpty ? null : storage.first.id);
+    final nextBackupId = _selectedBackupStorageId;
     final updated = _agentSettings.copyWith(storage: storage, backupStorageId: nextBackupId);
     await _agentApiClient.updateConfig(updated);
     if (!mounted) {
@@ -2966,7 +2940,6 @@ class _BackupServerSetupScreenState extends State<BackupServerSetupScreen> {
     setState(() {
       _agentSettings = updated;
       _selectedBackupStorageId = nextBackupId;
-      _ensureBackupStorageSelection();
     });
     unawaited(_persistSelectedStorageIdToPrefs());
     _showSnackBarInfo(successMessage);

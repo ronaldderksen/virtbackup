@@ -42,8 +42,8 @@ extension _BackupServerSetupBackupService on _BackupServerSetupScreenState {
       return;
     }
     final storageId = _selectedBackupStorageId?.trim() ?? '';
-    if (storageId.isEmpty) {
-      _showSnackBarError('Select a storage first.');
+    if (storageId.isEmpty || !_enabledStorages().any((storage) => storage.id == storageId)) {
+      _showSnackBarError('Select an available storage first.');
       return;
     }
     try {

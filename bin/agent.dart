@@ -2,11 +2,24 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:virtbackup/agent/http_server.dart';
+import 'package:virtbackup/agent/instance_lock.dart';
 import 'package:virtbackup/agent/settings_store.dart';
 import 'package:virtbackup/agent/backup_host.dart';
 import 'package:virtbackup/common/log_writer.dart';
 
 Future<void> main(List<String> _) async {
+  AgentInstanceLock? instanceLock;
+  var loggingConfigured = false;
+  final startupMessages = <String>[];
+  void lockMessage(String message) {
+    if (loggingConfigured) {
+      LogWriter.logAgentSync(level: 'info', message: message);
+    } else {
+      stderr.writeln(message);
+      startupMessages.add(message);
+    }
+  }
+
   await runZonedGuarded(
     () async {
       final host = BackupAgentHost();
@@ -14,10 +27,9 @@ Future<void> main(List<String> _) async {
       try {
         settingsStore = await AppSettingsStore.fromAgentDefaultPath();
       } catch (error, stackTrace) {
-        _logInfo('Failed to resolve settings path. $error');
-        _logInfo(stackTrace.toString());
-        exit(1);
+        Error.throwWithStackTrace(StateError('Failed to resolve settings path: $error'), stackTrace);
       }
+      instanceLock = AgentInstanceLock.acquire(settingsFile: settingsStore.file, onMessage: lockMessage);
       final loadedSettings = await settingsStore.load();
       await LogWriter.configureSourcePath(
         source: 'agent',
@@ -25,6 +37,11 @@ Future<void> main(List<String> _) async {
       );
       LogWriter.configureSourceLevel(source: 'agent', level: loadedSettings.logLevel);
       await LogWriter.rotateSource('agent');
+      loggingConfigured = true;
+      for (final message in startupMessages) {
+        LogWriter.logAgentSync(level: 'info', message: message);
+      }
+      startupMessages.clear();
       _logInfo('Settings file: ${settingsStore.file.path}');
       if (!await settingsStore.file.exists()) {
         _logInfo('Settings file not found.');
@@ -46,6 +63,15 @@ Future<void> main(List<String> _) async {
         } catch (error) {
           _logInfo('Shutdown error: $error');
         } finally {
+          try {
+            instanceLock?.release();
+          } catch (error) {
+            stderr.writeln('Agent lock cleanup failed: $error');
+            if (loggingConfigured) LogWriter.logAgentSync(level: 'error', message: 'Agent lock cleanup failed: $error');
+            await stderr.flush();
+            exit(1);
+          }
+          await stderr.flush();
           exit(0);
         }
       }
@@ -55,9 +81,15 @@ Future<void> main(List<String> _) async {
 
       await Future<void>.delayed(const Duration(days: 3650));
     },
-    (error, stackTrace) {
-      _logInfo('Unhandled async error: $error');
-      _logInfo(stackTrace.toString());
+    (error, stackTrace) async {
+      stderr.writeln('Agent stopped: $error');
+      if (loggingConfigured) {
+        LogWriter.logAgentSync(level: 'error', message: 'Unhandled agent error: $error');
+        LogWriter.logAgentSync(level: 'debug', message: stackTrace.toString());
+      }
+      // Keep ownership on abnormal termination until this PID has exited.
+      // A subsequent startup on this host can then reclaim the stale lock.
+      await stderr.flush();
       exit(1);
     },
     zoneSpecification: ZoneSpecification(

@@ -28,6 +28,43 @@ Key modules under `lib/agent`:
 
 ## Data Flow Summary
 
+### Agent instance lock
+
+Before loading or migrating `agent.yaml`, the agent acquires `agent.lock` in the
+same directory. Its JSON contains `version`, `hostname`, `pid` and a unique
+ownership `token`. The configuration path is resolved normally; there is no
+alternative lock location.
+
+- An existing lock from another hostname blocks startup. Its PID is never
+  checked locally and the lock is never removed automatically.
+- A lock from the current hostname also blocks startup while its PID exists.
+  Permission-denied PID checks preserve the lock. A reused PID is treated as
+  running, even if it belongs to another program.
+- Only a same-host PID confirmed absent is reclaimed. The agent reports the
+  removed stale lock and then continues startup. Unreadable or invalid lock
+  metadata blocks startup and requires manual inspection.
+- Clean SIGINT/SIGTERM shutdown releases the lock after jobs and storage have
+  stopped. Abnormal termination retains it until a later startup confirms the
+  recorded PID has exited. Cleanup verifies the ownership token and never
+  removes a replacement owner's lock.
+
+Lock publication uses a flushed temporary file and an atomic hard link on the
+same filesystem, including ownership verification after an ambiguous NFS LINK
+response. A persistent empty `agent.lock.guard` coordinates startup and shutdown
+with a nonblocking filesystem record lock, preventing competing local processes
+from both reclaiming a stale lock. The guard is not an active-agent marker and
+is deliberately not deleted. Do not delete either file while agents may be
+starting, stopping or running. Filesystems must support hard links and file
+locking; errors stop startup instead of selecting another locking mechanism.
+Temporary `.agent-lock-*` directories are removed after publication; an abrupt
+crash before publication can leave an unused temporary directory.
+
+Startup refusal and stale-lock removal are written directly to stderr, including
+before logging has been configured. Accepted startup notices are also recorded
+in the agent log at `info` after configuration is loaded. Fatal agent errors are
+logged at `error` once the log is configured. Service stderr is captured by the
+installer's host-specific service log.
+
 ### Backup
 
 1. API call: `POST /servers/{id}/backup` (preferred: `storageId` in body to select one configured storage; legacy `driverId` + `driverParams` are still accepted for compatibility).

@@ -333,10 +333,10 @@ extension _BackupServerSetupRestoreSection on _BackupServerSetupScreenState {
               Row(
                 children: [
                   Expanded(
-                    child: DropdownButtonFormField<String>(
-                      initialValue: selectedRestoreStorageId,
+                    child: StorageDropdown(
+                      selectedId: _selectedBackupStorageId,
+                      storages: restoreStorages,
                       decoration: const InputDecoration(labelText: 'Storage', prefixIcon: Icon(Icons.cloud_queue_outlined), border: OutlineInputBorder()),
-                      items: restoreStorages.map((storage) => DropdownMenuItem<String>(value: storage.id, child: Text('${storage.name} (${storage.driverId})'))).toList(),
                       onChanged: _isPreparingRestore || _isRestoring
                           ? null
                           : (value) {

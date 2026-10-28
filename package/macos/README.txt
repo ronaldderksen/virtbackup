@@ -23,6 +23,12 @@ This creates a LaunchAgent in:
 
   ~/Library/LaunchAgents/com.virtbackup.agent.plist
 
+The installer also creates com.virtbackup.agent.sh in that directory. This
+launcher records the full installation hostname and starts the agent only when
+the current hostname matches. A mismatch exits successfully without restarting;
+agent failures are restarted by launchd. After renaming the host, run the installer
+again on the intended host to update the binding. Uninstall removes both files.
+
 Run
 ---
 - Start the GUI:

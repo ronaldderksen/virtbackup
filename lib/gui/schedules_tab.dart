@@ -682,10 +682,11 @@ extension _BackupServerSetupScheduleSection on _BackupServerSetupScreenState {
                           },
                         ),
                         const SizedBox(height: 12),
-                        DropdownButtonFormField<String>(
-                          initialValue: storageId,
+                        StorageDropdown(
+                          selectedId: storageId,
+                          storages: storageOptions,
+                          showDriverId: false,
                           decoration: _scheduleDecoration(context, labelText: 'Storage', invalid: invalidFields.contains('storage')),
-                          items: storageOptions.map((storage) => DropdownMenuItem(value: storage.id, child: Text(storage.name))).toList(),
                           onChanged: (value) {
                             updateDialog(() {
                               storageId = value;

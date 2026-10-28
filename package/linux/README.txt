@@ -23,6 +23,11 @@ This creates and starts the systemd user service:
 
   ~/.config/systemd/user/virtbackup-agent.service
 
+The service records the full installation hostname with ConditionHost and only
+starts on that hostname. A shared home directory does not start this service on
+other hosts. After renaming the host, run the installer again on the intended
+host to update the binding. This requires systemd 244 or newer.
+
 Run
 ---
 - Start the GUI:

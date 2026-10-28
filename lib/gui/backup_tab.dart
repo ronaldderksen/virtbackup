@@ -28,10 +28,10 @@ extension _BackupServerSetupBackupSection on _BackupServerSetupScreenState {
                         },
                 ),
                 const SizedBox(height: 16),
-                DropdownButtonFormField<String>(
-                  initialValue: _selectedBackupStorageId,
+                StorageDropdown(
+                  selectedId: _selectedBackupStorageId,
+                  storages: _enabledStorages(),
                   decoration: const InputDecoration(labelText: 'Storage', prefixIcon: Icon(Icons.cloud_queue_outlined), border: OutlineInputBorder()),
-                  items: _enabledStorages().map((storage) => DropdownMenuItem<String>(value: storage.id, child: Text('${storage.name} (${storage.driverId})'))).toList(),
                   onChanged: _isBackupRunning
                       ? null
                       : (value) {

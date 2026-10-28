@@ -12,15 +12,36 @@ if [ ! -x "$AGENT_PATH" ]; then
   exit 1
 fi
 
+INSTALL_HOST="$(hostname)"
+if [[ ! "$INSTALL_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+  echo "Cannot bind service to an invalid or empty hostname: $INSTALL_HOST" >&2
+  exit 1
+fi
+
 LOG_DIR="$BIN_DIR/log"
 mkdir -p "$LOG_DIR"
-SHORT_HOST="$(hostname -s 2>/dev/null || hostname)"
+SHORT_HOST="${INSTALL_HOST%%.*}"
 LOG_PATH="$LOG_DIR/virtbackup-agent-${SHORT_HOST}.log"
 ROTATE_SCRIPT="$BIN_DIR/rotate_agent_logs.sh"
 
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$PLIST_DIR/${LABEL}.plist"
 mkdir -p "$PLIST_DIR"
+
+LAUNCHER_PATH="$PLIST_DIR/${LABEL}.sh"
+{
+  printf '#!/usr/bin/env bash\nset -euo pipefail\n\n'
+  printf 'INSTALL_HOST=%q\nAGENT_PATH=%q\n\n' "$INSTALL_HOST" "$AGENT_PATH"
+  cat <<'LAUNCHER'
+CURRENT_HOST="$(hostname)"
+if [ "$CURRENT_HOST" != "$INSTALL_HOST" ]; then
+  echo "Agent not started: installed for host $INSTALL_HOST, current host is $CURRENT_HOST." >&2
+  exit 0
+fi
+exec "$AGENT_PATH"
+LAUNCHER
+} > "$LAUNCHER_PATH"
+chmod 700 "$LAUNCHER_PATH"
 
 cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -31,12 +52,16 @@ cat > "$PLIST_PATH" <<PLIST
   <string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${AGENT_PATH}</string>
+    <string>/bin/bash</string>
+    <string>${LAUNCHER_PATH}</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>StandardOutPath</key>
   <string>${LOG_PATH}</string>
   <key>StandardErrorPath</key>
@@ -57,4 +82,4 @@ if [ -x "$ROTATE_SCRIPT" ]; then
 fi
 launchctl kickstart -k gui/${USER_UID}/${LABEL}
 
-echo "Installed and started launchd agent: $LABEL"
+echo "Installed and started launchd agent: $LABEL (host: $INSTALL_HOST)"
