@@ -616,7 +616,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
           nativeView.setRange(0, chunkLength, data, offset);
           final timeoutMs = _remainingCallTimeoutMs(transferStopwatch);
           if (timeoutMs <= 0) {
-            throw _SftpOperationTimeout(label, transferStopwatch.elapsed);
+            throw TimeoutException('SFTP operation exceeded its transfer deadline.', _callTimeout);
           }
           final wrote = bindings.write(file, buffer, chunkLength, timeoutMs);
           if (wrote != chunkLength) {
@@ -695,7 +695,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
         }
         final timeoutMs = _remainingCallTimeoutMs(transferStopwatch);
         if (timeoutMs <= 0) {
-          throw _SftpOperationTimeout(label, transferStopwatch.elapsed);
+          throw TimeoutException('SFTP operation exceeded its transfer deadline.', _callTimeout);
         }
         final read = bindings.read(file, currentOffset, buffer, toRead, timeoutMs);
         if (read < 0) {
@@ -709,6 +709,10 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
       }
     } catch (error) {
       invalidateLease = _isRetryable(error);
+      if (error is TimeoutException) {
+        _logTimeout(label, transferStopwatch.elapsed);
+        throw _SftpOperationTimeout(label, transferStopwatch.elapsed, cause: error);
+      }
       rethrow;
     } finally {
       if (file != null && file != nullptr) {
@@ -758,7 +762,7 @@ class SftpBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirectoryL
           }
           final timeoutMs = _remainingCallTimeoutMs(transferStopwatch);
           if (timeoutMs <= 0) {
-            throw _SftpOperationTimeout(label, transferStopwatch.elapsed);
+            throw TimeoutException('SFTP operation exceeded its transfer deadline.', _callTimeout);
           }
           final read = bindings.read(file, offset, buffer, toRead, timeoutMs);
           if (read < 0) {
@@ -1181,11 +1185,19 @@ class _NativeSftpBindings {
   }
 
   int read(Pointer<Void> file, int offset, Pointer<Uint8> buffer, int length, int timeoutMs) {
-    return _read(file, offset, buffer, length, timeoutMs);
+    final result = _read(file, offset, buffer, length, timeoutMs);
+    if (result == -9) {
+      throw TimeoutException('Native SFTP read timed out after ${timeoutMs}ms.');
+    }
+    return result;
   }
 
   int write(Pointer<Void> file, Pointer<Uint8> buffer, int length, int timeoutMs) {
-    return _write(file, buffer, length, timeoutMs);
+    final result = _write(file, buffer, length, timeoutMs);
+    if (result == -9) {
+      throw TimeoutException('Native SFTP write timed out after ${timeoutMs}ms.');
+    }
+    return result;
   }
 
   void closeFile(Pointer<Void> file) {

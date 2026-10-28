@@ -62,6 +62,14 @@ Key modules under `lib/agent`:
 11. Restore writes disks to `<target>.inprogress` paths first. After upload and size checks, the worker renames the restored disks to their final XML paths, rebases restored chains, and defines the VM. Directory creation, file removal, VM stop/undefine, rebase, and define commands must report a successful SSH exit status; failures stop the job.
 12. Full checks report job state `failure` when any blob hash differs from its manifest. Quick checks report `failure` when blobs are missing.
 
+### Transfer deadlines and job identity
+
+- Native SFTP reads and writes enforce the supplied timeout with a monotonic deadline across the complete native call. Both repeated socket waits and continuing partial progress count against this budget. Failed transfers discard partial results and abort the socket before cleanup. The SFTP storage driver logs timeouts at `error`, discards the session, and retries on a fresh connection with `warn` retry logs. Stream retries resume at the last successfully delivered offset.
+- Google Drive directory requests and other API requests each have a 30-second deadline covering headers and the complete response body. This includes downloads, upload session creation, upload data, folder creation, deletion and token refresh. Expiry aborts the request and logs an error; downloads and metadata operations follow their existing retry policy. Download timeout retries preserve the shared HTTP client so other requests can continue. Upload errors propagate to the caller; backup blob writes use the writer worker's existing retry policy and discard the failed upload client.
+- Each job ID combines its creation timestamp, an agent-local sequence and the job type. Jobs started within the same millisecond retain independent status, cancellation controls and log files. Existing job log names remain readable.
+- Scheduled startup polling cannot overlap. Account refresh triggers share an in-flight request, and late responses cannot replace credentials changed during the request.
+- Backup/restore concurrency per VM uses the target server ID together with the VM name. Global and per-storage limits still apply across servers.
+
 ### Events
 
 - `GET /events` provides SSE for VM lifecycle changes and job events.

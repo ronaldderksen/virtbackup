@@ -50,7 +50,6 @@ static const int VB_SHA256_HEX_LENGTH = 65;
 
 static double now_seconds(void);
 static int wait_socket_ready_for(vb_sftp_session *sess, int timeout_ms);
-static int transfer_remaining_ms(double deadline);
 static int sftp_last_error(vb_sftp_session *sess);
 static void hex_encode(const unsigned char *src, int src_len, char *dst);
 
@@ -115,18 +114,6 @@ static int wait_socket_ready_for(vb_sftp_session *sess, int timeout_ms) {
   if (rc > 0) return 0;
   if (rc == 0) return LIBSSH2_ERROR_TIMEOUT;
   return errno == EINTR ? LIBSSH2_ERROR_EAGAIN : LIBSSH2_ERROR_SOCKET_RECV;
-}
-
-static int transfer_remaining_ms(double deadline) {
-  double remaining = deadline - now_seconds();
-  if (remaining <= 0.0) {
-    return 0;
-  }
-  int remaining_ms = (int)(remaining * 1000.0);
-  if (remaining_ms <= 0) {
-    return 1;
-  }
-  return remaining_ms;
 }
 
 static int sftp_last_error(vb_sftp_session *sess) {
@@ -480,7 +467,7 @@ int vb_sftp_remove(void *session_ptr, const char *path) {
 
 void vb_sftp_free_dir_list(void *list_ptr);
 
-static long long directory_now_ms(void) {
+static long long sftp_now_ms(void) {
   struct timespec now;
   if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
     return -1;
@@ -488,8 +475,8 @@ static long long directory_now_ms(void) {
   return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
-static int directory_check_deadline(long long deadline, int *status) {
-  long long now = directory_now_ms();
+static int sftp_check_deadline(long long deadline, int *status) {
+  long long now = sftp_now_ms();
   if (now < 0) {
     *status = LIBSSH2_ERROR_INVAL;
     return 0;
@@ -501,12 +488,12 @@ static int directory_check_deadline(long long deadline, int *status) {
   return 1;
 }
 
-static int directory_wait(vb_sftp_session *sess, long long deadline, int *status) {
+static int sftp_wait(vb_sftp_session *sess, long long deadline, int *status) {
   while (1) {
-    if (!directory_check_deadline(deadline, status)) {
+    if (!sftp_check_deadline(deadline, status)) {
       return 0;
     }
-    long long now = directory_now_ms();
+    long long now = sftp_now_ms();
     if (now < 0) {
       *status = LIBSSH2_ERROR_INVAL;
       return 0;
@@ -525,7 +512,7 @@ static int directory_wait(vb_sftp_session *sess, long long deadline, int *status
       *status = rc;
       return 0;
     }
-    return directory_check_deadline(deadline, status);
+    return sftp_check_deadline(deadline, status);
   }
 }
 
@@ -543,7 +530,7 @@ void *vb_sftp_listdir_timed(void *session_ptr, const char *path, int timeout_ms,
   if (!session_ptr || !path || timeout_ms <= 0) {
     return NULL;
   }
-  long long started = directory_now_ms();
+  long long started = sftp_now_ms();
   if (started < 0) {
     return NULL;
   }
@@ -557,7 +544,7 @@ void *vb_sftp_listdir_timed(void *session_ptr, const char *path, int timeout_ms,
   libssh2_session_set_blocking(sess->session, 0);
 
   while (1) {
-    if (!directory_check_deadline(deadline, status)) {
+    if (!sftp_check_deadline(deadline, status)) {
       goto failed;
     }
     dir = libssh2_sftp_opendir(sess->sftp, path);
@@ -570,7 +557,7 @@ void *vb_sftp_listdir_timed(void *session_ptr, const char *path, int timeout_ms,
       *status = directory_error(sess, error);
       goto failed;
     }
-    if (!directory_wait(sess, deadline, status)) {
+    if (!sftp_wait(sess, deadline, status)) {
       goto failed;
     }
   }
@@ -587,7 +574,7 @@ void *vb_sftp_listdir_timed(void *session_ptr, const char *path, int timeout_ms,
   }
 
   while (1) {
-    if (!directory_check_deadline(deadline, status)) {
+    if (!sftp_check_deadline(deadline, status)) {
       goto failed;
     }
     char name[1024];
@@ -595,7 +582,7 @@ void *vb_sftp_listdir_timed(void *session_ptr, const char *path, int timeout_ms,
     memset(&attrs, 0, sizeof(attrs));
     int rc = libssh2_sftp_readdir_ex(dir, name, sizeof(name), NULL, 0, &attrs);
     if (rc == LIBSSH2_ERROR_EAGAIN) {
-      if (!directory_wait(sess, deadline, status)) {
+      if (!sftp_wait(sess, deadline, status)) {
         goto failed;
       }
       continue;
@@ -633,12 +620,12 @@ void *vb_sftp_listdir_timed(void *session_ptr, const char *path, int timeout_ms,
   }
 
   while (1) {
-    if (!directory_check_deadline(deadline, status)) {
+    if (!sftp_check_deadline(deadline, status)) {
       goto failed;
     }
     int rc = libssh2_sftp_closedir(dir);
     if (rc == LIBSSH2_ERROR_EAGAIN) {
-      if (!directory_wait(sess, deadline, status)) {
+      if (!sftp_wait(sess, deadline, status)) {
         goto failed;
       }
       continue;
@@ -649,7 +636,7 @@ void *vb_sftp_listdir_timed(void *session_ptr, const char *path, int timeout_ms,
       *status = directory_error(sess, rc);
       goto failed;
     }
-    if (!directory_check_deadline(deadline, status)) {
+    if (!sftp_check_deadline(deadline, status)) {
       goto failed;
     }
     break;
@@ -692,64 +679,61 @@ void vb_sftp_free_dir_list(void *list_ptr) {
   free(list);
 }
 
-int vb_sftp_read(void *file_ptr, long long offset, unsigned char *buffer, int length, int timeout_ms) {
-  if (!file_ptr || !buffer || length <= 0 || timeout_ms <= 0) {
-    return -1;
+/* A failed transfer poisons the session: discard partial data and abort the
+   socket before Dart closes the handle and retries with a fresh connection. */
+static int sftp_transfer(vb_sftp_file *file, unsigned char *buffer, int length, int timeout_ms, int writing) {
+  if (!file || !file->sess || !file->sess->session || !buffer || length <= 0 || timeout_ms <= 0) {
+    return LIBSSH2_ERROR_INVAL;
   }
+  long long started = sftp_now_ms();
+  if (started < 0) return LIBSSH2_ERROR_INVAL;
+  long long deadline = started + timeout_ms;
+  vb_sftp_session *sess = file->sess;
+  int original_blocking = libssh2_session_get_blocking(sess->session);
+  libssh2_session_set_blocking(sess->session, 0);
+  int total = 0;
+  int status = 0;
+  while (total < length) {
+    if (!sftp_check_deadline(deadline, &status)) goto failed;
+    ssize_t n = writing
+        ? libssh2_sftp_write(file->handle, (const char *)buffer + total, length - total)
+        : libssh2_sftp_read(file->handle, (char *)buffer + total, length - total);
+    if (!sftp_check_deadline(deadline, &status)) goto failed;
+    if (n == LIBSSH2_ERROR_EAGAIN || (writing && n == 0)) {
+      if (!sftp_wait(sess, deadline, &status)) goto failed;
+      continue;
+    }
+    if (n < 0) {
+      status = (int)n;
+      goto failed;
+    }
+    if (n == 0) break;
+    if (writing && file->write_sha256_ctx && EVP_DigestUpdate(file->write_sha256_ctx, buffer + total, (size_t)n) != 1) {
+      status = LIBSSH2_ERROR_INVAL;
+      goto failed;
+    }
+    total += (int)n;
+  }
+  libssh2_session_set_blocking(sess->session, original_blocking);
+  return total;
+failed:
+  shutdown(sess->sock, SHUT_RDWR);
+  return status;
+}
+
+int vb_sftp_read(void *file_ptr, long long offset, unsigned char *buffer, int length, int timeout_ms) {
+  if (!file_ptr || offset < 0) return LIBSSH2_ERROR_INVAL;
   vb_sftp_file *file = (vb_sftp_file *)file_ptr;
   if (file->last_offset != offset) {
     libssh2_sftp_seek64(file->handle, (libssh2_uint64_t)offset);
   }
-  int total = 0;
-  while (total < length) {
-    ssize_t n = libssh2_sftp_read(file->handle, (char *)buffer + total, length - total);
-    if (n < 0) {
-      if (total > 0) {
-        break;
-      }
-      return -1;
-    }
-    if (n == 0) {
-      break;
-    }
-    total += (int)n;
-  }
-  file->last_offset = offset + (long long)total;
-  return total;
+  int read = sftp_transfer(file, buffer, length, timeout_ms, 0);
+  if (read >= 0) file->last_offset = offset + (long long)read;
+  return read;
 }
 
 int vb_sftp_write(void *file_ptr, const unsigned char *buffer, int length, int timeout_ms) {
-  if (!file_ptr || !buffer || length <= 0 || timeout_ms <= 0) {
-    return -1;
-  }
-  vb_sftp_file *file = (vb_sftp_file *)file_ptr;
-  if (!file->sess || !file->sess->session) {
-    return -1;
-  }
-  LIBSSH2_SESSION *session = file->sess->session;
-  libssh2_session_set_blocking(session, 0);
-  int total = 0;
-  while (total < length) {
-    ssize_t n = libssh2_sftp_write(file->handle, (const char *)buffer + total, length - total);
-    if (n == LIBSSH2_ERROR_EAGAIN || n == 0) {
-      if (wait_socket_ready_for(file->sess, VB_SFTP_TIMEOUT_MS) != 0) {
-        libssh2_session_set_blocking(session, 1);
-        return total > 0 ? total : -1;
-      }
-      continue;
-    }
-    if (n < 0) {
-      libssh2_session_set_blocking(session, 1);
-      return total > 0 ? total : -1;
-    }
-    if (file->write_sha256_ctx && EVP_DigestUpdate(file->write_sha256_ctx, buffer + total, (size_t)n) != 1) {
-      libssh2_session_set_blocking(session, 1);
-      return total > 0 ? total : -1;
-    }
-    total += (int)n;
-  }
-  libssh2_session_set_blocking(session, 1);
-  return total;
+  return sftp_transfer((vb_sftp_file *)file_ptr, (unsigned char *)buffer, length, timeout_ms, 1);
 }
 
 int vb_sftp_file_sha256_hex(void *file_ptr, char *out_hex, int out_len) {

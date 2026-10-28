@@ -65,6 +65,9 @@ class AgentHttpServer {
   final Map<String, String> _waitingScheduleRuns = <String, String>{};
   late final Map<String, BackupDriverInfo> _driverCatalog = _buildDriverCatalog();
   GdriveBackupDriver? _cachedGdriveDriver;
+  bool _schedulePollRunning = false;
+  Future<void>? _accountRefreshInFlight;
+  int _nextJobSequence = 0;
   Timer? _scheduleTimer;
   Timer? _accountRefreshTimer;
   String _agentToken = '';
@@ -177,27 +180,35 @@ class AgentHttpServer {
   }
 
   Future<void> _runDueSchedules() async {
-    final now = DateTime.now();
-    for (final entry in Map<String, String>.from(_waitingScheduleRuns).entries) {
-      final schedule = _scheduleById(entry.key);
-      final manualRun = _scheduleRunKeyIsManual(entry.value);
-      if (schedule == null || (!manualRun && !schedule.enabled) || !schedule.waitForRunningJobs || !_scheduleRunKeyIsRecent(entry.value, now)) {
-        _waitingScheduleRuns.remove(entry.key);
-        continue;
-      }
-      await _tryStartScheduledRun(schedule, entry.value, fromWaitingQueue: true, allowDisabled: manualRun);
+    if (_schedulePollRunning) {
+      return;
     }
-    for (final schedule in _agentSettings.schedules) {
-      if (!schedule.enabled || !_scheduleIsDue(schedule, now)) {
-        continue;
+    _schedulePollRunning = true;
+    try {
+      final now = DateTime.now();
+      for (final entry in Map<String, String>.from(_waitingScheduleRuns).entries) {
+        final schedule = _scheduleById(entry.key);
+        final manualRun = _scheduleRunKeyIsManual(entry.value);
+        if (schedule == null || (!manualRun && !schedule.enabled) || !schedule.waitForRunningJobs || !_scheduleRunKeyIsRecent(entry.value, now)) {
+          _waitingScheduleRuns.remove(entry.key);
+          continue;
+        }
+        await _tryStartScheduledRun(schedule, entry.value, fromWaitingQueue: true, allowDisabled: manualRun);
       }
-      final runKey = _scheduleRunKey(schedule, now);
-      if (_completedScheduleRuns.contains(runKey) || _waitingScheduleRuns[schedule.id] == runKey) {
-        continue;
+      for (final schedule in _agentSettings.schedules) {
+        if (!schedule.enabled || !_scheduleIsDue(schedule, now)) {
+          continue;
+        }
+        final runKey = _scheduleRunKey(schedule, now);
+        if (_completedScheduleRuns.contains(runKey) || _waitingScheduleRuns[schedule.id] == runKey) {
+          continue;
+        }
+        await _tryStartScheduledRun(schedule, runKey, fromWaitingQueue: false, allowDisabled: false);
       }
-      await _tryStartScheduledRun(schedule, runKey, fromWaitingQueue: false, allowDisabled: false);
+      _completedScheduleRuns.removeWhere((key) => !_scheduleRunKeyIsRecent(key, now));
+    } finally {
+      _schedulePollRunning = false;
     }
-    _completedScheduleRuns.removeWhere((key) => !_scheduleRunKeyIsRecent(key, now));
   }
 
   Future<void> _tryStartScheduledRun(ScheduledJob schedule, String runKey, {required bool fromWaitingQueue, required bool allowDisabled}) async {
@@ -663,11 +674,11 @@ class AgentHttpServer {
     if (validationError != null && validationError.isNotEmpty) {
       throw StateError(validationError);
     }
-    final guardMessage = _jobStartGuardMessage(type: AgentJobType.backup, vmName: vm.name, storageId: storage.storage.id);
+    final guardMessage = _jobStartGuardMessage(serverId: server.id, type: AgentJobType.backup, vmName: vm.name, storageId: storage.storage.id);
     if (guardMessage != null) {
       throw _JobGuardRejected(guardMessage);
     }
-    final jobId = _createJob(AgentJobType.backup, vmName: vm.name, storageId: storage.storage.id, scheduleId: schedule.id, scheduleRunId: scheduleRunId);
+    final jobId = _createJob(AgentJobType.backup, serverId: server.id, vmName: vm.name, storageId: storage.storage.id, scheduleId: schedule.id, scheduleRunId: scheduleRunId);
     _hostLog('Schedule "${schedule.name}" starting backup job $jobId for ${vm.name}.');
     _startBackupJob(jobId, server, vm, backupPath, driverIdOverride: storage.driverId, driverParams: storage.driverParams, storage: storage);
     return jobId;
@@ -675,7 +686,7 @@ class AgentHttpServer {
 
   void _failScheduledBackupVmStart(ScheduledJob schedule, String vmName, String message) {
     final storage = _resolveStorageById(schedule.storageId);
-    final jobId = _createJob(AgentJobType.backup, vmName: vmName, storageId: schedule.storageId, scheduleId: schedule.id);
+    final jobId = _createJob(AgentJobType.backup, serverId: schedule.serverId, vmName: vmName, storageId: schedule.storageId, scheduleId: schedule.id);
     final server = _serverById(schedule.serverId);
     _setJobContext(jobId, source: server == null ? vmName : _formatJobSource(server, vmName), storageLabel: storage?.storage.name);
     final current = _jobs[jobId];
@@ -702,11 +713,11 @@ class AgentHttpServer {
       throw StateError('restore schedule requires restoreDecision');
     }
     final vmName = _extractVmNameFromXmlPath(xmlPath);
-    final guardMessage = _jobStartGuardMessage(type: AgentJobType.restore, vmName: vmName, storageId: storage.storage.id);
+    final guardMessage = _jobStartGuardMessage(serverId: server.id, type: AgentJobType.restore, vmName: vmName, storageId: storage.storage.id);
     if (guardMessage != null) {
       throw _JobGuardRejected(guardMessage);
     }
-    final jobId = _createJob(AgentJobType.restore, vmName: vmName, storageId: storage.storage.id, scheduleId: schedule.id, scheduleRunId: scheduleRunId);
+    final jobId = _createJob(AgentJobType.restore, serverId: server.id, vmName: vmName, storageId: storage.storage.id, scheduleId: schedule.id, scheduleRunId: scheduleRunId);
     _hostLog('Schedule "${schedule.name}" starting restore job $jobId.');
     _startRestoreJob(jobId, server, xmlPath, schedule.restoreDecision, storage: storage, driverIdOverride: storage.driverId);
     return jobId;
@@ -936,11 +947,11 @@ class AgentHttpServer {
       throw StateError('restore schedule requires restoreDecision');
     }
     final vmName = _extractVmNameFromXmlPath(normalizedXmlPath);
-    final guardMessage = _jobStartGuardMessage(type: AgentJobType.restore, vmName: vmName, storageId: storage.storage.id);
+    final guardMessage = _jobStartGuardMessage(serverId: server.id, type: AgentJobType.restore, vmName: vmName, storageId: storage.storage.id);
     if (guardMessage != null) {
       throw _JobGuardRejected(guardMessage);
     }
-    final jobId = _createJob(AgentJobType.restore, vmName: vmName, storageId: storage.storage.id, scheduleId: schedule.id, scheduleRunId: scheduleRunId);
+    final jobId = _createJob(AgentJobType.restore, serverId: server.id, vmName: vmName, storageId: storage.storage.id, scheduleId: schedule.id, scheduleRunId: scheduleRunId);
     _hostLog('Schedule "${schedule.name}" starting restore job $jobId for $normalizedXmlPath.');
     _startRestoreJob(jobId, server, normalizedXmlPath, schedule.restoreDecision, storage: storage, driverIdOverride: storage.driverId);
     return jobId;
@@ -965,7 +976,7 @@ class AgentHttpServer {
 
   void _failScheduledRestoreXmlStart(ScheduledJob schedule, String xmlPath, String message) {
     final storage = _resolveStorageById(schedule.storageId);
-    final jobId = _createJob(AgentJobType.restore, vmName: _extractVmNameFromXmlPath(xmlPath), storageId: schedule.storageId, scheduleId: schedule.id);
+    final jobId = _createJob(AgentJobType.restore, serverId: schedule.serverId, vmName: _extractVmNameFromXmlPath(xmlPath), storageId: schedule.storageId, scheduleId: schedule.id);
     _setJobContext(jobId, source: xmlPath, storageLabel: storage?.storage.name);
     final current = _jobs[jobId];
     if (current == null) {
@@ -1022,7 +1033,7 @@ class AgentHttpServer {
 
   void _failScheduledRestoreVmStart(ScheduledJob schedule, String vmName, String message) {
     final storage = _resolveStorageById(schedule.storageId);
-    final jobId = _createJob(AgentJobType.restore, vmName: vmName, storageId: schedule.storageId, scheduleId: schedule.id);
+    final jobId = _createJob(AgentJobType.restore, serverId: schedule.serverId, vmName: vmName, storageId: schedule.storageId, scheduleId: schedule.id);
     final server = _serverById(schedule.serverId);
     _setJobContext(jobId, source: server == null ? vmName : _formatJobSource(server, vmName), storageLabel: storage?.storage.name);
     final current = _jobs[jobId];
@@ -1243,7 +1254,29 @@ class AgentHttpServer {
     }
   }
 
-  Future<void> _maybeRefreshVirtBackupAccount() async {
+  Future<void> _maybeRefreshVirtBackupAccount() {
+    final pending = _accountRefreshInFlight;
+    if (pending != null) {
+      return pending;
+    }
+    final refresh = _refreshVirtBackupAccountIfDue();
+    _accountRefreshInFlight = refresh;
+    return refresh.whenComplete(() {
+      _accountRefreshInFlight = null;
+    });
+  }
+
+  bool _accountTokensStillCurrent(VirtBackupAccountTokens previous) {
+    final current = _agentSettings.virtBackupAccount;
+    return current.accountBaseUrl == previous.accountBaseUrl &&
+        current.email == previous.email &&
+        current.accessToken == previous.accessToken &&
+        current.refreshToken == previous.refreshToken &&
+        current.accessTokenExpiresAt == previous.accessTokenExpiresAt &&
+        current.refreshTokenExpiresAt == previous.refreshTokenExpiresAt;
+  }
+
+  Future<void> _refreshVirtBackupAccountIfDue() async {
     final account = _agentSettings.virtBackupAccount;
     if (!account.isConnected || account.accessTokenExpiresAt == null || account.refreshTokenExpiresAt == null || account.accountBaseUrl.trim().isEmpty) {
       return;
@@ -1269,18 +1302,28 @@ class AgentHttpServer {
         'Refreshing Virt Backup account token for ${account.email}; access expires at ${_formatLocalLogTime(accessExpiresAt)}, refresh token expires at ${_formatLocalLogTime(account.refreshTokenExpiresAt)}.',
       );
       final refreshed = await _refreshVirtBackupAccount(account);
+      if (!_accountTokensStillCurrent(account)) {
+        _hostLog('Discarding account refresh result because the account credentials changed.');
+        return;
+      }
       final updated = _agentSettings.copyWith(virtBackupAccount: refreshed);
       await _applyAgentSettings(updated, reason: 'virtbackup-account-refresh', forceRestartSshListeners: false);
       _hostLog(
         'Virt Backup account token refreshed for ${refreshed.email}; next access expiry ${_formatLocalLogTime(refreshed.accessTokenExpiresAt)}, refresh expiry ${_formatLocalLogTime(refreshed.refreshTokenExpiresAt)}.',
       );
     } on _VirtBackupAccountRefreshRejected catch (error) {
+      if (!_accountTokensStillCurrent(account)) {
+        _hostLog('Discarding account refresh rejection because the account credentials changed.');
+        return;
+      }
       _hostLog('Virt Backup account refresh rejected: ${error.message}; clearing stored account tokens.');
       final updated = _agentSettings.copyWith(virtBackupAccount: VirtBackupAccountTokens.empty());
       await _applyAgentSettings(updated, reason: 'virtbackup-account-rejected', forceRestartSshListeners: false);
     } catch (error, stackTrace) {
       _hostLogError('Virt Backup account refresh failed.', error, stackTrace);
-      _scheduleVirtBackupAccountRefreshRetry();
+      if (_accountTokensStillCurrent(account)) {
+        _scheduleVirtBackupAccountRefreshRetry();
+      }
     }
   }
 
@@ -1893,12 +1936,12 @@ class AgentHttpServer {
           _json(request, 400, {'error': validationError});
           return;
         }
-        final guardMessage = _jobStartGuardMessage(type: AgentJobType.backup, vmName: vmName, storageId: resolvedStorage.storage.id);
+        final guardMessage = _jobStartGuardMessage(serverId: server.id, type: AgentJobType.backup, vmName: vmName, storageId: resolvedStorage.storage.id);
         if (guardMessage != null) {
           _json(request, 409, {'error': guardMessage});
           return;
         }
-        final jobId = _createJob(AgentJobType.backup, vmName: vmName, storageId: resolvedStorage.storage.id);
+        final jobId = _createJob(AgentJobType.backup, serverId: server.id, vmName: vmName, storageId: resolvedStorage.storage.id);
         _json(request, 200, AgentJobStart(jobId: jobId).toMap());
         _startBackupJob(
           jobId,
@@ -2036,12 +2079,12 @@ class AgentHttpServer {
           return;
         }
         final restoreVmName = _extractVmNameFromXmlPath(xmlPath);
-        final guardMessage = _jobStartGuardMessage(type: AgentJobType.restore, vmName: restoreVmName, storageId: resolvedStorage.storage.id);
+        final guardMessage = _jobStartGuardMessage(serverId: server.id, type: AgentJobType.restore, vmName: restoreVmName, storageId: resolvedStorage.storage.id);
         if (guardMessage != null) {
           _json(request, 409, {'error': guardMessage});
           return;
         }
-        final jobId = _createJob(AgentJobType.restore, vmName: restoreVmName, storageId: resolvedStorage.storage.id);
+        final jobId = _createJob(AgentJobType.restore, serverId: server.id, vmName: restoreVmName, storageId: resolvedStorage.storage.id);
         _json(request, 200, AgentJobStart(jobId: jobId).toMap());
         _startRestoreJob(jobId, server, xmlPath, decision, driverIdOverride: resolvedDriverId, storage: resolvedStorage);
         return;
@@ -2981,7 +3024,7 @@ class AgentHttpServer {
     final localOldXml = File('${tempDir.path}${Platform.pathSeparator}${_sanitizeFileName(vmName)}-rollback.xml');
     final remoteXml = '/var/tmp/virtbackup/rename-${_sanitizeFileName(newVmName)}.xml';
     final remoteOldXml = '/var/tmp/virtbackup/rename-${_sanitizeFileName(vmName)}-rollback.xml';
-    final undefineCommand = oldXml.contains(RegExp(r'<nvram(?:\s|>)')) ? 'virsh undefine ${_shellQuote(vmName)} --nvram' : 'virsh undefine ${_shellQuote(vmName)}';
+    final undefineCommand = oldXml.contains(RegExp(r'<nvram(?:\s|>)')) ? 'virsh undefine ${_shellQuote(vmName)} --keep-nvram' : 'virsh undefine ${_shellQuote(vmName)}';
     var oldVmUndefined = false;
     try {
       for (final move in moves) {
@@ -3272,8 +3315,8 @@ class AgentHttpServer {
     return "'${value.replaceAll("'", "'\"'\"'")}'";
   }
 
-  String _createJob(AgentJobType type, {String? vmName, String? storageId, String? scheduleId, String? scheduleRunId}) {
-    final jobId = '${DateTime.now().millisecondsSinceEpoch}-${type.name}';
+  String _createJob(AgentJobType type, {String? serverId, String? vmName, String? storageId, String? scheduleId, String? scheduleRunId}) {
+    final jobId = '${DateTime.now().millisecondsSinceEpoch}-${_nextJobSequence++}-${type.name}';
     final normalizedScheduleRunId = scheduleRunId?.trim() ?? '';
     _jobs[jobId] = AgentJobStatus(
       id: jobId,
@@ -3299,11 +3342,11 @@ class AgentHttpServer {
       vmName: vmName?.trim() ?? '',
       storageId: storageId?.trim() ?? '',
     );
-    _jobControls[jobId] = _JobControl(startedAt: DateTime.now(), vmName: vmName, storageId: storageId, scheduleRunId: normalizedScheduleRunId);
+    _jobControls[jobId] = _JobControl(startedAt: DateTime.now(), serverId: serverId, vmName: vmName, storageId: storageId, scheduleRunId: normalizedScheduleRunId);
     return jobId;
   }
 
-  String? _jobStartGuardMessage({required AgentJobType type, required String vmName, required String storageId}) {
+  String? _jobStartGuardMessage({required AgentJobType type, required String serverId, required String vmName, required String storageId}) {
     if (!_usesBackupRestoreGuards(type)) {
       return null;
     }
@@ -3315,7 +3358,7 @@ class AgentHttpServer {
 
     final normalizedVmName = vmName.trim();
     if (normalizedVmName.isNotEmpty) {
-      final activeForVm = running.where((entry) => _jobControls[entry.key]?.vmName == normalizedVmName).length;
+      final activeForVm = running.where((entry) => _jobControls[entry.key]?.serverId == serverId.trim() && _jobControls[entry.key]?.vmName == normalizedVmName).length;
       final maxPerVm = _agentSettings.maxConcurrentJobsPerVm;
       if (activeForVm >= maxPerVm) {
         return 'Maximum concurrent jobs for VM "$normalizedVmName" reached ($maxPerVm).';
@@ -5366,9 +5409,13 @@ class AgentHttpServer {
 }
 
 class _JobControl {
-  _JobControl({required this.startedAt, String? vmName, String? storageId, required this.scheduleRunId}) : vmName = vmName?.trim(), storageId = storageId?.trim();
+  _JobControl({required this.startedAt, String? serverId, String? vmName, String? storageId, required this.scheduleRunId})
+    : serverId = serverId?.trim(),
+      vmName = vmName?.trim(),
+      storageId = storageId?.trim();
 
   final DateTime startedAt;
+  final String? serverId;
   final String? vmName;
   final String? storageId;
   final String scheduleRunId;

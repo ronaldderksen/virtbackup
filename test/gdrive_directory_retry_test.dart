@@ -21,7 +21,9 @@ class _LocalDriveClient extends http.BaseClient {
     final abortTrigger = (request as http.Abortable).abortTrigger!;
     unawaited(abortTrigger.then((_) => aborted++));
     final localUri = request.url.replace(scheme: 'http', host: server.address.address, port: server.port);
-    final forwarded = http.AbortableRequest(request.method, localUri, abortTrigger: abortTrigger)..headers.addAll(request.headers);
+    final forwarded = http.AbortableRequest(request.method, localUri, abortTrigger: abortTrigger)
+      ..headers.addAll(request.headers)
+      ..bodyBytes = (request as http.Request).bodyBytes;
     return _inner.send(forwarded);
   }
 
@@ -44,6 +46,22 @@ void main() {
   test('closing connections during a stalled directory request stops without retry', () async {
     await _exerciseTimeout(stallBody: false, alwaysStall: true, cancel: true);
   });
+  for (final stallBody in [false, true]) {
+    test('a download timeout aborts ${stallBody ? 'the response body' : 'the header wait'}, logs and retries', () async {
+      await _exerciseMediaTimeout(stallBody: stallBody, alwaysStall: false, cancel: false, operation: 'download');
+    });
+  }
+  test('exhausted download timeouts fail instead of returning partial data', () async {
+    await _exerciseMediaTimeout(stallBody: false, alwaysStall: true, cancel: false, operation: 'download');
+  });
+  test('closing connections cancels a stalled download without retry', () async {
+    await _exerciseMediaTimeout(stallBody: false, alwaysStall: true, cancel: true, operation: 'download');
+  });
+  for (final operation in ['upload-session', 'upload-data']) {
+    test('$operation timeout aborts, logs and allows a subsequent upload attempt', () async {
+      await _exerciseMediaTimeout(stallBody: false, alwaysStall: false, cancel: false, operation: operation);
+    });
+  }
 }
 
 Future<void> _exerciseTimeout({required bool stallBody, required bool alwaysStall, required bool cancel}) async {
@@ -152,6 +170,135 @@ Future<void> _exerciseTimeout({required bool stallBody, required bool alwaysStal
       expect(log, contains('retry=1/5 delayMs=0'));
     } else {
       expect(log, isNot(contains('retrying after error')));
+    }
+  } finally {
+    await driver.closeConnections();
+    for (final response in responses) {
+      try {
+        await response.close();
+      } catch (_) {
+        /* The timed-out client already disconnected. */
+      }
+    }
+    await subscription.cancel();
+    await server.close(force: true);
+    await root.delete(recursive: true);
+  }
+}
+
+Future<void> _exerciseMediaTimeout({required bool stallBody, required bool alwaysStall, required bool cancel, required String operation}) async {
+  final root = await Directory.systemTemp.createTemp('virtbackup-media-retry-');
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  final clients = <_LocalDriveClient>[];
+  final stalled = Completer<void>();
+  final responses = <HttpResponse>[];
+  var attempts = 0;
+  final subscription = server.listen((request) async {
+    final uploadSession = request.method == 'POST';
+    final uploadData = request.method == 'PUT';
+    final download = request.uri.queryParameters['alt'] == 'media';
+    if (uploadSession || uploadData) {
+      final body = await utf8.decoder.bind(request).join();
+      if (uploadSession) {
+        expect(jsonDecode(body)['name'], 'test.manifest');
+      } else {
+        expect(body, 'complete data');
+      }
+    }
+    final target = switch (operation) {
+      'download' => download,
+      'upload-session' => uploadSession,
+      'upload-data' => uploadData,
+      _ => throw StateError('Unknown operation $operation'),
+    };
+    if (target) {
+      attempts++;
+      if (alwaysStall || attempts == 1) {
+        responses.add(request.response);
+        if (stallBody) {
+          request.response.write('incomplete');
+          await request.response.flush();
+        }
+        if (!stalled.isCompleted) stalled.complete();
+        return;
+      }
+    }
+    if (download) {
+      request.response.write('complete data');
+    } else if (uploadSession) {
+      request.response.headers.set('location', 'https://www.googleapis.com/upload/session');
+    } else if (uploadData) {
+      request.response.write('{"id":"uploaded"}');
+    } else {
+      final query = request.uri.queryParameters['q']!;
+      final folder = query.startsWith("mimeType='");
+      request.response.write(
+        jsonEncode({
+          'files': [
+            {
+              'id': folder ? 'app' : 'file',
+              'name': folder ? 'VirtBackup' : 'test.manifest',
+              'parents': ['root'],
+            },
+          ],
+        }),
+      );
+    }
+    await request.response.close();
+  });
+  final storage = BackupStorage(
+    id: 'drive',
+    name: 'Drive',
+    driverId: 'gdrive',
+    enabled: true,
+    params: {'rootPath': '/', 'accessToken': 'test-token', 'expiresAt': '2099-01-01T00:00:00Z'},
+    uploadConcurrency: 8,
+    downloadConcurrency: 8,
+  );
+  final driver = GdriveBackupDriver(
+    settings: AppSettings.empty().copyWith(backupPath: root.path, logLevel: 'debug', storage: [storage], backupStorageId: storage.id),
+    persistSettings: (_, _) async => fail('No token refresh expected.'),
+    createApiClient: () {
+      final client = _LocalDriveClient(server);
+      clients.add(client);
+      return client;
+    },
+    apiRequestTimeout: const Duration(milliseconds: 300),
+    retryBaseDelay: Duration.zero,
+  );
+  try {
+    await driver.ensureReady();
+    if (operation != 'download') {
+      final file = await File('${root.path}/upload').writeAsString('complete data');
+      await expectLater(driver.uploadFile(relativePath: 'test.manifest', localFile: file), throwsA(isA<TimeoutException>()));
+      await driver.uploadFile(relativePath: 'test.manifest', localFile: file);
+      expect(attempts, 2);
+      expect(clients.fold<int>(0, (sum, client) => sum + client.aborted), 1);
+    } else {
+      final download = driver.readFileBytes('test.manifest');
+      if (cancel) {
+        final failure = expectLater(download, throwsA(contains('storage connection was closed')));
+        await stalled.future;
+        await driver.closeConnections();
+        await failure;
+        expect(attempts, 1);
+      } else if (alwaysStall) {
+        await expectLater(download, throwsA(contains('failed after retry')));
+        expect(attempts, 6);
+        expect(clients.single.aborted, 6);
+      } else {
+        expect(await download, 'complete data'.codeUnits);
+        expect(attempts, 2);
+        expect(clients.single.aborted, 1);
+      }
+      expect(clients.length, 1, reason: 'A timed-out download must not close other requests on the shared client.');
+    }
+    final log = await File('${root.path}/VirtBackup/logs/agent.log').readAsString();
+    if (!cancel) {
+      expect(log, contains('level=error message=driver=gdrive gdrive: api request failed action=${operation == 'download' ? 'download' : 'upload'}'));
+      expect(log, contains('TimeoutException'));
+      expect(log, contains('request aborted'));
+      if (operation == 'download') expect(log, contains('level=warn message=driver=gdrive gdrive: download file retrying after error:'));
     }
   } finally {
     await driver.closeConnections();

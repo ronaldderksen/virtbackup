@@ -124,7 +124,7 @@ Response:
 }
 ```
 
-The agent schedules refresh at roughly two-thirds of the access-token lifetime. Reusing an already rotated refresh token revokes the session.
+The agent schedules refresh at roughly two-thirds of the access-token lifetime. Concurrent refresh triggers share one in-flight request. A refresh response or rejection is discarded if the account credentials changed while the request was pending, including disconnects. Unrelated settings edits are preserved when refreshed tokens are saved. Reusing an already rotated refresh token revokes the session.
 
 ## Account Logout
 
@@ -304,8 +304,8 @@ schedules:
 ```
 
 `GET /config` and `POST /config` still use the flat schedule list for the current agent.
-The agent checks enabled schedules every 30 seconds and starts matching backup or restore jobs at the configured local agent time.
-Backup and restore starts are guarded by `maxConcurrentBackupRestoreJobs`, `maxConcurrentJobsPerVm`, and `maxConcurrentJobsPerStorage`. All three are stored in `agent.yaml`, default to `1`, and also apply to manual schedule runs. When a due schedule is blocked by a guard, the agent records a failed job and sends the configured job result notifications.
+The agent checks enabled schedules every 30 seconds and starts matching backup or restore jobs at the configured local agent time. Scheduler rounds do not overlap, including rounds triggered by settings updates, so a pending startup cannot start the same scheduled execution twice.
+Backup and restore starts are guarded by `maxConcurrentBackupRestoreJobs`, `maxConcurrentJobsPerVm`, and `maxConcurrentJobsPerStorage`. All three are stored in `agent.yaml`, default to `1`, and also apply to manual schedule runs. The per-VM guard identifies a VM by target server ID and VM name; equal VM names on different servers do not share this limit. When a due schedule is blocked by a guard, the agent records a failed job and sends the configured job result notifications.
 Backup fails before creating its own snapshot when an existing snapshot or overlay indicates cleanup is required, regardless of whether the job was started manually, via API, or by a schedule. Backup also checks disk backing chains before creating its own snapshot. With the hidden root setting `requireSimpleDisksForBackup: true`, backing chains fail the backup because only simple disks are currently supported. Multiple simple disks are allowed. Set `requireSimpleDisksForBackup: false` in `agent.yaml` only to bypass the backing-chain guard; it does not allow backups while cleanup is required.
 After a successful snapshot commit, the agent scans VM disk directories for `.virtbackup-` overlay files and removes only files that are no longer referenced by the VM and have no open users according to `lsof`.
 
@@ -615,7 +615,7 @@ Body:
 }
 ```
 
-The agent rechecks the stopped state, snapshots, checkpoints, backing chains, source disk paths, target VM name, target disk paths, and XML references before applying. Disk directories cannot be changed; only the file name part is accepted.
+The agent rechecks the stopped state, snapshots, checkpoints, backing chains, source disk paths, target VM name, target disk paths, and XML references before applying. Disk directories cannot be changed; only the file name part is accepted. UEFI renames use `virsh undefine --keep-nvram`, preserving the existing NVRAM file for both the renamed definition and rollback.
 
 ### Cleanup overlays
 

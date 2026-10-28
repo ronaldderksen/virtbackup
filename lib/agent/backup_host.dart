@@ -1471,11 +1471,19 @@ class _NativeSftpBindings {
   }
 
   int read(Pointer<Void> file, int offset, Pointer<Uint8> buffer, int length, int timeoutMs) {
-    return _read(file, offset, buffer, length, timeoutMs);
+    final result = _read(file, offset, buffer, length, timeoutMs);
+    if (result == -9) {
+      throw TimeoutException('Native SFTP read timed out after ${timeoutMs}ms.');
+    }
+    return result;
   }
 
   int write(Pointer<Void> file, Pointer<Uint8> buffer, int length, int timeoutMs) {
-    return _write(file, buffer, length, timeoutMs);
+    final result = _write(file, buffer, length, timeoutMs);
+    if (result == -9) {
+      throw TimeoutException('Native SFTP write timed out after ${timeoutMs}ms.');
+    }
+    return result;
   }
 
   String fileSha256Hex(Pointer<Void> file) {

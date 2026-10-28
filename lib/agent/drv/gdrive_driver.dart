@@ -12,14 +12,6 @@ import 'package:virtbackup/common/google_oauth_client.dart';
 import 'package:virtbackup/common/models.dart' show BackupStorage;
 import 'package:virtbackup/common/settings.dart';
 
-class GdrivePrefillStats {
-  const GdrivePrefillStats({required this.shardCount, required this.blobCount, required this.durationMs});
-
-  final int shardCount;
-  final int blobCount;
-  final int durationMs;
-}
-
 class _PermanentGdriveConfigError implements Exception {
   _PermanentGdriveConfigError(this.message);
 
@@ -52,12 +44,14 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     Directory? settingsDir,
     void Function(String message)? logInfo,
     http.Client Function() createApiClient = _createDefaultApiClient,
+    Duration apiRequestTimeout = const Duration(seconds: 30),
     Duration directoryRequestTimeout = const Duration(seconds: 30),
     Duration retryBaseDelay = const Duration(seconds: 2),
   }) : _settings = settings,
        _createApiClient = createApiClient,
        _client = createApiClient(),
        _directoryRequestTimeout = directoryRequestTimeout,
+       _apiRequestTimeout = apiRequestTimeout,
        _retryBaseDelay = retryBaseDelay,
        _persistSettings = persistSettings,
        _settingsDir = settingsDir,
@@ -66,6 +60,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   final http.Client Function() _createApiClient;
   final Duration _directoryRequestTimeout;
+  final Duration _apiRequestTimeout;
   final Duration _retryBaseDelay;
   final Directory? _settingsDir;
   GoogleOAuthInstalledClient? _oauthClient;
@@ -94,7 +89,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   int _inFlightUploads = 0;
   String? _blobsRootId;
   String? _resolvedDriveRootId;
-  void Function(GdrivePrefillStats stats, bool done)? onPrefillProgress;
 
   static Directory _cacheRootForSettings(AppSettings settings) {
     final basePath = settings.backupPath.trim();
@@ -147,10 +141,6 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
 
   @override
   int get bufferedBytes => 0;
-
-  final GdrivePrefillStats _prefillStats = const GdrivePrefillStats(shardCount: 0, blobCount: 0, durationMs: 0);
-
-  GdrivePrefillStats get prefillStats => _prefillStats;
 
   Future<GoogleOAuthInstalledClient> _ensureOAuthClient() async {
     final existing = _oauthClient;
@@ -652,7 +642,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         target: _folderDisplayPath(parentId, name),
         method: 'POST',
         uri: uri,
-        send: () => _client.post(uri, headers: _authHeaders(token)..['Content-Type'] = 'application/json', body: body),
+        send: () => _sendApiRequest(_client, 'POST', uri, headers: _authHeaders(token)..['Content-Type'] = 'application/json', body: body),
       );
       if (response.statusCode >= 300) {
         throw _driveApiException(action: 'folder create', response: response);
@@ -791,7 +781,9 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
           detail: 'session',
           method: 'POST',
           uri: uri,
-          send: () => lease.client.post(
+          send: () => _sendApiRequest(
+            lease.client,
+            'POST',
             uri,
             headers: headers,
             body: jsonEncode({
@@ -812,7 +804,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
           detail: 'data',
           method: 'PUT',
           uri: sessionUri,
-          send: () => lease.client.put(sessionUri, headers: headers, body: bytes),
+          send: () => _sendApiRequest(lease.client, 'PUT', sessionUri, headers: headers, body: bytes),
         );
       }
 
@@ -869,7 +861,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         target: _displayPathForId(fileId),
         method: 'GET',
         uri: uri,
-        send: () => _client.get(uri, headers: headers),
+        send: () => _sendApiRequest(_client, 'GET', uri, headers: headers),
       );
       if (response.statusCode >= 300) {
         _logInfo('gdrive: downloadFile request headers=${_redactHeaders(headers)}');
@@ -939,7 +931,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         detail: forced ? 'forced' : null,
         method: 'POST',
         uri: uri,
-        send: () => _client.post(uri, headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: body),
+        send: () => _sendApiRequest(_client, 'POST', uri, headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: body),
       );
       if (response.statusCode >= 300) {
         throw 'Token refresh failed: ${response.statusCode} ${response.body}';
@@ -1060,7 +1052,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         target: relativePath,
         method: 'DELETE',
         uri: uri,
-        send: () => _client.delete(uri, headers: _authHeaders(token)),
+        send: () => _sendApiRequest(_client, 'DELETE', uri, headers: _authHeaders(token)),
       );
       if (response.statusCode == 401) {
         token = await _refreshAccessToken();
@@ -1071,7 +1063,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
           detail: 'retry-auth',
           method: 'DELETE',
           uri: uri,
-          send: () => _client.delete(uri, headers: _authHeaders(token)),
+          send: () => _sendApiRequest(_client, 'DELETE', uri, headers: _authHeaders(token)),
         );
       }
       if (response.statusCode == 404) {
@@ -1153,7 +1145,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
         await _logGdriveWarning(retryMessage);
         if (onRetry != null) {
           onRetry();
-        } else if (resetClientOnRetry) {
+        } else if (resetClientOnRetry && error is! TimeoutException) {
           _resetHttpClient();
         }
         await Future.any(<Future<void>>[Future.delayed(delay), _connectionsClosed.future]);
@@ -1211,18 +1203,35 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
     return delay;
   }
 
-  Future<http.Response> _sendDirectoryRequest(Uri uri, {required Map<String, String> headers}) async {
+  Future<http.Response> _sendApiRequest(http.Client client, String method, Uri uri, {required Map<String, String> headers, Object? body}) {
+    return _sendTimedRequest(client, method, uri, headers: headers, body: body, timeout: _apiRequestTimeout, label: 'API');
+  }
+
+  Future<http.Response> _sendDirectoryRequest(Uri uri, {required Map<String, String> headers}) {
+    return _sendTimedRequest(_client, 'GET', uri, headers: headers, timeout: _directoryRequestTimeout, label: 'directory');
+  }
+
+  Future<http.Response> _sendTimedRequest(http.Client client, String method, Uri uri, {required Map<String, String> headers, required Duration timeout, required String label, Object? body}) async {
     final abort = Completer<void>();
-    final request = http.AbortableRequest('GET', uri, abortTrigger: abort.future)..headers.addAll(headers);
+    final request = http.AbortableRequest(method, uri, abortTrigger: abort.future)..headers.addAll(headers);
+    if (body is String) {
+      request.body = body;
+    } else if (body is List<int>) {
+      request.bodyBytes = body;
+    } else if (body is Map<String, String>) {
+      request.bodyFields = body;
+    } else if (body != null) {
+      throw ArgumentError.value(body, 'body', 'Unsupported HTTP request body.');
+    }
     final response = () async {
-      final streamed = await _client.send(request);
+      final streamed = await client.send(request);
       return http.Response.fromStream(streamed);
     }();
     return response.timeout(
-      _directoryRequestTimeout,
+      timeout,
       onTimeout: () {
         abort.complete();
-        throw TimeoutException('Google Drive directory request exceeded ${_directoryRequestTimeout.inMilliseconds}ms; request aborted', _directoryRequestTimeout);
+        throw TimeoutException('Google Drive $label request exceeded ${timeout.inMilliseconds}ms; request aborted', timeout);
       },
     );
   }
@@ -1313,7 +1322,7 @@ class GdriveBackupDriver implements BackupDriver, RemoteBlobDriver, BlobDirector
   }
 
   Future<_UploadClientLease> _leaseUploadClient() async {
-    return _uploadClientPool.lease(() => IOClient(_createHttpClient()));
+    return _uploadClientPool.lease(_createApiClient);
   }
 }
 

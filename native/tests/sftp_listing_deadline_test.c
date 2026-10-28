@@ -3,6 +3,11 @@
 #define clock_gettime test_clock_gettime
 #define select test_select
 #define shutdown test_shutdown
+#define libssh2_sftp_mkdir_ex test_sftp_mkdir_ex
+#define libssh2_sftp_rename_ex test_sftp_rename_ex
+#define libssh2_sftp_read test_sftp_read
+#define libssh2_sftp_write test_sftp_write
+#define libssh2_sftp_seek64 test_sftp_seek64
 #define libssh2_sftp_open_ex test_sftp_open_ex
 #define libssh2_sftp_readdir_ex test_sftp_readdir_ex
 #define libssh2_sftp_close_handle test_sftp_close_handle
@@ -40,6 +45,42 @@ static int missing_on_read;
 static int connections;
 static int disconnections;
 static int fake_handle;
+static int fake_file_handle;
+static int transfer_mode;
+static int transfer_stall;
+static int transfer_delay;
+static int transfer_offset;
+static int transfer_error;
+static int transfer_zero_write;
+
+int test_sftp_mkdir_ex(LIBSSH2_SFTP *sftp, const char *path, unsigned int length, long mode) {
+  (void)sftp; (void)path; (void)length; (void)mode; return 0;
+}
+int test_sftp_rename_ex(LIBSSH2_SFTP *sftp, const char *from, unsigned int from_len, const char *to, unsigned int to_len, long flags) {
+  (void)sftp; (void)from; (void)from_len; (void)to; (void)to_len; (void)flags; return 0;
+}
+void test_sftp_seek64(LIBSSH2_SFTP_HANDLE *handle, libssh2_uint64_t offset) {
+  (void)handle; transfer_offset = (int)offset;
+}
+ssize_t test_sftp_read(LIBSSH2_SFTP_HANDLE *handle, char *buffer, size_t length) {
+  (void)handle; (void)length;
+  assert(blocking == 0);
+  if (transfer_stall) return LIBSSH2_ERROR_EAGAIN;
+  if (transfer_error) return LIBSSH2_ERROR_SOCKET_RECV;
+  if (transfer_offset >= 4) return 0;
+  test_now += transfer_delay;
+  *buffer = "blob"[transfer_offset++];
+  return 1;
+}
+ssize_t test_sftp_write(LIBSSH2_SFTP_HANDLE *handle, const char *buffer, size_t length) {
+  (void)handle; (void)buffer; (void)length;
+  assert(blocking == 0);
+  if (transfer_stall) return LIBSSH2_ERROR_EAGAIN;
+  if (transfer_error) return LIBSSH2_ERROR_SOCKET_RECV;
+  if (transfer_zero_write) return 0;
+  test_now += transfer_delay;
+  return 1;
+}
 
 int test_clock_gettime(clockid_t clock, struct timespec *now) {
   assert(clock == CLOCK_MONOTONIC);
@@ -68,6 +109,10 @@ int test_select(int nfds, fd_set *reads, fd_set *writes, fd_set *errors, struct 
 
 LIBSSH2_SFTP_HANDLE *test_sftp_open_ex(LIBSSH2_SFTP *sftp, const char *path, unsigned int path_len, unsigned long flags, long mode, int open_type) {
   (void)sftp; (void)path; (void)path_len; (void)flags; (void)mode; (void)open_type;
+  if (open_type == LIBSSH2_SFTP_OPENFILE) {
+    transfer_offset = 0;
+    return (LIBSSH2_SFTP_HANDLE *)&fake_file_handle;
+  }
   assert(blocking == 0);
   if (missing_on_open) { last_error = LIBSSH2_ERROR_SFTP_PROTOCOL; sftp_status = LIBSSH2_FX_NO_SUCH_FILE; return NULL; }
   if (opening_again || open_stall) { last_error = LIBSSH2_ERROR_EAGAIN; return NULL; }
@@ -90,7 +135,7 @@ int test_sftp_readdir_ex(LIBSSH2_SFTP_HANDLE *handle, char *buffer, size_t capac
 }
 
 int test_sftp_close_handle(LIBSSH2_SFTP_HANDLE *handle) {
-  (void)handle;
+  if (handle == (LIBSSH2_SFTP_HANDLE *)&fake_file_handle) return 0;
   assert(blocking == 0);
   if (close_stall && !aborted) return LIBSSH2_ERROR_EAGAIN;
   assert(!closed);
@@ -117,15 +162,18 @@ void *vb_sftp_connect(const char *host, int port, const char *user, const char *
   vb_sftp_session *session = malloc(sizeof(*session));
   *session = test_session();
   blocking = 1; aborted = 0; opened = 0; closed = 0; read_count = 0;
-  open_stall = connections == 1;
+  open_stall = !transfer_mode && connections == 1;
+  transfer_stall = transfer_mode && connections == 1;
   total_entries = 1;
   return session;
 }
 void vb_sftp_disconnect(void *session) { disconnections++; free(session); }
+void vb_test_transfer_mode(int mode) { transfer_mode = mode; }
 int vb_test_connection_count(void) { return connections; }
 int vb_test_disconnection_count(void) { return disconnections; }
 #else
 static void reset(void) {
+  transfer_stall = 0; transfer_delay = 0; transfer_offset = 0; transfer_error = 0; transfer_zero_write = 0;
   test_now = 0; blocking = 1; last_error = 0; sftp_status = 0;
   aborted = 0; opened = 0; closed = 0; read_count = 0;
   total_entries = 2; entry_delay = 2; opening_again = 0;
@@ -177,7 +225,35 @@ int main(void) {
   assert(status == LIBSSH2_ERROR_INVAL && !opened);
   assert(!vb_sftp_listdir_timed(&session, "/invalid", 0, &status));
   assert(status == LIBSSH2_ERROR_INVAL);
-  puts("12 native SFTP listing deadline scenarios passed");
+  vb_sftp_file file = {0};
+  file.sess = &session;
+  file.handle = (LIBSSH2_SFTP_HANDLE *)&fake_file_handle;
+  unsigned char buffer[8] = {0};
+  for (int writing = 0; writing <= 1; writing++) {
+    reset(); transfer_delay = 1;
+    int result = writing ? vb_sftp_write(&file, buffer, 4, 30) : vb_sftp_read(&file, 0, buffer, 4, 30);
+    assert(result == 4 && test_now == 4 && blocking == 1 && !aborted);
+    reset(); transfer_delay = 2;
+    result = writing ? vb_sftp_write(&file, buffer, 4, 5) : vb_sftp_read(&file, 0, buffer, 4, 5);
+    assert(result == LIBSSH2_ERROR_TIMEOUT && test_now == 6 && aborted == 1 && blocking == 0);
+    reset(); transfer_stall = 1; interrupt_once = 1;
+    result = writing ? vb_sftp_write(&file, buffer, 4, 30) : vb_sftp_read(&file, 0, buffer, 4, 30);
+    assert(result == LIBSSH2_ERROR_TIMEOUT && test_now == 30 && aborted == 1);
+    reset(); transfer_error = 1;
+    result = writing ? vb_sftp_write(&file, buffer, 4, 30) : vb_sftp_read(&file, 0, buffer, 4, 30);
+    assert(result == LIBSSH2_ERROR_SOCKET_RECV && aborted == 1);
+    reset(); clock_error = 1;
+    result = writing ? vb_sftp_write(&file, buffer, 4, 30) : vb_sftp_read(&file, 0, buffer, 4, 30);
+    assert(result == LIBSSH2_ERROR_INVAL && !aborted && blocking == 1);
+  }
+  reset(); transfer_zero_write = 1;
+  assert(vb_sftp_write(&file, buffer, 4, 30) == LIBSSH2_ERROR_TIMEOUT && aborted == 1);
+  reset(); file.last_offset = -1;
+  assert(vb_sftp_read(&file, 0, buffer, 8, 30) == 4 && blocking == 1 && !aborted);
+  reset(); blocking = 0;
+  assert(vb_sftp_write(&file, buffer, 4, 30) == 4 && blocking == 0);
+  assert(vb_sftp_read(&file, 0, buffer, 4, 0) == LIBSSH2_ERROR_INVAL);
+  puts("Native SFTP listing and transfer deadline scenarios passed");
   return 0;
 }
 #endif
